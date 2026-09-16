@@ -407,13 +407,6 @@ class Main(Star):
                 resolver = candidate.resolver
                 platform_name = candidate.name
 
-                # 抖音没配 Cookie 时退回通用适配器（原版也有 SSR 免 Cookie 的兜底思路）
-                if candidate.key == "douyin" and not self.cookie_for("douyin"):
-                    if bool(self.conf_get("douyin.douyinEnableSsrBackup", True)):
-                        resolver = "douyin"
-                    else:
-                        resolver = "general"
-
             resolved_any = True
             logger.info(f"[R插件] 解析 {platform_name or resolver}: {url}")
 

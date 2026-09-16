@@ -371,8 +371,7 @@ AUTO_RULES: tuple[PlatformRule, ...] = (
         "抖音",
         r"(?:v|live)\.douyin\.com|webcast\.amemv\.com|iesdouyin\.com|"
         r"www\.douyin\.com/(?:video|note|live|share|jingxuan|discover)",
-        "general",
-        extra={"prefer": "general"},  # 无 Cookie 时降级走通用适配器
+        "douyin",
     ),
     PlatformRule("tiktok", "TikTok", r"(?:www|vt|vm)\.tiktok\.com", "tiktok"),
     PlatformRule(
