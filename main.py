@@ -71,17 +71,20 @@ _AUTO_PATTERN = build_combined_pattern(AUTO_RULES)
 # 命令式规则另拼一条
 _COMMAND_PATTERN = "|".join(f"(?:{r['pattern']})" for r in COMMAND_RULES)
 
-# 平台 key -> 配置里的 Cookie 字段名
+# 平台 key -> 配置里的 Cookie 路径
+#
+# 路径对应 _conf_schema.json 的分组结构：`bili.biliSessData` 指
+# 「哔哩哔哩」分组下的 biliSessData 字段。这些字段名沿用原 Guoba 面板，
+# 所以从 Yunzai 迁过来的用户配置可以原样搬。
 _COOKIE_FIELDS: dict[str, str] = {
-    "bili": "bili_cookie",
-    "weibo": "weibo_cookie",
-    "xiaohongshu": "xiaohongshu_cookie",
-    "douyin": "douyin_cookie",
-    "weixinChannel": "weixin_channel_cookie",
-    "miyoushe": "miyoushe_cookie",
-    "xiaoheihe": "xiaoheihe_cookie",
-    "twitter_x": "x_cookie",
-    "instagram": "instagram_cookie",
+    "bili": "bili.biliSessData",
+    "douyin": "douyin.douyinCookie",
+    "kuaishou": "other.kuaishouCookie",
+    "weibo": "other.weiboCookie",
+    "xiaohongshu": "other.xiaohongshuCookie",
+    "miyoushe": "other.miyousheCookie",
+    "weixinChannel": "other.weixinChannelYuanbaoCookie",
+    "xiaoheihe": "xiaoheihe.xiaoheiheCookie",
 }
 
 
@@ -134,11 +137,20 @@ class Main(Star):
     # ==================================================================
 
     def conf_get(self, key: str, default=None):
-        try:
-            value = self.conf_data.get(key, default)
-        except AttributeError:
-            return default
-        return default if value is None else value
+        """读配置，支持 ``a.b.c`` 形式的嵌套路径。
+
+        配置 schema 是分组的（plugin / global / bili / douyin ...），
+        所以取值要能顺着分组往下走。中途任何一层缺失都回退到默认值，
+        不会因为用户少配了某一组就抛异常。
+        """
+        node = self.conf_data
+        for part in key.split("."):
+            if not isinstance(node, dict):
+                return default
+            node = node.get(part)
+            if node is None:
+                return default
+        return default if node is None else node
 
     def cookie_for(self, platform: str) -> str:
         field = _COOKIE_FIELDS.get(platform)
@@ -168,10 +180,18 @@ class Main(Star):
         return getattr(response, "completion_text", "") or ""
 
     def _enabled_keys(self) -> set[str]:
-        keys = self.conf_get("enabled_platforms", [r.key for r in AUTO_RULES])
+        """启用自动解析的平台集合。"""
+        keys = self.conf_get("plugin.enabled_platforms", [r.key for r in AUTO_RULES])
         if not isinstance(keys, (list, tuple)):
             return {r.key for r in AUTO_RULES}
         return set(keys)
+
+    def _blacklist(self) -> set[str]:
+        """全局解析黑名单（原 Guoba 面板的 globalBlackList，值是中文平台名）。"""
+        raw = self.conf_get("global.globalBlackList", []) or []
+        if not isinstance(raw, (list, tuple)):
+            return set()
+        return {str(x) for x in raw}
 
     # ==================================================================
     # 入口一：自动识别分享链接
@@ -225,10 +245,10 @@ class Main(Star):
         forced_name: str = "",
     ):
         """统一派发：识别平台 -> 调 resolver -> 渲染消息。"""
-        if not self.conf_get("enable", True):
+        if not self.conf_get("plugin.enable", True):
             return
 
-        if self.conf_get("only_group", False) and event.is_private_chat():
+        if self.conf_get("plugin.only_group", False) and event.is_private_chat():
             return
 
         urls = extract_urls(text)
@@ -239,7 +259,8 @@ class Main(Star):
         umo = event.unified_msg_origin
         ctx = _ResolverCtx(self, umo)
         enabled = self._enabled_keys()
-        allow_multiple = bool(self.conf_get("allow_multiple_links", False))
+        blacklist = self._blacklist()
+        allow_multiple = bool(self.conf_get("plugin.allow_multiple_links", False))
 
         resolved_any = False
 
@@ -251,12 +272,18 @@ class Main(Star):
                 candidate: PlatformRule | None = match_rule(url, AUTO_RULES)
                 if not candidate or candidate.key not in enabled:
                     continue
+                if candidate.name in blacklist:
+                    logger.debug(f"[R插件] {candidate.name} 在全局黑名单里，跳过")
+                    continue
                 resolver = candidate.resolver
                 platform_name = candidate.name
 
                 # 抖音没配 Cookie 时退回通用适配器（原版也有 SSR 免 Cookie 的兜底思路）
                 if candidate.key == "douyin" and not self.cookie_for("douyin"):
-                    resolver = "general"
+                    if bool(self.conf_get("douyin.douyinEnableSsrBackup", True)):
+                        resolver = "douyin"
+                    else:
+                        resolver = "general"
 
             resolved_any = True
             logger.info(f"[R插件] 解析 {platform_name or resolver}: {url}")
@@ -266,7 +293,7 @@ class Main(Star):
             if not result.success or not result.has_media:
                 if not result.success:
                     logger.warning(f"[R插件] {result.platform} 解析失败: {result.error}")
-                    if result.error and self.conf_get("reply_on_error", False):
+                    if result.error and self.conf_get("plugin.reply_on_error", False):
                         yield event.plain_result(f"❌ {result.platform}：{result.error}")
                 else:
                     # 拿到了信息但没媒体（比如 B 站限流拿不到直链），把文字情报发出去
@@ -281,7 +308,7 @@ class Main(Star):
                 # 原版每个 handler 处理完就 return，一条消息只解析第一个有效链接
                 break
 
-        if resolved_any and self.conf_get("stop_on_match", True):
+        if resolved_any and self.conf_get("plugin.stop_on_match", True):
             # 顺序要紧：先把结果 yield 出去，再停止事件传播。
             # 反过来的话结果还没进 respond 阶段就被掐了。
             event.stop_event()
@@ -303,20 +330,40 @@ class Main(Star):
 
     async def _render(self, event: AstrMessageEvent, result: ResolveResult):
         """把解析结果渲染成 AstrBot 消息。"""
-        prefix = self.conf_get("identify_prefix", "🔗 识别：")
-        show_desc = self.conf_get("show_desc", True)
-        send_mode = self.conf_get("send_mode", "url")
+        # 识别前缀沿用原 Guoba 面板配置；原版默认空串，这里给个更直观的兜底
+        prefix = str(self.conf_get("global.identifyPrefix", "") or "").strip() or "🔗 识别："
+        show_desc = self.conf_get("plugin.show_desc", True)
+        send_mode = self.conf_get("plugin.send_mode", "url")
 
-        # ---- 视频 ----
+        # ---- 本地视频（B 站 DASH 合并产物）----
+        if result.local_videos:
+            path = result.local_videos[0]
+            # 登记给 AstrBot，事件结束后自动回收
+            event.track_temporary_local_file(path)
+            try:
+                yield event.chain_result([Comp.Video.fromFileSystem(path)])
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[R插件] 发送本地视频失败: {exc}")
+                yield event.plain_result(f"⚠️ {result.platform} 视频发送失败：{exc}")
+
+            if show_desc and (result.title or result.desc):
+                yield event.plain_result(
+                    f"{prefix}{result.platform}\n{(result.title or result.desc)[:300]}"
+                )
+            return
+
+        # ---- 视频直链 ----
         if result.videos:
             video_url = result.videos[0]
             sent = False
 
             if send_mode == "download":
                 try:
-                    max_bytes = int(self.conf_get("max_video_size_mb", 50)) * 1024 * 1024
-                    path = await download_media(video_url, prefix="video", max_bytes=max_bytes)
-                    # 交给 AstrBot 托管，事件结束后自动回收
+                    # 大小上限沿用原 Guoba 面板的 videoSizeLimit（单位 MB）
+                    max_mb = int(self.conf_get("global.videoSizeLimit", 70) or 70)
+                    path = await download_media(
+                        video_url, prefix="video", max_bytes=max_mb * 1024 * 1024
+                    )
                     event.track_temporary_local_file(str(path))
                     yield event.chain_result([Comp.Video.fromFileSystem(str(path))])
                     sent = True
@@ -357,7 +404,7 @@ class Main(Star):
 
         # ---- 图片 ----
         if result.images:
-            limit = max(1, int(self.conf_get("max_images", 9)))
+            limit = max(1, int(self.conf_get("plugin.max_images", 9) or 9))
             picked = result.images[:limit]
 
             chain = []

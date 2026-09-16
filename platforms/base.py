@@ -40,6 +40,12 @@ class ResolveResult:
     videos: list[str] = field(default_factory=list)
     """视频直链，通常 0 或 1 个。"""
 
+    local_videos: list[str] = field(default_factory=list)
+    """本地视频文件路径（例如 B 站 DASH 合并后的 mp4）。
+
+    和 ``videos`` 的区别：这里的是磁盘路径，发送前要登记给 AstrBot 做回收。
+    """
+
     images: list[str] = field(default_factory=list)
     """图片直链列表。"""
 
@@ -56,7 +62,7 @@ class ResolveResult:
 
     @property
     def has_media(self) -> bool:
-        return bool(self.videos or self.images or self.audios)
+        return bool(self.videos or self.local_videos or self.images or self.audios)
 
     @classmethod
     def fail(cls, platform: str, error: str) -> ResolveResult:

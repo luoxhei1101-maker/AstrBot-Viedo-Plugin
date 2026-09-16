@@ -213,7 +213,7 @@ async def resolve_kugou(link: str, ctx: ResolverContext) -> ResolveResult:
     if not _KG_RE.search(link):
         return ResolveResult.fail("酷狗音乐", "不是酷狗链接")
 
-    server = ctx.conf("kugou_api_server", "") or ""
+    server = ctx.conf("other.kugouApiServer", "") or ""
     if not server:
         return not_ported(
             "酷狗音乐",

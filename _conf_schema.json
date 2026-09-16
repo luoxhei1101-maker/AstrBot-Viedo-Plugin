@@ -1,188 +1,1010 @@
 {
-  "enable": {
-    "description": "总开关",
-    "type": "bool",
-    "hint": "关闭后所有链接都不再自动解析",
-    "default": true
+  "plugin": {
+    "description": "插件设置",
+    "type": "object",
+    "hint": "本移植版自己的开关；原版 Guoba 面板里的配置项在下面按平台分组",
+    "items": {
+      "enable": {
+        "description": "总开关",
+        "type": "bool",
+        "hint": "关闭后所有链接都不再自动解析",
+        "default": true
+      },
+      "enabled_platforms": {
+        "description": "启用自动解析的平台",
+        "type": "list",
+        "hint": "只对勾选的平台生效。抖音没配 Cookie 时会自动降级走 SSR / 通用接口",
+        "default": [
+          "douyin",
+          "bili",
+          "general",
+          "weibo",
+          "acfun",
+          "miyoushe",
+          "xiaoheihe",
+          "weishi",
+          "tieba",
+          "jike"
+        ],
+        "options": [
+          "douyin",
+          "bili",
+          "general",
+          "weibo",
+          "acfun",
+          "miyoushe",
+          "xiaoheihe",
+          "weishi",
+          "zuiyou",
+          "tieba",
+          "jike",
+          "netease",
+          "qqMusic",
+          "kugouMusic",
+          "qishuiMusic",
+          "linkShareSummary",
+          "tiktok",
+          "twitter_x",
+          "instagram",
+          "xhs",
+          "sy2b",
+          "bodianMusic",
+          "freyr",
+          "aircraft",
+          "weixinChannel"
+        ],
+        "labels": [
+          "抖音",
+          "哔哩哔哩",
+          "通用（快手/西瓜/皮皮虾/QQ小世界/贴吧/即刻）",
+          "微博",
+          "AcFun",
+          "米游社",
+          "小黑盒",
+          "微视",
+          "最右",
+          "贴吧",
+          "即刻",
+          "网易云音乐",
+          "QQ音乐",
+          "酷狗音乐",
+          "汽水音乐",
+          "AI链接总结",
+          "TikTok",
+          "X(Twitter)",
+          "Instagram",
+          "小红书",
+          "YouTube",
+          "波点音乐",
+          "AppleMusic/Spotify",
+          "Telegram 小飞机",
+          "微信视频号"
+        ]
+      },
+      "parse_endpoints": {
+        "description": "通用解析接口（按顺序尝试，失败自动轮换）",
+        "type": "list",
+        "hint": "URL 模板，用 {} 代表目标链接。接口挂了就把它删掉或排到后面",
+        "default": [
+          "http://47.99.158.118/video-crack/v2/parse?content={}",
+          "https://api.jkyai.top/API/jhspjx.php?url={}",
+          "https://api.yujn.cn/api/pipixia.php?url={}",
+          "https://api.bugpk.com/api/pipixia?url={}"
+        ]
+      },
+      "send_mode": {
+        "description": "视频发送方式",
+        "type": "string",
+        "hint": "url=直接发解析出的地址（快）；download=先下到本地再发（稳，吃内存和流量）",
+        "default": "url",
+        "options": [
+          "url",
+          "download"
+        ],
+        "labels": [
+          "直发链接（快）",
+          "先下载再发（稳）"
+        ]
+      },
+      "max_images": {
+        "description": "单条消息最多发送的图片数量",
+        "type": "int",
+        "hint": "图集类链接可能一次返回几十张图，设个上限避免刷屏",
+        "default": 9
+      },
+      "allow_multiple_links": {
+        "description": "一条消息里解析多个链接",
+        "type": "bool",
+        "hint": "默认只解析第一个命中的链接（与原插件行为一致）",
+        "default": false
+      },
+      "stop_on_match": {
+        "description": "解析成功后阻止消息继续传给 LLM",
+        "type": "bool",
+        "hint": "打开可以避免机器人既发解析结果、又让 AI 多嘴一句",
+        "default": true
+      },
+      "reply_on_error": {
+        "description": "解析失败时回复提示",
+        "type": "bool",
+        "hint": "默认静默失败，避免接口抽风时在群里刷错误信息",
+        "default": false
+      },
+      "only_group": {
+        "description": "只在群聊生效",
+        "type": "bool",
+        "hint": "打开后私聊发链接不解析",
+        "default": false
+      },
+      "show_desc": {
+        "description": "一起发送视频/图片的文字描述",
+        "type": "bool",
+        "default": true
+      },
+      "bili_quality_when_logged_in": {
+        "description": "B站登录后请求的画质",
+        "type": "string",
+        "hint": "配了 SESSDATA 才生效。DASH 音视频分离，会用容器内的 ffmpeg 合并",
+        "default": "1080P",
+        "options": [
+          "360P",
+          "480P",
+          "720P",
+          "1080P",
+          "1080P+",
+          "1080P60",
+          "4K"
+        ]
+      },
+      "bili_merge_with_ffmpeg": {
+        "description": "B站 DASH 音视频用 ffmpeg 合并",
+        "type": "bool",
+        "hint": "关闭则只发视频轨（无声音）。未安装 ffmpeg 时会自动跳过合并",
+        "default": true
+      },
+      "external_tools": {
+        "description": "外部命令搜索路径（可选）",
+        "type": "string",
+        "hint": "留空则从系统 PATH 查找。用于 ffmpeg / yt-dlp / BBDown / aria2c / tdl",
+        "default": ""
+      }
+    }
   },
-  "enabled_platforms": {
-    "description": "启用自动解析的平台",
-    "type": "list",
-    "hint": "只对勾选的平台生效。抖音没配 Cookie 时会自动降级走通用接口",
-    "default": [
-      "douyin",
-      "bili",
-      "general",
-      "weibo",
-      "acfun",
-      "miyoushe",
-      "xiaoheihe",
-      "weishi",
-      "tieba",
-      "jike"
-    ],
-    "options": [
-      "douyin",
-      "tiktok",
-      "bili",
-      "twitter_x",
-      "instagram",
-      "acfun",
-      "xhs",
-      "bodianMusic",
-      "general",
-      "sy2b",
-      "miyoushe",
-      "netease",
-      "weibo",
-      "weishi",
-      "zuiyou",
-      "freyr",
-      "linkShareSummary",
-      "qqMusic",
-      "kugouMusic",
-      "qishuiMusic",
-      "aircraft",
-      "xiaoheihe",
-      "weixinChannel"
-    ]
+  "global": {
+    "description": "全局配置（黑名单、转发阈值、代理等）",
+    "type": "object",
+    "hint": "对应原 Guoba 面板的「全局配置」分组",
+    "items": {
+      "globalBlackList": {
+        "description": "全局解析黑名单",
+        "type": "list",
+        "hint": "添加后将全局禁用",
+        "default": [],
+        "options": [
+          "抖音",
+          "哔哩哔哩",
+          "TikTok",
+          "Twitter",
+          "Instagram",
+          "Acfun",
+          "小红书",
+          "波点",
+          "通用（包含快手等）",
+          "YouTube",
+          "米游社",
+          "网易云音乐",
+          "微博",
+          "微视",
+          "最右",
+          "AM+Spotify",
+          "扣扣音乐",
+          "酷狗音乐",
+          "汽水音乐",
+          "小飞机",
+          "贴吧",
+          "小黑盒",
+          "视频号",
+          "AI总结"
+        ]
+      },
+      "globalImageLimit": {
+        "description": "解析图片是否合并转发",
+        "type": "int",
+        "hint": "超过此数量的图片将使用转发消息发送，小于等于此数量则直接发送图片。设置为0表示始终使用转发消息。支持平台：抖音、B站动态专栏、小红书、微博、米游社、小黑盒、最右、贴吧、小飞机TG、通用解析(皮皮虾等)",
+        "default": 0
+      },
+      "imageBatchThreshold": {
+        "description": "全局图片分批阈值",
+        "type": "int",
+        "hint": "超过此数量的图片将分批发送（默认50张），设置为0表示不限制。适用于抖音、哔哩哔哩动态、小红书、微博、米游社等所有图片解析",
+        "default": 50
+      },
+      "msgElementLimit": {
+        "description": "全局单条消息元素限制",
+        "type": "int",
+        "hint": "单条转发消息最大元素数（图+文混合），超过则分成多个转发消息发送（默认50）。目前适用于哔哩哔哩动态、小黑盒。如果发送失败可尝试降低此值",
+        "default": 50
+      },
+      "identifyPrefix": {
+        "description": "识别前缀",
+        "type": "string",
+        "hint": "识别前缀，比如你识别哔哩哔哩，那么就有：✅ 识别：哔哩哔哩",
+        "default": ""
+      },
+      "proxyAddr": {
+        "description": "魔法地址",
+        "type": "string",
+        "hint": "tiktok/小蓝鸟等要使用魔法时需要填写",
+        "default": "127.0.0.1"
+      },
+      "proxyPort": {
+        "description": "魔法端口",
+        "type": "string",
+        "hint": "tiktok/小蓝鸟等要使用魔法时需要填写",
+        "default": "7890"
+      },
+      "forceOverseasServer": {
+        "description": "强制使用海外服务器",
+        "type": "bool",
+        "hint": "设置为开启时，Twitter、TikTok等平台将强制不使用代理",
+        "default": false
+      },
+      "videoCodec": {
+        "description": "视频编码选择",
+        "type": "string",
+        "hint": "影响B站和YouTube的视频编码选择：\n• 自动：智能选择最佳编码（HEVC>AV1>AVC），推荐大多数用户使用\n• AV1：压缩效率最高，文件最小，但PC QQ内置播放器可能无法正常播放\n• HEVC(H.265)：高效编码，文件较小，现代设备广泛支持\n• AVC(H.264)：兼容性最佳，所有设备都能播放，但文件较大",
+        "default": "auto",
+        "options": [
+          "auto",
+          "av1",
+          "hevc",
+          "avc"
+        ],
+        "labels": [
+          "自动（推荐）",
+          "AV1（最小体积）",
+          "HEVC/H.265（推荐）",
+          "AVC/H.264（最佳兼容）"
+        ]
+      },
+      "defaultPath": {
+        "description": "视频暂存位置",
+        "type": "string",
+        "hint": "视频暂存位置(如果你对你系统我的文件非常了解可以修改，不然不建议)",
+        "default": "./data/rcmp4/"
+      },
+      "videoSizeLimit": {
+        "description": "视频大小限制",
+        "type": "int",
+        "hint": "视频大小限制（单位MB），超过大小则转换成群文件上传",
+        "default": 70
+      },
+      "streamDuration": {
+        "description": "解析直播时长",
+        "type": "int",
+        "hint": "解析直播（目前涉及哔哩哔哩、抖音）时长，单位：秒（默认：10秒），建议时间为10~60，不然也没人看",
+        "default": 10
+      },
+      "streamCompatibility": {
+        "description": "直播是否开启兼容模式",
+        "type": "bool",
+        "hint": "兼容模式，NCQQ不用开，其他ICQQ、LLO需要开启",
+        "default": false
+      }
+    }
   },
-  "parse_endpoints": {
-    "description": "通用解析接口（按顺序尝试，失败自动轮换）",
-    "type": "list",
-    "hint": "填 URL 模板，用 {} 代表目标链接。接口挂了就把它删掉或排到后面",
-    "default": [
-      "http://47.99.158.118/video-crack/v2/parse?content={}",
-      "https://api.jkyai.top/API/jhspjx.php?url={}",
-      "https://api.yujn.cn/api/pipixia.php?url={}",
-      "https://api.bugpk.com/api/pipixia?url={}"
-    ]
+  "bili": {
+    "description": "哔哩哔哩（画质、下载方式、显示项、评论）",
+    "type": "object",
+    "hint": "对应原 Guoba 面板的「哔哩哔哩」分组",
+    "items": {
+      "biliSessData": {
+        "description": "哔哩哔哩SESSDATA",
+        "type": "string",
+        "hint": "如何获取具体参考我的文档说明：https://gitee.com/kyrzy0416/rconsole-plugin#Q&A",
+        "default": ""
+      },
+      "biliResolution": {
+        "description": "bili最高分辨率",
+        "type": "string",
+        "hint": "【开不开BBDown都同步】哔哩哔哩的最高分辨率，默认为480p，可以自行根据服务器进行调整",
+        "default": 5,
+        "options": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10
+        ],
+        "labels": [
+          "8K 超高清",
+          "杜比视界",
+          "HDR 真彩",
+          "4K 超清",
+          "1080P60 高帧率",
+          "1080P+ 高码率",
+          "1080P 高清",
+          "720P60 高帧率",
+          "720P 高清",
+          "480P 清晰",
+          "360P 流畅"
+        ]
+      },
+      "biliDownloadMethod": {
+        "description": "bili下载方式",
+        "type": "string",
+        "hint": "哔哩哔哩的下载方式：默认使用原生稳定的下载方式，如果你在乎内存可以使用轻量的wget和axel下载方式，如果在乎性能可以使用Aria2下载",
+        "default": 0,
+        "options": [
+          0,
+          1,
+          2
+        ],
+        "labels": [
+          "稳定（原生）",
+          "性能（Aria2）",
+          "轻量（axel/wget）"
+        ]
+      },
+      "biliSmartResolution": {
+        "description": "智能分辨率",
+        "type": "bool",
+        "hint": "从API最高画质开始，自动选择不超过文件大小限制的最佳画质。编码选择受「全局配置-视频编码选择」影响。⚠️ 注意：智能分辨率开启时会自动禁用BBDown（因为BBDown不支持文件大小限制功能）",
+        "default": false
+      },
+      "biliFileSizeLimit": {
+        "description": "文件大小限制",
+        "type": "int",
+        "hint": "智能分辨率视频大小限制（单位MB），超过大小则降低画质，配合智能分辨率使用",
+        "default": 100
+      },
+      "biliMinResolution": {
+        "description": "智能分辨率最低画质",
+        "type": "string",
+        "hint": "智能分辨率降画质的底线，不会降到比这个更低的画质。如果最低画质仍然超出文件大小限制，则放弃解析并提示用户",
+        "default": 10,
+        "options": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10
+        ],
+        "labels": [
+          "8K 超高清",
+          "杜比视界",
+          "HDR 真彩",
+          "4K 超清",
+          "1080P60 高帧率",
+          "1080P+ 高码率",
+          "1080P 高清",
+          "720P60 高帧率",
+          "720P 高清",
+          "480P 清晰",
+          "360P 流畅"
+        ]
+      },
+      "biliUseBBDown": {
+        "description": "BBDown接管下载",
+        "type": "bool",
+        "hint": "【默认不开启，涉及范围只有哔哩哔哩，开启后默认最高画质发送】如果不爱折腾就使用默认下载方式。⚠️ 注意：开启智能分辨率时，BBDown会自动禁用（因为BBDown不支持文件大小限制功能）",
+        "default": false
+      },
+      "biliCDN": {
+        "description": "BBDown强制CDN",
+        "type": "string",
+        "hint": "【仅BBDown生效】哔哩哔哩的CDN地址更换，如果不需要默认不使用",
+        "default": 0,
+        "options": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "labels": [
+          "不使用",
+          "腾讯CDN【推荐】",
+          "百度CDN",
+          "华为CDN",
+          "阿卡迈（海外）",
+          "HK-CDN",
+          "08ccdn"
+        ]
+      },
+      "biliDefaultCDN": {
+        "description": "默认下载CDN策略",
+        "type": "string",
+        "hint": "【原生/Aria2/Axel下载方式生效】CDN选择策略：\n• 自动选择：智能避开慢速CDN，优先选择快速CDN（推荐）\n• 使用API原始CDN：不做任何切换，直接使用B站API返回的CDN\n• 强制切换到镜像站：强制将所有CDN替换为B站镜像站",
+        "default": 0,
+        "options": [
+          0,
+          1,
+          2
+        ],
+        "labels": [
+          "自动选择（推荐）",
+          "使用API原始CDN（不切换）",
+          "强制切换到镜像站"
+        ]
+      },
+      "biliBangumiDirect": {
+        "description": "番剧直接解析",
+        "type": "bool",
+        "hint": "开启后番剧将使用正常视频解析流程进行下载",
+        "default": false
+      },
+      "biliBangumiResolution": {
+        "description": "番剧独立画质",
+        "type": "string",
+        "hint": "番剧独立画质设置，开启番剧直接解析后生效，默认为480p",
+        "default": 5,
+        "options": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10
+        ],
+        "labels": [
+          "8K 超高清",
+          "杜比视界",
+          "HDR 真彩",
+          "4K 超清",
+          "1080P60 高帧率",
+          "1080P+ 高码率",
+          "1080P 高清",
+          "720P60 高帧率",
+          "720P 高清",
+          "480P 清晰",
+          "360P 流畅"
+        ]
+      },
+      "biliBangumiDuration": {
+        "description": "番剧最大时长限制",
+        "type": "int",
+        "hint": "番剧超过此时长将不解析（单位：秒），默认30分钟（1800秒）",
+        "default": 1800
+      },
+      "biliDuration": {
+        "description": "视频最大时长限制",
+        "type": "int",
+        "hint": "超过时长无法解析（单位：秒），保护服务器性能，计算公式：8分钟 x 60秒 = 480秒",
+        "default": 480
+      },
+      "biliIntroLenLimit": {
+        "description": "哔哩哔哩的简介长度限制",
+        "type": "int",
+        "hint": "防止简介过长刷屏",
+        "default": 50
+      },
+      "biliDisplayCover": {
+        "description": "是否显示封面",
+        "type": "bool",
+        "hint": "默认显示，哔哩哔哩是否显示封面",
+        "default": true
+      },
+      "biliDisplayInfo": {
+        "description": "是否显示相关信息",
+        "type": "bool",
+        "hint": "默认显示，哔哩哔哩是否显示相关信息（点赞、硬币、收藏、分享、播放数、弹幕数、评论数）",
+        "default": true
+      },
+      "biliDisplayIntro": {
+        "description": "是否显示简介",
+        "type": "bool",
+        "hint": "默认显示，哔哩哔哩是否显示简介",
+        "default": true
+      },
+      "biliDisplayOnline": {
+        "description": "是否显示在线人数",
+        "type": "bool",
+        "hint": "默认显示，哔哩哔哩是否显示在线人数",
+        "default": true
+      },
+      "biliDisplaySummary": {
+        "description": "是否显示总结",
+        "type": "bool",
+        "hint": "默认不显示，哔哩哔哩是否显示总结",
+        "default": false
+      },
+      "biliComments": {
+        "description": "是否开启评论图片",
+        "type": "bool",
+        "hint": "默认关闭，开启后解析B站视频并成功发送视频后，会发送评论截图",
+        "default": false
+      },
+      "biliCommentCount": {
+        "description": "评论展示数量",
+        "type": "string",
+        "hint": "默认推荐显示 5 条。数量越多，接口处理、图片渲染和发送性能越差",
+        "default": 5,
+        "options": [
+          5,
+          10,
+          15,
+          20
+        ],
+        "labels": [
+          "5（推荐）",
+          "10",
+          "15",
+          "20"
+        ]
+      },
+      "biliCommentChunkSize": {
+        "description": "单张截图评论数",
+        "type": "string",
+        "hint": "单张评论图最多展示多少条评论，默认 10。超过这个数量会拆成多张截图发送，例如展示 20 条、单张 10 条时会拆成 2 张图",
+        "default": 10,
+        "options": [
+          5,
+          10,
+          15,
+          20
+        ],
+        "labels": [
+          "5",
+          "10（默认）",
+          "15",
+          "20"
+        ]
+      }
+    }
   },
-  "send_mode": {
-    "description": "视频发送方式",
-    "type": "string",
-    "hint": "url=直接发解析出的地址（快，部分平台适配器不支持）；download=先下到本地再发（稳，吃内存和流量）",
-    "default": "url",
-    "options": ["url", "download"]
+  "douyin": {
+    "description": "抖音（Cookie、时长、压缩、评论、背景音乐）",
+    "type": "object",
+    "hint": "对应原 Guoba 面板的「抖音」分组",
+    "items": {
+      "douyinCookie": {
+        "description": "抖音的Cookie",
+        "type": "string",
+        "hint": "登陆https://www.douyin.com/ - F12 - 自己替换一下：odin_tt=xxx;passport_fe_beating_status=xxx;sid_guard=xxx;uid_tt=xxx;uid_tt_ss=xxx;sid_tt=xxx;sessionid=xxx;sessionid_ss=xxx;sid_ucp_v1=xxx;ssid_ucp_v1=xxx;passport_assist_user=xxx;ttwid=xxx;",
+        "default": ""
+      },
+      "douyinDuration": {
+        "description": "视频最大时长限制",
+        "type": "int",
+        "hint": "超过时长无法解析（单位：秒），保护服务器性能，计算公式：8分钟 x 60秒 = 480秒",
+        "default": 480
+      },
+      "douyinCompression": {
+        "description": "是否开启视频压缩",
+        "type": "bool",
+        "hint": "开启后分辨率降为 720p，关闭则为 1080p",
+        "default": false
+      },
+      "douyinEnableSsrBackup": {
+        "description": "是否开启 SSR 兜底",
+        "type": "bool",
+        "hint": "默认关闭。开启后仅在普通抖音视频无 Cookie 或主接口失败时，尝试走 SSR 免 Cookie 兜底解析；不覆盖直播、图集/动图、评论接口",
+        "default": false
+      },
+      "douyinDisplayCover": {
+        "description": "是否显示封面",
+        "type": "bool",
+        "hint": "默认显示，是否显示封面",
+        "default": true
+      },
+      "douyinComments": {
+        "description": "是否开启评论",
+        "type": "bool",
+        "hint": "",
+        "default": false
+      },
+      "douyinCommentCount": {
+        "description": "评论展示数量",
+        "type": "string",
+        "hint": "默认推荐显示 5 条。数量越多，接口处理、图片渲染和发送性能越差",
+        "default": 5,
+        "options": [
+          5,
+          10,
+          15,
+          20
+        ],
+        "labels": [
+          "5（推荐）",
+          "10",
+          "15",
+          "20"
+        ]
+      },
+      "douyinCommentChunkSize": {
+        "description": "单张截图评论数",
+        "type": "string",
+        "hint": "单张评论图最多展示多少条评论，默认 10。超过这个数量会拆成多张截图发送，例如展示 20 条、单张 10 条时会拆成 2 张图",
+        "default": 10,
+        "options": [
+          5,
+          10,
+          15,
+          20
+        ],
+        "labels": [
+          "5",
+          "10（默认）",
+          "15",
+          "20"
+        ]
+      },
+      "douyinMusic": {
+        "description": "是否开启背景音乐",
+        "type": "bool",
+        "hint": "开启后解析动图/图集时会同时发送背景音乐",
+        "default": true
+      },
+      "douyinBGMSendType": {
+        "description": "背景音乐发送方式",
+        "type": "string",
+        "hint": "选择发送背景音乐的方式：\n语音(默认)：手机和pc都可见，需要下载上传，\n自定义音乐卡片：pc无法点击播放，无需下载上传，卡片样式协议端决定",
+        "default": "voice",
+        "options": [
+          "voice",
+          "card"
+        ],
+        "labels": [
+          "语音",
+          "自定义音乐卡片"
+        ]
+      }
+    }
   },
-  "max_video_size_mb": {
-    "description": "视频大小上限（MB）",
-    "type": "int",
-    "hint": "仅在 download 模式下生效，超过则不发送",
-    "default": 50
+  "youtube": {
+    "description": "YouTube（画质、时长、Cookie 路径）",
+    "type": "object",
+    "hint": "对应原 Guoba 面板的「油管YouTube」分组",
+    "items": {
+      "youtubeDuration": {
+        "description": "油管最大解析时长",
+        "type": "int",
+        "hint": "超过时长不解析（单位：秒），保护魔法的流量，计算公式：8分钟 x 60秒 = 480秒，默认8分钟，最好不超过30分钟",
+        "default": 480
+      },
+      "youtubeClipTime": {
+        "description": "油管截取时长",
+        "type": "int",
+        "hint": "超过时长会截取指定时间（单位：秒），保护魔法的流量，计算公式：3分钟 x 60秒 = 180秒，默认不开启，最好不超过5分钟,0表无限or不开启",
+        "default": 0
+      },
+      "youtubeGraphicsOptions": {
+        "description": "油管最高分辨率",
+        "type": "string",
+        "hint": "油管下载的最高分辨率（默认720p，请根据自己魔法流量和服务器承载能力进行调整）",
+        "default": 720,
+        "options": [
+          0,
+          4320,
+          2160,
+          1440,
+          1080,
+          720,
+          480,
+          360
+        ],
+        "labels": [
+          "最高画质 不限",
+          "8K 极清",
+          "4K 超清",
+          "2K 2k",
+          "1080P 高清",
+          "720P 高清",
+          "480P 清晰",
+          "360P 流畅"
+        ]
+      },
+      "youtubeCookiePath": {
+        "description": "油管Cookie文件路径",
+        "type": "string",
+        "hint": "【！重要：这里填写的是路径，例如/path/to/cookies.txt】如果无法解析油管就填写这个Cookie",
+        "default": ""
+      }
+    }
   },
-  "max_images": {
-    "description": "单条消息最多发送的图片数量",
-    "type": "int",
-    "hint": "图集类链接可能一次返回几十张图，设个上限避免刷屏",
-    "default": 9
+  "netease": {
+    "description": "网易云音乐（Cookie、音质、点歌）",
+    "type": "object",
+    "hint": "对应原 Guoba 面板的「网易云音乐」分组",
+    "items": {
+      "isSendVocal": {
+        "description": "网易云开启发送音频",
+        "type": "bool",
+        "hint": "默认开启，识别音乐之后是否转化群语音发送，关闭将获得一定的性能提升",
+        "default": true
+      },
+      "useNeteaseSongRequest": {
+        "description": "开启点歌功能",
+        "type": "bool",
+        "hint": "默认不开启；开启后可使用 #点歌 / #听 / #播放，平台由下方「点歌平台」决定",
+        "default": false
+      },
+      "songRequestPlatform": {
+        "description": "点歌平台",
+        "type": "string",
+        "hint": "选择 #点歌 / #听 / #播放 使用的音乐平台；云盘相关命令始终走网易云，不受此项影响",
+        "default": "netease",
+        "options": [
+          "netease",
+          "kugou",
+          "qq"
+        ],
+        "labels": [
+          "网易云音乐",
+          "酷狗音乐",
+          "QQ音乐"
+        ]
+      },
+      "songRequestMaxList": {
+        "description": "点歌列表长度",
+        "type": "int",
+        "hint": "点歌选择列表长度，默认 10",
+        "default": 10
+      },
+      "useLocalNeteaseAPI": {
+        "description": "使用自建网易云API",
+        "type": "bool",
+        "hint": "默认不开启，有条件可以查看https://gitlab.com/Binaryify/neteasecloudmusicapi进行搭建",
+        "default": false
+      },
+      "neteaseCloudAPIServer": {
+        "description": "自建网易云API地址",
+        "type": "string",
+        "hint": "填入自建API地址，例：http://localhost:3000",
+        "default": ""
+      },
+      "neteaseCookie": {
+        "description": "网易云Cookie",
+        "type": "string",
+        "hint": "可以发送 #RNQ / #rnq 快捷获取 或 者在网易云官网自己获取，格式为：MUSIC_U=xxx",
+        "default": ""
+      },
+      "neteaseCloudCookie": {
+        "description": "网易云云盘Cookie",
+        "type": "string",
+        "hint": "可以发送 #RNCQ / #rncq 快捷获取 或 者在网易云官网自己获取，格式为：MUSIC_U=xxx",
+        "default": ""
+      },
+      "neteaseCloudAudioQuality": {
+        "description": "网易云解析最高音质",
+        "type": "string",
+        "hint": "网易云解析最高音质(目前仅针对自建最新API服务器生效！！需vip账号ck！！默认极高，杜比全景声由于编码特殊需要设备支持，更高请根据登陆的账号和服务器承载能力进行选择)",
+        "default": "exhigh",
+        "options": [
+          "standard",
+          "higher",
+          "exhigh",
+          "lossless",
+          "hires",
+          "jyeffect",
+          "sky",
+          "dolby",
+          "jymaster"
+        ],
+        "labels": [
+          "标准",
+          "较高",
+          "极高",
+          "无损",
+          "Hi-Res",
+          "高清环绕声",
+          "沉浸环绕声",
+          "杜比全景声(不推荐)",
+          "超清母带"
+        ]
+      }
+    }
   },
-  "only_group": {
-    "description": "只在群聊生效",
-    "type": "bool",
-    "hint": "打开后私聊发链接不解析",
-    "default": false
+  "other": {
+    "description": "其他平台（微博、小红书、视频号、酷狗、QQ音乐、链接总结）",
+    "type": "object",
+    "hint": "对应原 Guoba 面板的「其他平台」分组",
+    "items": {
+      "weiboCookie": {
+        "description": "微博的Cookie",
+        "type": "string",
+        "hint": "登陆https://m.weibo.cn/ - F12 - 格式：_T_WM=xxx; WEIBOCN_FROM=xxx; MLOGIN=xxx; XSRF-TOKEN=xxx; M_WEIBOCN_PARAMS=xxx",
+        "default": ""
+      },
+      "weiboComments": {
+        "description": "微博是否开启评论",
+        "type": "bool",
+        "hint": "开启后解析微博时会显示热门评论",
+        "default": true
+      },
+      "xiaohongshuCookie": {
+        "description": "小红书的Cookie",
+        "type": "string",
+        "hint": "2024-8-2后反馈必须使用ck，不然无法解析",
+        "default": ""
+      },
+      "weixinChannelYuanbaoCookie": {
+        "description": "视频号解析Cookie（腾讯元宝）",
+        "type": "string",
+        "hint": "解析微信视频号分享链接所需，浏览器登录 https://yuanbao.tencent.com 后 F12→Network→任意请求→Request Headers→Cookie 复制；也可私聊机器人发送 #设置视频号Cookie 进行设置（推荐私聊设置，更安全）",
+        "default": ""
+      },
+      "linkSummaryResolveMode": {
+        "description": "链接总结模式",
+        "type": "string",
+        "hint": "链接总结方式选择：\n• 通用模式（默认）：浏览器抓取页面正文或内容 + 自配 AI（kimi/openai）总结，依赖 aiApiKey 配置\n• 元宝模式：直接把链接发给腾讯元宝抓取并总结，与视频号共用上面的元宝 Cookie；需要 Playwright Chromium（用于生成 x-uskey 签名头），且部署服务器 IP 需尽量与元宝登录 IP 一致",
+        "default": "general",
+        "options": [
+          "general",
+          "yuanbao"
+        ],
+        "labels": [
+          "通用模式",
+          "元宝模式"
+        ]
+      },
+      "linkSummaryYuanbaoModel": {
+        "description": "元宝总结模型",
+        "type": "string",
+        "hint": "仅在「链接总结模式=元宝模式」时生效：\n• 混元 175B（默认）：hunyuan_gpt_175B_0404，元宝网页默认模型\n• DeepSeek V3：deep_seek_v3，对应网页端切换 DeepSeek 时的 chatModelId",
+        "default": "hunyuan_gpt_175B_0404",
+        "options": [
+          "hunyuan_gpt_175B_0404",
+          "deep_seek_v3"
+        ],
+        "labels": [
+          "混元 175B（默认）",
+          "DeepSeek V3"
+        ]
+      },
+      "kugouApiServer": {
+        "description": "酷狗API地址",
+        "type": "string",
+        "hint": "自建 KuGouMusicApi 服务地址，自建教程：https://github.com/MakcRe/KuGouMusicApi",
+        "default": ""
+      },
+      "kugouAudioQuality": {
+        "description": "酷狗解析音质",
+        "type": "string",
+        "hint": "酷狗歌曲解析优先选择的音质，若目标歌曲不支持则自动降级",
+        "default": "viper_clear",
+        "options": [
+          "viper_clear",
+          "flac",
+          "320",
+          "128"
+        ],
+        "labels": [
+          "Hi-Res",
+          "无损 FLAC",
+          "高品 320K",
+          "普通 128K"
+        ]
+      },
+      "kugouCookie": {
+        "description": "酷狗搜索Cookie",
+        "type": "string",
+        "hint": "仅在走 KuGouMusicApi 搜索兜底时使用，文档示例：token=xxx;userid=xxx;dfid=xxx；也可发送 #RKQ 自动扫码获取",
+        "default": ""
+      },
+      "qqMusicCookie": {
+        "description": "QQ音乐Cookie",
+        "type": "string",
+        "hint": "浏览器登录 https://y.qq.com 后 F12→Network→任意请求→Request Headers→Cookie 复制；本地直连 musics.fcg 搜索/取流用，不依赖服务器",
+        "default": ""
+      },
+      "qqMusicAudioQuality": {
+        "description": "QQ音乐解析音质",
+        "type": "string",
+        "hint": "QQ音乐歌曲解析优先选择的音质，若目标歌曲不支持则自动降级；auto=按默认候选顺序（低码率OGG→128K→320K→M4A→试听）",
+        "default": "auto",
+        "options": [
+          "auto",
+          "standard",
+          "128k",
+          "320k",
+          "m4a",
+          "trial"
+        ],
+        "labels": [
+          "自动（默认候选顺序）",
+          "标准 OGG（低码率）",
+          "128K MP3",
+          "320K MP3",
+          "M4A",
+          "仅试听片段"
+        ]
+      },
+      "kuaishouCookie": {
+        "description": "快手的Cookie",
+        "type": "string",
+        "hint": "本移植版新增（原版快手的快手走第三方接口、不需要 Cookie）。配置后快手会优先走网页 SSR 直解，降低对第三方接口的依赖。浏览器登录 kuaishou.com 后 F12 -> Network -> 任意请求 -> Cookie 整段复制",
+        "default": ""
+      },
+      "miyousheCookie": {
+        "description": "米游社的Cookie",
+        "type": "string",
+        "hint": "部分米游社文章需要登录态才能看到图片",
+        "default": ""
+      }
+    }
   },
-  "allow_multiple_links": {
-    "description": "一条消息里解析多个链接",
-    "type": "bool",
-    "hint": "默认只解析第一个命中的链接（与原插件行为一致）",
-    "default": false
+  "xiaoheihe": {
+    "description": "小黑盒",
+    "type": "object",
+    "hint": "对应原 Guoba 面板的「小黑盒」分组",
+    "items": {
+      "xiaoheiheCookie": {
+        "description": "小黑盒的Cookie",
+        "type": "string",
+        "hint": "登陆https://www.xiaoheihe.cn/ - F12 - 格式：x_xhh_tokenid=xxx，小黑盒目前用的硬编码ck，有概率会出现需要验证码的情况，通常使用分享链接而不是web链接即可解决，后续有大佬出手的话可以换成动态ck",
+        "default": ""
+      }
+    }
   },
-  "stop_on_match": {
-    "description": "解析成功后阻止消息继续传给 LLM",
-    "type": "bool",
-    "hint": "打开可以避免机器人既发解析结果、又让 AI 多嘴一句",
-    "default": true
+  "ai": {
+    "description": "AI 配置（原版用于识图；本移植版复用 AstrBot 的模型，此项保留兼容）",
+    "type": "object",
+    "hint": "对应原 Guoba 面板的「AI配置」分组",
+    "items": {
+      "aiBaseURL": {
+        "description": "AI接口地址",
+        "type": "string",
+        "hint": "支持Kimi、OpenAI、Claude等，例如官方的可以填写：https://api.moonshot.cn，如果是本机可以填写：http://localhost:8000",
+        "default": ""
+      },
+      "aiApiKey": {
+        "description": "AI的key",
+        "type": "string",
+        "hint": "服务商提供的api key，如果是官方的就是sk-....，如果是本机的就是ey...（推荐使用ey因为sk没有联网功能）",
+        "default": ""
+      },
+      "aiModel": {
+        "description": "AI的模型",
+        "type": "string",
+        "hint": "默认使用的是moonshot-v1-8k，也可以自定义模型，只要能联网就能使用！",
+        "default": "moonshot-v1-8k"
+      }
+    }
   },
-  "reply_on_error": {
-    "description": "解析失败时回复提示",
-    "type": "bool",
-    "hint": "默认静默失败，避免接口抽风时在群里刷错误信息",
-    "default": false
-  },
-  "identify_prefix": {
-    "description": "识别结果文案前缀",
-    "type": "string",
-    "default": "🔗 识别："
-  },
-  "show_desc": {
-    "description": "一起发送视频/图片的文字描述",
-    "type": "bool",
-    "default": true
-  },
-
-  "bili_cookie": {
-    "description": "B站 Cookie（SESSDATA）",
-    "type": "string",
-    "hint": "留空则走免登录主干（只能拿到 360P 直链）。格式：SESSDATA=xxx; bili_jct=xxx",
-    "default": ""
-  },
-  "weibo_cookie": {
-    "description": "微博 Cookie",
-    "type": "string",
-    "hint": "部分微博不登录看不到图片，留空可能解析失败",
-    "default": ""
-  },
-  "xiaohongshu_cookie": {
-    "description": "小红书 Cookie",
-    "type": "string",
-    "hint": "小红书解析暂未移植，此项预留",
-    "default": ""
-  },
-  "douyin_cookie": {
-    "description": "抖音 Cookie",
-    "type": "string",
-    "hint": "留空则走 SSR 免 Cookie 路线（拿不到评论和部分高清档位）",
-    "default": ""
-  },
-  "weixin_channel_cookie": {
-    "description": "微信视频号（腾讯元宝）Cookie",
-    "type": "string",
-    "hint": "视频号解析暂未移植，此项预留",
-    "default": ""
-  },
-  "miyoushe_cookie": {
-    "description": "米游社 Cookie",
-    "type": "string",
-    "hint": "部分文章需要登录，留空可能解析失败",
-    "default": ""
-  },
-  "xiaoheihe_cookie": {
-    "description": "小黑盒 Cookie",
-    "type": "string",
-    "hint": "一般不需要，接口自带签名",
-    "default": ""
-  },
-  "x_cookie": {
-    "description": "X（Twitter）Cookie",
-    "type": "string",
-    "hint": "格式：name=value; name2=value2。X 解析暂未移植，此项预留",
-    "default": ""
-  },
-  "instagram_cookie": {
-    "description": "Instagram Cookie",
-    "type": "string",
-    "hint": "Instagram 解析暂未移植，此项预留",
-    "default": ""
-  },
-  "kugou_api_server": {
-    "description": "酷狗 API 服务器地址",
-    "type": "string",
-    "hint": "对应原插件的 kugouApiServer，留空则酷狗解析不可用",
-    "default": ""
-  },
-  "bili_resolution": {
-    "description": "B站优先请求的画质",
-    "type": "string",
-    "hint": "免登录接口最高只能拿到 360P，此项在有 SESSDATA 时才有意义",
-    "default": "360P",
-    "options": ["360P", "480P", "720P", "1080P", "1080P+", "1080P60", "4K"]
-  },
-  "external_tools": {
-    "description": "外部命令路径（可选）",
-    "type": "string",
-    "hint": "留空则从系统 PATH 自动查找。用于 ffmpeg / yt-dlp / BBDown / aria2c / tdl",
-    "default": ""
+  "advanced": {
+    "description": "高级配置（并发、清理计划）",
+    "type": "object",
+    "hint": "对应原 Guoba 面板的「高级配置」分组",
+    "items": {
+      "deeplApiUrls": {
+        "description": "DeeplX API地址集合",
+        "type": "text",
+        "hint": "可以参考：https://github.com/OwO-Network/DeepLX，进行搭建，也可以使用内置",
+        "default": "http://www.gptspt.cn/translate,http://gptspt.top/translate,http://8.134.135.4:1188/translate,http://120.76.141.173:1188/translate,http://bit.x7ys.com:1188/translate,http://deeplxapi.x7ys.com:1188/translate"
+      },
+      "queueConcurrency": {
+        "description": "队列长度",
+        "type": "int",
+        "hint": "【目前只涉及哔哩哔哩的下载功能】允许队列下载个数：根据服务器性能设置可以并发下载的个数，如果你的服务器比较强劲，就选择4~12，较弱就一个一个下载，选择1",
+        "default": 1
+      },
+      "videoDownloadConcurrency": {
+        "description": "下载并发个数",
+        "type": "int",
+        "hint": "【涉及哔哩哔哩、抖音、YouTuBe、tiktok】下载并发个数：与【允许多用户下载个数】不同，这个功能影响下载速度。默认是1表示不使用，使用根据服务器性能进行选择，如果不确定是否可以用1即可，高性能服务器随意4~12都可以，看CPU的实力",
+        "default": 1
+      }
+    }
   }
 }

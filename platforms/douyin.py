@@ -195,15 +195,35 @@ async def resolve_douyin(link: str, ctx: ResolverContext) -> ResolveResult:
 
     candidates.append(DY_SHARE_VIDEO_PAGE.format(aweme_id))
 
+    # 配了 Cookie 就带上：SSR 页面在登录态下返回的数据更完整，
+    # 部分需要登录才能看的作品也只有带 Cookie 才拿得到。
+    cookie = ctx.cookie("douyin")
+    headers = {
+        "User-Agent": _UA,
+        "Referer": "https://www.douyin.com/",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+
     html = ""
     for url in candidates:
         try:
-            body, _ = await fetch(url, headers={"User-Agent": _UA}, retries=1)
+            body, _ = await fetch(url, headers=headers, retries=1, timeout=20.0)
             html = body.decode("utf-8", errors="ignore")
             if "_ROUTER_DATA" in html:
                 break
         except HttpError as exc:
             logger.debug(f"[R插件][抖音] 分享页抓取失败 {url}: {exc}")
+
+    if "_ROUTER_DATA" not in html:
+        hint = (
+            "可能需要更新 Cookie（已配置但已失效）"
+            if cookie
+            else "可尝试在配置里填抖音 Cookie 提高成功率"
+        )
+        return ResolveResult.fail("抖音", f"分享页没有返回预期内容（{hint}）")
 
     if "_ROUTER_DATA" not in html:
         return ResolveResult.fail(

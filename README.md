@@ -27,6 +27,74 @@ git clone https://gitee.com/MuLinYa259/astrbot-viedo.git astrbot_plugin_rconsole
 自动识别之所以能免 @，是因为 AstrBot 的正则过滤器**不受 `wake_prefix` 约束**
 （见 `astrbot/core/star/filter/regex.py` 注释）。这一点和原版 Yunzai 的 rule 行为一致。
 
+## 配置面板：原 Guoba 面板已完整迁移
+
+原插件用 [Guoba-Plugin](https://gitee.com/guoba-yunzai/guoba-plugin) 做可视化配置面板
+（`guoba.support.js`，1006 行，81 个配置项）。**这些配置项已全部转换到 AstrBot 的插件配置页。**
+
+转换不是手工抄的——用 Node 把 `supportGuoba()` 的返回值 dump 成 JSON，
+再用脚本转换成 AstrBot 的 `_conf_schema.json`，所以字段名、提示文案、
+下拉选项、分组结构都跟原面板一致：
+
+| 分组 | 项数 | 内容 |
+|---|---|---|
+| `plugin` | 13 | 移植版自己的开关（总开关、启用平台、解析接口、发送方式…） |
+| `global` | 13 | 黑名单、转发阈值、代理、视频编码、识别前缀 |
+| `bili` | 22 | SESSDATA、画质、下载方式、显示项、评论 |
+| `douyin` | 10 | Cookie、时长、压缩、评论、背景音乐 |
+| `youtube` | 4 | 画质、时长、Cookie 路径 |
+| `netease` | 9 | Cookie、音质、点歌 |
+| `other` | 13 | 微博 / 小红书 / 视频号 / 快手 / 酷狗 / QQ音乐 / 链接总结 |
+| `xiaoheihe` | 1 | 小黑盒 Cookie |
+| `ai` | 3 | 原版识图接口（本移植版用 AstrBot 的 Provider，此项保留兼容） |
+| `advanced` | 3 | 并发、清理计划 |
+
+**合计 91 项**。打开 WebUI 的插件配置页即可，字段名沿用原面板（`biliSessData`、
+`douyinCookie`…），所以**原 Yunzai 的配置可以照着搬过来**。
+
+只有 5 项没搬——`pluginHome` / `helpDoc` / `tgChannel` / `orangeSideBar` /
+`complementarySet`，这些在原面板里是纯展示的文档链接，不是可配置项。
+
+> 转换脚本保留在仓库外的 `convert_guoba_schema.py`（依赖 `guoba-schema.json`），
+> 原插件升级后重跑即可同步新配置项。
+
+## Cookie 怎么填
+
+抖音、快手、B站 三个平台的 Cookie 在插件配置页的对应分组里：
+
+| 平台 | 配置路径 | 说明 |
+|---|---|---|
+| B站 | `bili` → **哔哩哔哩SESSDATA** | 填 `SESSDATA` 的值，或整段 Cookie 串，两种都认 |
+| 抖音 | `douyin` → **抖音的Cookie** | 整段复制，建议包含 `ttwid` |
+| 快手 | `other` → **快手的Cookie** | 本移植版新增（原版快手走第三方接口，不需要 Cookie） |
+
+取法：浏览器登录后 F12 → Network → 任意请求 → Request Headers → Cookie 整段复制。
+
+### 配了 Cookie 之后有什么变化
+
+**B站（提升最大）**
+
+| | 未配 Cookie | 配了 Cookie |
+|---|---|---|
+| 接口 | `platform=html5` 老接口 | WBI 签名 + `x/player/wbi/playurl` |
+| 画质 | 360P | 按 `bili` → 最高分辨率 配置（默认 1080P） |
+| 格式 | 单个 mp4，自带音轨 | DASH 音视频分离 |
+| 合并 | 不需要 | **用容器内的 ffmpeg 无损合并**（`-c copy`） |
+| 编码 | AVC | 按 `global` → 视频编码选择 挑（HEVC > AV1 > AVC） |
+
+WBI 签名算法在 `core/bili_wbi.py` 里完整实现（含 `mixin_key` 重排表与按日缓存），
+不依赖任何第三方库。
+
+**抖音** —— SSR 分享页带上 Cookie 后拿到的数据更完整，部分需要登录态的作品也只有带
+Cookie 才可见。注意：抖音 web API 还需要 `a-bogus` 签名，这部分没有移植，
+所以主路仍走 SSR。可在 `douyin` → **是否开启 SSR 兜底** 里控制降级行为。
+
+**快手** —— 现在是**双路**：优先抓网页 SSR 页面抠 `__APOLLO_STATE__` 直解，
+失败才回落第三方接口。配了 Cookie 成功率更高。这样快手不再单点依赖第三方接口——
+你也看到了，默认 4 个接口里只有 1 个还活着。
+
+
+
 ## 平台支持状态
 
 `✅ 完整` = 核心流程已移植并验证｜`🟡 部分` = 主干可用，高级功能未搬｜`⬜ 未移植` = 识别正常但解析会明确提示缺什么
@@ -39,8 +107,9 @@ git clone https://gitee.com/MuLinYa259/astrbot-viedo.git astrbot_plugin_rconsole
 | 小黑盒 | 🟡 部分 | 帖子解析已移植（含原版的 hkey 签名算法）；游戏详情页未移植 |
 | 米游社 | 🟡 部分 | 文章图文已移植 |
 | 微视 | 🟡 部分 | 走官方接口，字段做了多路容错 |
-| 抖音 | 🟡 部分 | 走 **SSR 免 Cookie** 路线，拿不到评论 / 直播 / 部分高清档 |
-| 哔哩哔哩 | 🟡 部分 | 免登录主干（信息 + 360P 直链）；WBI 签名 / BBDown / 番剧 / 直播 / 评论截图未移植 |
+| 抖音 | 🟡 部分 | 走 **SSR 免 Cookie** 路线，配 Cookie 后数据更完整；`a-bogus` 签名未移植 |
+| 哔哩哔哩 | ✅ 主干完整 | **WBI 签名 + Cookie + DASH + ffmpeg 合并**全通（配 SESSDATA 可 1080P）；BBDown / 番剧 / 直播 / 评论截图未移植 |
+| 快手 | ✅ 主干完整 | **网页 SSR 直解**（配 Cookie 更稳）+ 第三方接口兜底，双路 |
 | 网易云 / QQ音乐 / 汽水 | 🟡 部分 | 第三方直链接口；扫码登录、歌单、音质选择未移植 |
 | 酷狗 | 🟡 部分 | 需要你自建 `kugouApiServer`，配了才可用 |
 | AI 链接总结 / 翻译 | ✅ 完整 | 改用 AstrBot 自带的 LLM，不用再单独填 API Key |

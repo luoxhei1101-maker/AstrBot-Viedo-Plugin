@@ -319,10 +319,17 @@ AUTO_RULES: tuple[PlatformRule, ...] = (
     PlatformRule("xhs", "小红书", r"(?:xhslink\.(?:com|cn)|xiaohongshu\.com)", "xiaohongshu"),
     PlatformRule("bodianMusic", "波点音乐", r"h5app\.kuwo\.cn", "bodian"),
     PlatformRule(
+        "kuaishou",
+        "快手",
+        r"(?:kuaishou\.com|chenzhongtech\.com)",
+        "kuaishou",
+        extra={"cookie_field": "kuaishouCookie"},
+    ),
+    PlatformRule(
         "general",
         "通用",
-        r"(?:chenzhongtech\.com|kuaishou\.com|ixigua\.com|h5\.pipix\.com|"
-        r"h5\.pipigx\.com|s\.xsj\.qq\.com|m\.okjike\.com|tieba\.baidu\.com)",
+        r"(?:ixigua\.com|h5\.pipix\.com|h5\.pipigx\.com|s\.xsj\.qq\.com|"
+        r"m\.okjike\.com|tieba\.baidu\.com)",
         "general",
     ),
     PlatformRule("sy2b", "YouTube", r"(?:youtube\.com|youtu\.be|music\.youtube\.com)", "youtube"),

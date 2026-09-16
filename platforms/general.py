@@ -41,7 +41,7 @@ def _detect_key(link: str) -> str | None:
 
 def _build_adapter(ctx: ResolverContext) -> GeneralLinkAdapter:
     """按用户配置构造适配器（接口列表可覆盖）。"""
-    raw = ctx.conf("parse_endpoints", None)
+    raw = ctx.conf("plugin.parse_endpoints", None)
     if not raw:
         return GeneralLinkAdapter()
 
@@ -97,9 +97,8 @@ async def resolve_jike(link: str, ctx: ResolverContext) -> ResolveResult:
     return await resolve_general(link, ctx)
 
 
-@register("kuaishou")
-async def resolve_kuaishou(link: str, ctx: ResolverContext) -> ResolveResult:
-    return await resolve_general(link, ctx)
+# 注意：快手有自己的 resolver（platforms/kuaishou.py，SSR 直解 + 回落这里），
+# 所以这里不再注册 `kuaishou`，避免注册表冲突。
 
 
 @register("ixigua")

@@ -16,6 +16,7 @@ from . import bilibili as _bilibili  # noqa: F401
 from . import content as _content  # noqa: F401
 from . import douyin as _douyin  # noqa: F401
 from . import general as _general  # noqa: F401
+from . import kuaishou as _kuaishou  # noqa: F401
 from . import pending as _pending  # noqa: F401
 from . import social as _social  # noqa: F401
 
