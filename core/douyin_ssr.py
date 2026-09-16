@@ -300,7 +300,11 @@ def animated_image_uris(aweme: dict[str, Any]) -> list[str]:
 
 
 def static_image_urls(aweme: dict[str, Any]) -> list[str]:
-    """静态图集：每张图取 ``url_list[0]``（原版就是这么取的无水印地址）。"""
+    """静态图集：每张图取 ``url_list[0]``（无水印高清，作为第一候选）。
+
+    注意：``url_list[0]`` 带 ``-sign`` 签名、时效短，可能 403。真正下载时
+    应该配合 ``static_image_candidates`` 逐个尝试，这里只取第一候选。
+    """
     urls: list[str] = []
     for image in aweme.get("images") or []:
         if not isinstance(image, dict):
@@ -309,6 +313,27 @@ def static_image_urls(aweme: dict[str, Any]) -> list[str]:
         if url_list:
             urls.append(url_list[0])
     return urls
+
+
+def static_image_candidates(aweme: dict[str, Any]) -> list[list[str]]:
+    """静态图集：每张图返回**全部候选 URL**（去重，保持顺序）。
+
+    抖音 url_list 里有多个 CDN 节点（p3-sign / p11-sign / p5-ex-gddgtc-sign …），
+    每个的签名时效不一样——实测同一张图有的 URL 403、有的 200，没有固定哪个
+    位置一定可用。所以把全部候选给下载层，逐个尝试，第一个能下的用。
+    """
+    result: list[list[str]] = []
+    for image in aweme.get("images") or []:
+        if not isinstance(image, dict):
+            continue
+        url_list = image.get("url_list") or []
+        seen: list[str] = []
+        for url in url_list:
+            if url and url not in seen:
+                seen.append(url)
+        if seen:
+            result.append(seen)
+    return result
 
 
 def _looks_like_audio(url: str) -> bool:

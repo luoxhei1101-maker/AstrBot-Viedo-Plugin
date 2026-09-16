@@ -27,6 +27,7 @@ from ..core.douyin_ssr import (
     has_animated_images,
     music_info,
     resolve_by_ssr,
+    static_image_candidates,
     static_image_urls,
 )
 from ..core.http import HttpError, expand_short_url
@@ -102,6 +103,9 @@ async def resolve_douyin(link: str, ctx: ResolverContext) -> ResolveResult:
     if kind == "image":
         images = static_image_urls(aweme)
         animated = has_animated_images(aweme)
+        # 候选 URL：每张图全部 url_list，下载时逐个尝试（签名时效不一）
+        if images:
+            extra["image_candidates"] = static_image_candidates(aweme)
 
         videos: list[str] = []
         if animated:

@@ -72,7 +72,12 @@ from .core.constants import (
     match_rule,
 )
 from .core.cookies import build_cookie
-from .core.downloader import MediaTooLarge, download_media, download_many
+from .core.downloader import (
+    MediaTooLarge,
+    download_media,
+    download_many,
+    download_many_candidates,
+)
 from .core.external import describe_environment, find_tool
 from .core.http import HttpError
 from .core.media import MergeError, merge_dash
@@ -888,12 +893,30 @@ class Main(Star):
         # 好处：并发（快）+ Node 内部转 base64 时不再重复走网络下载。
         concurrency = max(1, int(self.conf_get("plugin.download_concurrency", 6) or 6))
         max_mb = int(self.conf_get("global.videoSizeLimit", 70) or 70)
-        paths = await download_many(
-            urls,
-            prefix="album",
-            max_bytes=max_mb * 1024 * 1024,
-            concurrency=concurrency,
-        )
+        max_bytes = max_mb * 1024 * 1024
+
+        # 抖音图集带了候选 URL（每张图多个 CDN 节点，签名时效不一），逐个尝试，
+        # 第一个能下载的用——避免某张图固定取某个 URL 时因签名失效而 403。
+        candidates = result.extra.get("image_candidates")
+        if (
+            isinstance(candidates, list)
+            and candidates
+            and isinstance(candidates[0], list)
+            and len(candidates) == len(urls)
+        ):
+            paths = await download_many_candidates(
+                candidates,
+                prefix="album",
+                max_bytes=max_bytes,
+                concurrency=concurrency,
+            )
+        else:
+            paths = await download_many(
+                urls,
+                prefix="album",
+                max_bytes=max_bytes,
+                concurrency=concurrency,
+            )
 
         # 合并转发的「发送者」用发起解析的这个用户：昵称 + QQ 号都取发送者
         node_name = (event.get_sender_name() or "").strip() or "解析结果"

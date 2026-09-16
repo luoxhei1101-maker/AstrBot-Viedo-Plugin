@@ -212,3 +212,49 @@ async def download_many(
 
         results = await asyncio.gather(*(one(u) for u in urls))
         return list(results)
+
+
+async def download_many_candidates(
+    candidates: list[list[str]],
+    *,
+    prefix: str = "media",
+    max_bytes: int = 0,
+    concurrency: int = 6,
+    timeout: float = 120.0,
+) -> list[Path | None]:
+    """并发下载，每项是一组候选 URL，逐个尝试直到成功。
+
+    抖音图集每张图的 ``url_list`` 有多个 CDN 节点（p3-sign / p11-sign /
+    p5-ex-gddgtc-sign …），每个的签名时效不一样——实测同一张图有的 URL 403、
+    有的 200，没有固定哪个位置一定可用。这里对每张图逐个尝试候选 URL，
+    第一个能下载的用，全部失败才返回 ``None``。
+    """
+    if not candidates:
+        return []
+
+    sem = asyncio.Semaphore(max(1, concurrency))
+    connector = aiohttp.TCPConnector(
+        ssl=False, limit=concurrency, limit_per_host=concurrency
+    )
+    timeout_obj = aiohttp.ClientTimeout(total=timeout)
+
+    async with aiohttp.ClientSession(
+        timeout=timeout_obj, connector=connector
+    ) as session:
+
+        async def one(cands: list[str]) -> Path | None:
+            async with sem:
+                for url in cands:
+                    try:
+                        return await _stream_one(
+                            session, url, prefix=prefix, max_bytes=max_bytes
+                        )
+                    except Exception as exc:  # noqa: BLE001 - 换下一个候选
+                        logger.debug(
+                            f"[R插件] 候选下载失败 {url[:60]}: {exc}"
+                        )
+                        continue
+                return None
+
+        results = await asyncio.gather(*(one(c) for c in candidates))
+        return list(results)
