@@ -55,8 +55,12 @@ git clone https://gitee.com/MuLinYa259/astrbot-viedo.git astrbot_plugin_rconsole
 只有 5 项没搬——`pluginHome` / `helpDoc` / `tgChannel` / `orangeSideBar` /
 `complementarySet`，这些在原面板里是纯展示的文档链接，不是可配置项。
 
-> 转换脚本保留在仓库外的 `convert_guoba_schema.py`（依赖 `guoba-schema.json`），
-> 原插件升级后重跑即可同步新配置项。
+> 转换脚本放在仓库外的 `E:\AstrBot-Pulgin\_tools\`：
+> - `dump-guoba.mjs` —— 用 Node 调 `supportGuoba()` 把 schema 导成 `guoba-schema.json`
+> - `convert_guoba_schema.py` —— 把 Guoba schema + `config/tools.yaml` 的默认值
+>   转成 AstrBot 的 `_conf_schema.json`
+>
+> 原插件升级后重跑这两步即可同步新的配置项，不用手抄。
 
 ## Cookie 怎么填
 
