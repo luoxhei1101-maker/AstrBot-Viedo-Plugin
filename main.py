@@ -79,27 +79,54 @@ from .platforms import names as resolver_names
 _BILI_MINIAPP_APPID = "1109937557"
 
 
-def _find_bili_bvid_in_messages(messages: list) -> str | None:
-    """从消息组件链里提取 B 站小程序卡片的 bvid。
+def _find_bili_link_in_messages(messages: list) -> str | None:
+    """从消息组件链里提取 B 站小程序卡片的跳转链接。
 
     QQ 群里分享 B 站视频时，常以「小程序卡片」（``CQ:json`` 消息段）的形式
     出现，而不是链接文本。这种消息的 ``get_message_str()`` 是空串，正则匹配
-    不到；但消息链里有 ``Json`` 组件，其 ``data`` 里藏着 B 站的 appid 和视频
-    的 BV 号（在 ``meta.miniapp.path`` / ``meta.detail_1.url`` 之类字段里）。
+    不到；但消息链里有 ``Json`` 组件。
 
-    这里把 data 序列化成字符串，用 BV 号格式（``BV`` + 10 位字母数字）提取，
-    并确认确实是 B 站（含 bilibili / B 站 appid），避免误抓别的小程序。
+    **真实卡片结构**（实测抓到的）：``data.meta.detail_1`` 里有 B 站 appid
+    ``1109937557``，跳转链接在 ``qqdocurl`` 字段（``b23.tv/xxx`` 短链）里——
+    BV 号**不直接出现**，所以不能只抠 ``BV`` 号，得把短链交出去让 B 站
+    resolver 自己展开。
+
+    返回 B 站 resolver 能直接处理的链接；找不到返回 ``None``。
     """
     for comp in messages:
         if not isinstance(comp, Comp.Json):
             continue
+        data = comp.data
+        if not isinstance(data, dict):
+            continue
         try:
-            raw = json.dumps(comp.data, ensure_ascii=False)
+            raw = json.dumps(data, ensure_ascii=False)
         except (TypeError, ValueError):
             continue
+
+        # 确认是 B 站小程序（appid / bilibili / b23.tv 任一命中）
+        if not (
+            _BILI_MINIAPP_APPID in raw
+            or "bilibili" in raw.lower()
+            or "b23.tv" in raw.lower()
+        ):
+            continue
+
+        # 优先取 qqdocurl（b23.tv 短链）；新/旧版字段名都兼容
+        meta = data.get("meta") or {}
+        detail = meta.get("detail_1") or meta.get("miniapp") or {}
+        if isinstance(detail, dict):
+            for key in ("qqdocurl", "url", "path"):
+                v = detail.get(key)
+                if isinstance(v, str) and (
+                    "b23.tv" in v or "bilibili.com" in v or "BV" in v
+                ):
+                    return v
+
+        # 兜底：从整段 data 里抠 BV 号拼标准链接
         m = re.search(r"BV[0-9A-Za-z]{10}", raw)
-        if m and ("bilibili" in raw.lower() or _BILI_MINIAPP_APPID in raw):
-            return m.group(0)
+        if m:
+            return f"https://www.bilibili.com/video/{m.group(0)}"
     return None
 
 
@@ -112,7 +139,7 @@ class BiliMiniappFilter(CustomFilter):
     """
 
     def filter(self, event: AstrMessageEvent, cfg: AstrBotConfig) -> bool:
-        return _find_bili_bvid_in_messages(event.get_messages()) is not None
+        return _find_bili_link_in_messages(event.get_messages()) is not None
 
 
 # 需要 event / Context 才能干活、不走 resolver 注册表的命令。
@@ -369,17 +396,16 @@ class Main(Star):
 
     @filter.custom_filter(BiliMiniappFilter)
     async def on_bili_miniapp(self, event: AstrMessageEvent):
-        """B 站小程序卡片 → 提取 bvid → 走 B 站解析。
+        """B 站小程序卡片 → 提取跳转链接 → 走 B 站解析。
 
         小程序卡片是 ``CQ:json`` 消息段，``get_message_str()`` 是空串，
         正则匹配不到，所以用自定义 filter 检查消息组件链（见
         ``BiliMiniappFilter``）。
         """
-        bvid = _find_bili_bvid_in_messages(event.get_messages())
-        if not bvid:
+        link = _find_bili_link_in_messages(event.get_messages())
+        if not link:
             return
-        logger.info(f"[R插件] 识别到 B 站小程序卡片: {bvid}")
-        link = f"https://www.bilibili.com/video/{bvid}"
+        logger.info(f"[R插件] 识别到 B 站小程序卡片: {link[:80]}")
         async for item in self._dispatch(
             event, link, forced_resolver="bilibili", forced_name="哔哩哔哩"
         ):
