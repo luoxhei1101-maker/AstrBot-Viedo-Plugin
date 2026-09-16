@@ -196,7 +196,8 @@ aiocqhttp（QQ OneBot）、Telegram、Discord、飞书 / Lark、企业微信、Q
 
 **B站（提升最大）**：未配 Cookie 走 360P 老接口；配了走 **WBI 签名 + DASH 高清**（默认 1080P），音视频分离后用容器内 ffmpeg 无损合并（`-c copy`）。WBI 签名算法在 `core/bili_wbi.py` 完整实现，不依赖第三方库。
 
-**抖音**：SSR 分享页带 Cookie 数据更完整；主路仍走 SSR（web API 的 `a-bogus` 签名未移植）。
+**抖音**：SSR 分享页带 Cookie 数据更完整；主解析走 SSR（免 `a-bogus`），
+图集做多 CDN 候选下载（签名失效自动换节点），评论复用原版 `a-bogus` 签名（需 Cookie）。
 
 **快手**：双路——优先网页 SSR 直解，失败回落第三方接口。
 
@@ -211,9 +212,9 @@ aiocqhttp（QQ OneBot）、Telegram、Discord、飞书 / Lark、企业微信、Q
 | 快手 / 西瓜 / 皮皮虾 / 皮皮搞笑 / QQ小世界 / 贴吧 / 即刻 | ✅ | 第三方接口轮换 |
 | 微博 | ✅ | 正文 / 图集 / 视频，含 `mid2id` base62 转换 |
 | AcFun | ✅ | ajaxpipe 抠 JSON → m3u8 |
-| 哔哩哔哩 | ✅ 主干 | WBI 签名 + Cookie + DASH + ffmpeg 合并；扫码登录；BBDown / 番剧 / 直播 / 评论截图未移植 |
+| 哔哩哔哩 | ✅ 主干 | WBI 签名 + Cookie + DASH + ffmpeg 合并；扫码登录；评论（合并转发）；BBDown / 番剧 / 直播未移植 |
 | AI 总结 / 翻译 | ✅ | 复用 AstrBot 自带的 LLM |
-| 抖音 | 🟡 | SSR 路线（配 Cookie 更完整）；`a-bogus` 签名未移植 |
+| 抖音 | ✅ 主干 | SSR 路线 + 图集候选下载；评论（复用 a-bogus，需 Cookie） |
 | 小黑盒 | 🟡 | 帖子解析（含 hkey 签名）；游戏页未移植 |
 | 米游社 / 微视 | 🟡 | 主干已移植 |
 | 网易云 / QQ音乐 / 汽水 | 🟡 | 第三方直链；扫码、歌单、音质未移植 |
