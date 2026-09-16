@@ -11,7 +11,9 @@
 
 ## 目录
 
-- [快速开始](#快速开始)
+- [必要环境](#必要环境)
+- [安装步骤](#安装步骤)
+- [推荐部署环境](#推荐部署环境)
 - [怎么用：所有触发方式](#怎么用所有触发方式)
 - [配置说明](#配置说明)
 - [Cookie 怎么填](#cookie-怎么填)
@@ -22,18 +24,95 @@
 
 ---
 
-## 快速开始
+## 必要环境
 
-1. 把整个目录放进 AstrBot 的插件目录（本插件**不依赖 AstrBot 之外的任何第三方库**）：
+### AstrBot 本体
 
-   ```bash
-   cd AstrBot/data/plugins
-   git clone https://gitee.com/MuLinYa259/astrbot-viedo.git astrbot_plugin_rconsole
-   ```
+- AstrBot `>=4.16, <5`（本插件在 v4.28.1 上验证通过）
+- Python 3.10+（AstrBot 自带，无需单独安装）
 
-2. 到 AstrBot WebUI 的「插件」页点重载，插件即生效。
+### 外部工具（按需）
 
-3. 打开插件配置页（下面 [配置说明](#配置说明)），按需填 Cookie / 开关平台。
+| 工具 | 是否必需 | 用途 |
+|---|---|---|
+| `ffmpeg` + `ffprobe` | ✅ 必需（B站高清） | B站 DASH 音视频分离后合并 / 转码 / m3u8 拼接 |
+| `yt-dlp` | 可选 | YouTube 等站点下载 |
+| `BBDown` | 可选 | B站高画质下载（原版可选） |
+| `aria2c` | 可选 | 多线程下载器 |
+| `tdl` | 可选 | Telegram 文件下载 |
+
+> 插件启动时会自动探测这些工具，缺哪个日志里会直接列出来。
+> 除了 ffmpeg，其余都是「用不到就不装」，不影响主要功能。
+
+### Python 库（仅扫码登录）
+
+B站扫码登录（`#RBQ`）需要 `qrcode[pil]`。**AstrBot 官方 Docker 镜像已内置**；
+本地部署的话执行 `pip install qrcode[pil]` 即可。
+
+> 插件本身**不依赖 AstrBot 之外的任何第三方库**（HTTP 用 AstrBot 自带的 aiohttp）。
+
+---
+
+## 安装步骤
+
+### 方式一：Docker 部署（推荐）
+
+AstrBot 官方推荐用 Docker 跑，插件目录是宿主机上挂载出来的 `AstrBot/data/plugins`：
+
+```bash
+# 1. 先按 AstrBot 官方文档起容器（把 data 目录挂出来）
+docker run -d --name astrbot \
+  -p 6185:6185 \
+  -v $PWD/AstrBot/data:/AstrBot/data \
+  soulter/astrbot
+
+# 2. 把插件 clone 到插件目录
+cd AstrBot/data/plugins
+git clone https://gitee.com/MuLinYa259/astrbot-viedo.git astrbot_plugin_rconsole
+
+# 3. 重启容器（或到 WebUI 点重载插件）
+docker restart astrbot
+```
+
+### 方式二：本地部署
+
+AstrBot 本地（非 Docker）跑的话，插件目录在 AstrBot 安装目录下的 `data/plugins`：
+
+```bash
+cd <AstrBot安装目录>/data/plugins
+git clone https://gitee.com/MuLinYa259/astrbot-viedo.git astrbot_plugin_rconsole
+```
+
+### 方式三：下载 zip（不装 git）
+
+从仓库页下载 zip → 解压 → 把**解压出来的目录**放进 `data/plugins`，目录名保持
+`astrbot_plugin_rconsole`（去掉 zip 自带的 `-main` 后缀）。
+
+### 安装后
+
+1. 到 AstrBot WebUI 的「插件」页点**重载**（或重启 AstrBot）。
+2. 打开插件配置页，按需填 Cookie、开关平台。
+3. 看启动日志：会打印一行「识别规则 X 条 / resolver X 个」+ 外部工具探测结果，
+   缺 ffmpeg 之类会直接提示。
+
+---
+
+## 推荐部署环境
+
+| 项 | 推荐 | 说明 |
+|---|---|---|
+| 系统 | **Linux（Debian / Ubuntu）+ Docker** | AstrBot 官方推荐；容器化隔离、一键升级、免手工配依赖 |
+| 内存 | **≥ 2GB**（下载合并高清建议 4GB+） | AstrBot 本体 ~260MB + 插件；下载 / 合并大视频会临时占用 |
+| 磁盘 | ≥ 5GB 空闲 | 视频 / 图集临时文件 + 本地缓存 |
+| GPU | 不需要 | 纯网络 + ffmpeg，无推理负载 |
+
+> Windows / macOS 也能跑（AstrBot 支持本地部署），但生产长期挂机更推荐 Linux。
+> 特别提醒：走第三方云服务器时，记得在**安全组**放行 AstrBot 管理端口（默认 6185）
+> 和消息平台（OneBot 等）的端口——云安全组拦截是「端口连不通」最常见的原因。
+
+### 支持的消息平台
+
+aiocqhttp（QQ OneBot）、Telegram、Discord、飞书 / Lark、企业微信、QQ 官方、Slack、钉钉。
 
 ---
 
