@@ -244,16 +244,25 @@ async def download_many_candidates(
 
         async def one(cands: list[str]) -> Path | None:
             async with sem:
+                last_err = ""
                 for url in cands:
                     try:
                         return await _stream_one(
                             session, url, prefix=prefix, max_bytes=max_bytes
                         )
                     except Exception as exc:  # noqa: BLE001 - 换下一个候选
+                        last_err = f"{type(exc).__name__}: {exc}"
                         logger.debug(
                             f"[R插件] 候选下载失败 {url[:60]}: {exc}"
                         )
                         continue
+                # 全部候选都失败：这条是**可诊断的关键信息**（几个候选、什么错），
+                # 用 warning 级别打出来——不然用户反馈「图没发出来」时，
+                # 日志里只剩一条「某张下载失败」，看不出是候选全废还是签名过期
+                logger.warning(
+                    f"[R插件] 图片候选全部失败（{len(cands)} 个候选），"
+                    f"末次错误: {last_err}"
+                )
                 return None
 
         results = await asyncio.gather(*(one(c) for c in candidates))

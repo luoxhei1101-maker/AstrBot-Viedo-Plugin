@@ -877,60 +877,169 @@ class Main(Star):
             return "音频"
         return ""
 
+    async def _download_album_stills(
+        self, result: ResolveResult, still_images: list[str]
+    ) -> list[Path | None]:
+        """下载图集里的静态图，返回与 ``still_images`` 等长的路径列表。
+
+        **为什么必须自己下载，不能把 URL 直接交给发送端？**
+
+        抖音图集的图片直链是 ``p3-pc-sign.douyinpic.com`` 这类**带签名的 CDN
+        地址**，而且：
+
+        1. 同一个 ``url_list`` 里有 ``.webp`` / ``.jpeg`` 两个变体，**哪一个
+           403 是随机的**——实测同一个作品里，有时 webp 挂、有时 jpeg 挂，
+           没有固定顺序可用；
+        2. 下载需要带 ``Referer: https://www.douyin.com/``，否则大概率 403。
+
+        AstrBot 的 ``respond.stage`` 在真正发出 ``Comp.Image.fromURL(url)`` 时，
+        是用它自己的下载器抓这个 URL 的——**不带 Referer、也没有候选回退**，
+        只要那一张失败就抛 ``DownloadFileHTTPError``，**整条消息链一起失败**。
+        这就是「图集一条都没发出来、只剩简介文字」的根因。
+
+        所以图集的静态图一律先用本插件自己的下载器（``_headers_for`` 补
+        Referer + ``download_many_candidates`` 逐个候选回退）落到本地，
+        发送端只发本地文件，不再碰远程签名 URL。
+        """
+        if not still_images:
+            return []
+
+        concurrency = max(1, int(self.conf_get("plugin.download_concurrency", 6) or 6))
+        max_mb = int(self.conf_get("global.videoSizeLimit", 70) or 70)
+        max_bytes = max_mb * 1024 * 1024
+
+        candidates = result.extra.get("image_candidates")
+        if (
+            isinstance(candidates, list)
+            and len(candidates) == len(still_images)
+            and all(isinstance(c, list) and c for c in candidates)
+        ):
+            paths = await download_many_candidates(
+                candidates,
+                prefix="album",
+                max_bytes=max_bytes,
+                concurrency=concurrency,
+            )
+        else:
+            # 没有候选信息（旧结果 / 缓存里的老格式）就按单 URL 下载
+            paths = await download_many(
+                still_images,
+                prefix="album",
+                max_bytes=max_bytes,
+                concurrency=concurrency,
+            )
+        return list(paths)
+
+    async def _download_album_videos(
+        self, result: ResolveResult, anim_videos: list[str]
+    ) -> list[Path | None]:
+        """下载图集里的动图视频，返回与 ``anim_videos`` 等长的路径列表。
+
+        动图的播放直链（``aweme/v1/play``）同样会 403，而且 ``Comp.Video.fromURL``
+        走的是发送端的下载器，失败同样会拖垮整条消息链。所以也一并落到本地。
+
+        这里刻意用**串行**：动图视频体积大，并发下载容易把带宽打满、
+        也让适配器那边的发送排队。数量通常个位数，串行完全可接受。
+        """
+        if not anim_videos:
+            return []
+
+        max_mb = int(self.conf_get("global.videoSizeLimit", 70) or 70)
+        max_bytes = max_mb * 1024 * 1024
+
+        paths: list[Path | None] = []
+        for url in anim_videos:
+            try:
+                path = await download_media(
+                    url, prefix="album_video", max_bytes=max_bytes
+                )
+                paths.append(path)
+            except Exception as exc:  # noqa: BLE001 - 单个动图失败不影响整批
+                logger.warning(f"[R插件][抖音] 动图下载失败 {url[:80]}: {exc}")
+                paths.append(None)
+        return paths
+
     async def _send_album(self, event: AstrMessageEvent, result: ResolveResult):
         """发送抖音图集 —— **静态图当图片发，动图当视频发，顺序按作品原样**。
 
         原版 ``processDouyinImageAlbum`` 就是这么做的：逐项看有没有视频轨，
         有就下载下来当视频发（还会用 ffmpeg 合 BGM），没有就 ``segment.image``。
-        移植时为了省掉落盘和 ffmpeg，动图改成发**播放直链**（``Comp.Video.fromURL``）
-        ——音轨本来就在动图的视频轨里，不是静音视频。
 
-        发送规则（和普通图集一致）：
+        **移植版的差异（重要）：** 原版在 Yunzai 下可以 ``segment.image(url)``
+        把远程 URL 直接交出去，因为那边有统一的图片代理会补 Referer。AstrBot
+        这边发送端的下载器不补 Referer、也没有候选回退，抖音的签名 CDN 直链
+        会 403 并把整条消息链拖失败（详见 ``_download_album_stills`` 的说明）。
+        所以这里**静态图和动图都先落到本地**，再发本地文件。
+
+        发送规则：
 
         - 项数不超过 ``max_images``：一条消息链按顺序发完
-        - 超过阈值：先把静态图并发下载到本地，用合并转发完整发出（顺序不变）
+        - 超过阈值：静态图/动图都下载到本地后，用合并转发完整发出（顺序不变）
         """
         limit = max(1, int(self.conf_get("plugin.max_images", 9) or 9))
         kinds = result.extra.get("album_kinds") or []
         n_still = kinds.count("still")
         n_anim = kinds.count("animated")
 
-        # 动图直链：videos 里全是动图，顺序与作品一致
+        # 动图视频链：videos 里全是动图，顺序与作品一致
         anim_videos = list(result.videos)
         still_images = list(result.images)
-        candidates = result.extra.get("image_candidates")
+
+        if not kinds:
+            return
 
         logger.debug(
             f"[R插件][抖音] 发送图集：静态图 {n_still} 张，动图 {n_anim} 个，"
             f"发送模式={'合并转发' if len(kinds) > limit else '直发'}"
         )
 
-        # ---- 不超过阈值：单条消息链按顺序发 ----
+        # ---- 分两路下载（静态图并发 + 带候选回退，动图串行）----
+        still_paths = await self._download_album_stills(result, still_images)
+        anim_paths = await self._download_album_videos(result, anim_videos)
+
+        # 下载成功的才登记给 AstrBot 回收
+        for path in [*still_paths, *anim_paths]:
+            if path is not None:
+                event.track_temporary_local_file(str(path))
+
+        # ---- 第一档：直发（项数不超过阈值）----
         if len(kinds) <= limit:
             chain = []
-            # 逐项还原顺序：动图从 videos 队列取，静态图从 images 队列取
             vi = 0
             ii = 0
             for kind in kinds:
                 if kind == "animated":
-                    if vi < len(anim_videos):
-                        try:
-                            chain.append(Comp.Video.fromURL(anim_videos[vi]))
-                        except Exception as exc:  # noqa: BLE001
-                            logger.debug(f"[R插件] 跳过无效动图 {anim_videos[vi]}: {exc}")
+                    if vi < len(anim_paths):
+                        path = anim_paths[vi]
+                        if path is not None:
+                            try:
+                                chain.append(Comp.Video.fromFileSystem(str(path)))
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(f"[R插件] 本地动图构造失败: {exc}")
                         vi += 1
                 else:
-                    if ii < len(still_images):
-                        try:
-                            chain.append(Comp.Image.fromURL(still_images[ii]))
-                        except Exception as exc:  # noqa: BLE001
-                            logger.debug(f"[R插件] 跳过无效图片 {still_images[ii]}: {exc}")
+                    if ii < len(still_paths):
+                        path = still_paths[ii]
+                        if path is not None:
+                            try:
+                                chain.append(Comp.Image.fromFileSystem(str(path)))
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(f"[R插件] 本地图片构造失败: {exc}")
                         ii += 1
             if chain:
                 yield event.chain_result(chain)
+            else:
+                # 一张都没下下来 —— 明确告诉用户，别静默失败
+                logger.warning(
+                    f"[R插件][抖音] 图集媒体全部下载失败（共 {len(kinds)} 项）"
+                )
+                yield event.plain_result(
+                    f"⚠️ 抖音图集媒体下载失败（共 {len(kinds)} 项），"
+                    "可能是链接签名过期或 Cookie 失效，可稍后重试"
+                )
             return
 
-        # ---- 超过阈值 ----
+        # ---- 第二档：超过阈值 ----
         if not self.conf_get("plugin.album_forward_when_exceed", True):
             # 用户关掉了转发，退回「只发前 limit 项 + 提示」
             chain = []
@@ -940,51 +1049,28 @@ class Main(Star):
             for kind in kinds:
                 if sent >= limit:
                     break
-                if kind == "animated" and vi < len(anim_videos):
-                    try:
-                        chain.append(Comp.Video.fromURL(anim_videos[vi]))
-                        sent += 1
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug(f"[R插件] 跳过无效动图: {exc}")
+                if kind == "animated" and vi < len(anim_paths):
+                    path = anim_paths[vi]
                     vi += 1
-                elif kind == "still" and ii < len(still_images):
-                    try:
-                        chain.append(Comp.Image.fromURL(still_images[ii]))
-                        sent += 1
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug(f"[R插件] 跳过无效图片: {exc}")
+                    if path is not None:
+                        try:
+                            chain.append(Comp.Video.fromFileSystem(str(path)))
+                            sent += 1
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(f"[R插件] 本地动图构造失败: {exc}")
+                elif kind == "still" and ii < len(still_paths):
+                    path = still_paths[ii]
                     ii += 1
+                    if path is not None:
+                        try:
+                            chain.append(Comp.Image.fromFileSystem(str(path)))
+                            sent += 1
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(f"[R插件] 本地图片构造失败: {exc}")
             if chain:
                 yield event.chain_result(chain)
             yield event.plain_result(f"（共 {len(kinds)} 项，只发了前 {limit} 项）")
             return
-
-        # 并发下载静态图（抖音每张图带候选 URL，签名时效不一，逐个尝试）
-        concurrency = max(1, int(self.conf_get("plugin.download_concurrency", 6) or 6))
-        max_mb = int(self.conf_get("global.videoSizeLimit", 70) or 70)
-        max_bytes = max_mb * 1024 * 1024
-
-        still_paths: list[Path | None] = []
-        if still_images:
-            if (
-                isinstance(candidates, list)
-                and candidates
-                and isinstance(candidates[0], list)
-                and len(candidates) == len(still_images)
-            ):
-                still_paths = await download_many_candidates(
-                    candidates,
-                    prefix="album",
-                    max_bytes=max_bytes,
-                    concurrency=concurrency,
-                )
-            else:
-                still_paths = await download_many(
-                    still_images,
-                    prefix="album",
-                    max_bytes=max_bytes,
-                    concurrency=concurrency,
-                )
 
         # 合并转发的「发送者」用发起解析的这个用户：昵称 + QQ 号都取发送者
         node_name = (event.get_sender_name() or "").strip() or "解析结果"
@@ -996,18 +1082,23 @@ class Main(Star):
         ii = 0
         for kind in kinds:
             if kind == "animated":
-                if vi >= len(anim_videos):
+                if vi >= len(anim_paths):
                     continue
-                url = anim_videos[vi]
+                path = anim_paths[vi]
                 vi += 1
+                if path is None:
+                    skipped += 1
+                    continue
                 try:
                     nodes.append(
                         Comp.Node(
-                            [Comp.Video.fromURL(url)], name=node_name, uin=node_uin
+                            [Comp.Video.fromFileSystem(str(path))],
+                            name=node_name,
+                            uin=node_uin,
                         )
                     )
                 except Exception as exc:  # noqa: BLE001
-                    logger.debug(f"[R插件] 跳过无效动图 {url}: {exc}")
+                    logger.warning(f"[R插件] 转发节点动图构造失败: {exc}")
                     skipped += 1
             else:
                 if ii >= len(still_paths):
@@ -1015,82 +1106,52 @@ class Main(Star):
                 path = still_paths[ii]
                 ii += 1
                 if path is None:
-                    # 下载失败（防盗链 / 签名过期）直接跳过，别把 URL 塞进 Node——
-                    # Node 转 base64 时会再下载一次，失败会拖垮整条合并转发
                     skipped += 1
                     continue
-                event.track_temporary_local_file(str(path))
-                img = Comp.Image.fromFileSystem(str(path))
+                try:
+                    img = Comp.Image.fromFileSystem(str(path))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[R插件] 转发节点图片构造失败: {exc}")
+                    skipped += 1
+                    continue
                 nodes.append(Comp.Node([img], name=node_name, uin=node_uin))
 
         if not nodes:
-            # 全部失败，退回「直发 URL」的旧行为，至少别让用户干等
-            chain = []
-            for url in still_images[:limit]:
-                try:
-                    chain.append(Comp.Image.fromURL(url))
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug(f"[R插件] 跳过无效图片 {url}: {exc}")
-            for url in anim_videos[:limit]:
-                try:
-                    chain.append(Comp.Video.fromURL(url))
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug(f"[R插件] 跳过无效动图 {url}: {exc}")
-            if chain:
-                yield event.chain_result(chain)
+            logger.warning(
+                f"[R插件][抖音] 图集媒体全部下载失败（共 {len(kinds)} 项），无法合并转发"
+            )
+            yield event.plain_result(
+                f"⚠️ 抖音图集媒体下载失败（共 {len(kinds)} 项），"
+                "可能是链接签名过期或 Cookie 失效，可稍后重试"
+            )
             return
 
         if skipped:
             yield event.plain_result(f"（{skipped} 项发送失败，已跳过）")
         yield event.chain_result([Comp.Nodes(nodes)])
 
-    async def _send_images(self, event: AstrMessageEvent, result: ResolveResult):
-        """发送图片列表。图集数量超过 ``max_images`` 时用合并转发完整发出。"""
-        limit = max(1, int(self.conf_get("plugin.max_images", 9) or 9))
-        urls = result.images
-        total = len(urls)
+    async def _download_images(
+        self, result: ResolveResult, urls: list[str]
+    ) -> list[Path | None]:
+        """下载一组图片，返回与 ``urls`` 等长的路径列表。
 
-        # ---- 不超过阈值：直接一条消息链发完 ----
-        if total <= limit:
-            chain = []
-            for img in urls:
-                try:
-                    chain.append(Comp.Image.fromURL(img))
-                except Exception as exc:  # noqa: BLE001 - 单张图失败不该拖垮整条
-                    logger.debug(f"[R插件] 跳过无效图片 {img}: {exc}")
-            if chain:
-                yield event.chain_result(chain)
-            return
+        **为什么不能把 URL 直接交给发送端？** 见 ``_download_album_stills``：
+        带签名的 CDN 直链需要正确 Referer、而且同一张图有多个候选（哪个 403
+        是随机的），AstrBot 发送端两者都不具备，一旦失败是**整条消息链**失败。
+        所以图片一律先落到本地再发本地文件。
+        """
+        if not urls:
+            return []
 
-        # ---- 超过阈值：合并转发完整发出 ----
-        if not self.conf_get("plugin.album_forward_when_exceed", True):
-            # 用户关掉了转发，退回「只发前 limit 张 + 提示」的旧行为
-            picked = urls[:limit]
-            chain = []
-            for img in picked:
-                try:
-                    chain.append(Comp.Image.fromURL(img))
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug(f"[R插件] 跳过无效图片 {img}: {exc}")
-            if chain:
-                yield event.chain_result(chain)
-            yield event.plain_result(f"（共 {total} 张，只发了前 {limit} 张）")
-            return
-
-        # 并发下载所有图片到本地，用本地文件构造转发节点。
-        # 好处：并发（快）+ Node 内部转 base64 时不再重复走网络下载。
         concurrency = max(1, int(self.conf_get("plugin.download_concurrency", 6) or 6))
         max_mb = int(self.conf_get("global.videoSizeLimit", 70) or 70)
         max_bytes = max_mb * 1024 * 1024
 
-        # 抖音图集带了候选 URL（每张图多个 CDN 节点，签名时效不一），逐个尝试，
-        # 第一个能下载的用——避免某张图固定取某个 URL 时因签名失效而 403。
         candidates = result.extra.get("image_candidates")
         if (
             isinstance(candidates, list)
-            and candidates
-            and isinstance(candidates[0], list)
             and len(candidates) == len(urls)
+            and all(isinstance(c, list) and c for c in candidates)
         ):
             paths = await download_many_candidates(
                 candidates,
@@ -1105,6 +1166,63 @@ class Main(Star):
                 max_bytes=max_bytes,
                 concurrency=concurrency,
             )
+        return list(paths)
+
+    async def _send_images(self, event: AstrMessageEvent, result: ResolveResult):
+        """发送图片列表。图集数量超过 ``max_images`` 时用合并转发完整发出。
+
+        和 ``_send_album`` 一样，图片**先下载到本地再发**：远程签名直链交给
+        发送端会因缺少 Referer / 候选回退而整条失败（详见
+        ``_download_album_stills`` 的说明）。
+        """
+        limit = max(1, int(self.conf_get("plugin.max_images", 9) or 9))
+        urls = result.images
+        total = len(urls)
+
+        # ---- 不超过阈值：全部下载到本地，一条消息链按顺序发完 ----
+        if total <= limit:
+            paths = await self._download_images(result, urls)
+            chain = []
+            for path in paths:
+                if path is None:
+                    continue
+                event.track_temporary_local_file(str(path))
+                try:
+                    chain.append(Comp.Image.fromFileSystem(str(path)))
+                except Exception as exc:  # noqa: BLE001 - 单张失败不拖垮整条
+                    logger.warning(f"[R插件] 本地图片构造失败: {exc}")
+            if chain:
+                yield event.chain_result(chain)
+            else:
+                # 全部失败：明确报出来，别静默什么都不发
+                logger.warning(f"[R插件] 图片全部下载失败（共 {total} 张）")
+                yield event.plain_result(
+                    f"⚠️ {result.platform} 图片下载失败（共 {total} 张），"
+                    "可能是链接签名过期或 Cookie 失效，可稍后重试"
+                )
+            return
+
+        # ---- 超过阈值：合并转发完整发出 ----
+        if not self.conf_get("plugin.album_forward_when_exceed", True):
+            # 用户关掉了转发，退回「只发前 limit 张 + 提示」的旧行为
+            paths = await self._download_images(result, urls[:limit])
+            chain = []
+            for path in paths:
+                if path is None:
+                    continue
+                event.track_temporary_local_file(str(path))
+                try:
+                    chain.append(Comp.Image.fromFileSystem(str(path)))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[R插件] 本地图片构造失败: {exc}")
+            if chain:
+                yield event.chain_result(chain)
+            yield event.plain_result(f"（共 {total} 张，只发了前 {limit} 张）")
+            return
+
+        # 并发下载所有图片到本地，用本地文件构造转发节点。
+        # 好处：并发（快）+ Node 内部转 base64 时不再重复走网络下载。
+        paths = await self._download_images(result, urls)
 
         # 合并转发的「发送者」用发起解析的这个用户：昵称 + QQ 号都取发送者
         node_name = (event.get_sender_name() or "").strip() or "解析结果"
@@ -1119,19 +1237,22 @@ class Main(Star):
                 skipped += 1
                 continue
             event.track_temporary_local_file(str(path))
-            img = Comp.Image.fromFileSystem(str(path))
+            try:
+                img = Comp.Image.fromFileSystem(str(path))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[R插件] 转发节点图片构造失败: {exc}")
+                skipped += 1
+                continue
             nodes.append(Comp.Node([img], name=node_name, uin=node_uin))
 
         if not nodes:
-            # 全部下载失败，退回「直发前 limit 张 URL」的旧行为，至少别让用户干等
-            chain = []
-            for img in urls[:limit]:
-                try:
-                    chain.append(Comp.Image.fromURL(img))
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug(f"[R插件] 跳过无效图片 {img}: {exc}")
-            if chain:
-                yield event.chain_result(chain)
+            # 全部下载失败：明确报出来，别再退回「发 URL」的老路——
+            # 那条路会因签名/Referer 问题整条失败，等于什么都没发。
+            logger.warning(f"[R插件] 图片全部下载失败（共 {total} 张），无法合并转发")
+            yield event.plain_result(
+                f"⚠️ {result.platform} 图片下载失败（共 {total} 张），"
+                "可能是链接签名过期或 Cookie 失效，可稍后重试"
+            )
             return
 
         if skipped:

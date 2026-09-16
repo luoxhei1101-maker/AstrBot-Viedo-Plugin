@@ -1,5 +1,60 @@
 # 更新日志
 
+## v1.1.5（2026-09-17）
+
+### 修复
+
+- **抖音图集整个发不出来（只剩一条「🔗 识别：抖音」文字）**。这是 v1.1.3 / v1.1.4
+  改动引入的**回归**，回滚点在于「图集走 `_send_album` 之后，静态图改成了发
+  `Comp.Image.fromURL(直链)`」。
+
+  **根因**：抖音图集的图片直链是 `p3-pc-sign.douyinpic.com/...` 这类**带签名的
+  CDN 地址**，有三个坑叠在一起：
+
+  1. 同一个 `url_list` 里有 `.webp` / `.jpeg` 两个变体，**哪一个 403 是随机的**；
+  2. 下载必须带 `Referer: https://www.douyin.com/`；
+  3. AstrBot 的 `respond.stage` 在真正发出 `Comp.Image.fromURL(url)` 时用的是
+     **它自己的下载器**——既不补 Referer、也没有候选回退，**一张失败就抛
+     `DownloadFileHTTPError`，整条消息链一起失败**。
+
+  实测矩阵（服务器真实 Cookie，同一个作品内不同项的 403 情况都不一样）：
+
+  | 作品 | 项 | 候选[0] `.webp` | 候选[1] `.jpeg` |
+  |---|---|---|---|
+  | `GRBfoLTjIu0` | 0 | **403** | 200（123KB） |
+  | `j9_O6iEkYYu` | 0 | 200 | **403** |
+  | `j9_O6iEkYYu` | 1 | 200 | 200 |
+  | `vudrS_L_16Y` | 0 | 200 | **403** |
+  | `vudrS_L_16Y` | 1 | **403** | 200 |
+
+  可见**没有任何固定候选顺序可用**，同时 AstrBot 那边一失败就是整条链失败——
+  于是用户看到的就是「简介发了，图一张没有」。
+
+  **修复**：图集/图片的媒体**一律先下载到本地再发**，发送端只接收
+  `Comp.Image.fromFileSystem` / `Comp.Video.fromFileSystem`，**绝不把远程签名
+  直链交给发送端**：
+
+  - `main.py` 新增 `_download_images()` / `_download_album_stills()` /
+    `_download_album_videos()`，统一走本插件自己的下载器（`_headers_for` 补
+    Referer + `download_many_candidates` 逐个候选回退）；
+  - `_send_album()`、`_send_images()` 的**直发档**也改为先下载再发本地文件
+    （此前直发档是「不超过 9 张就直接发 URL」，正是用户踩到的路径）；
+  - 全部下载失败时**明确发一条失败提示**，不再静默什么都不发。
+
+  **验证**：5 个真实作品（含用户反馈的 `GRBfoLTjIu0`）端到端下载全部成功，
+  之前完全发不出的那张现在能拿到 123KB。
+
+### 新增
+
+- `tests/test_album_send_path.py` —— 发送路径的离线回归测试（24 项全通过），
+  锁定的核心不变量是「**静态图/动图一律 `fromFileSystem`，发送路径不得出现
+  远程媒体直发**」。含静态 AST 断言（禁止 `Comp.Image.fromURL` /
+  `Comp.Video.fromURL` 出现在发送方法里）、本地假 HTTP 服务的候选回退行为测试、
+  以及用真实 `_send_album` 实现跑的混排顺序与失败提示测试。
+- `core/downloader.py` 的候选下载在**全部候选失败**时改为 `warning` 级日志并
+  带上候选个数与末次错误——之前是 `debug`，用户反馈「图没发出来」时日志里
+  什么都看不到。
+
 ## v1.1.4（2026-09-17）
 
 ### 修复
