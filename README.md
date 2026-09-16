@@ -64,15 +64,31 @@ git clone https://gitee.com/MuLinYa259/astrbot-viedo.git astrbot_plugin_rconsole
 
 ## Cookie 怎么填
 
-抖音、快手、B站 三个平台的 Cookie 在插件配置页的对应分组里：
+**不用自己拼格式了。** 原插件要求用户手动拼成
+`odin_tt=xxx;passport_fe_beating_status=xxx;sid_guard=xxx;...`，漏个分号就解析失败，
+而且报错还看不出来是哪儿错了。现在每个平台都有**两种填法，二选一**：
 
-| 平台 | 配置路径 | 说明 |
+| 填法 | 适合 | 怎么做 |
 |---|---|---|
-| B站 | `bili` → **哔哩哔哩SESSDATA** | 填 `SESSDATA` 的值，或整段 Cookie 串，两种都认 |
-| 抖音 | `douyin` → **抖音的Cookie** | 整段复制，建议包含 `ttwid` |
-| 快手 | `other` → **快手的Cookie** | 本移植版新增（原版快手走第三方接口，不需要 Cookie） |
+| ① **整段 Cookie** | 已经复制了一整段 | 直接粘进原字段（`抖音的Cookie` 等），插件原样透传 |
+| ② **逐项填写** | 只想填关键的几个 | 展开「XXXCookie 逐项填写」，一项一项填，插件自动拼 |
 
-取法：浏览器登录后 F12 → Network → 任意请求 → Request Headers → Cookie 整段复制。
+逐项填写时插件会自动组成标准格式 `key=value; key=value; ...`，
+并且**会根据必需项做体检**——缺关键项时在日志里点名，不用你去猜为什么解析失败。
+
+### 支持逐项填写的平台
+
+| 平台 | 配置路径 | 可逐项填的 key | 至少填一个 |
+|---|---|---|---|
+| B站 | `bili` → 哔哩哔哩SESSDATA / **逐项填写** | `SESSDATA` `bili_jct` `DedeUserID` `buvid3` | `SESSDATA` |
+| 抖音 | `douyin` → 抖音的Cookie / **逐项填写** | 原版列出的全部 12 个（`sessionid` `ttwid` `odin_tt` `sid_guard` `uid_tt` …） | `sessionid` 或 `ttwid` |
+| 快手 | `other` → 快手的Cookie / **逐项填写** | `did` `didv` `kpn` `clientid` | `did` 或 `didv` |
+| 微博 | `other` → 微博的Cookie / **逐项填写** | `_T_WM` `WEIBOCN_FROM` `MLOGIN` `XSRF-TOKEN` `M_WEIBOCN_PARAMS` | `_T_WM` 或 `MLOGIN` |
+| 酷狗 | `other` → 酷狗的Cookie / **逐项填写** | `token` `userid` `dfid` | `token` 或 `userid` |
+| 小黑盒 | `xiaoheihe` → 小黑盒的Cookie / **逐项填写** | `x_xhh_tokenid` | `x_xhh_tokenid` |
+
+> key 列表不是我猜的，是原插件 `config/tools.yaml` 注释里明确写出的格式拆出来的。
+> B 站和小黑盒的「整段」字段存的是单值，填进去会自动补 `SESSDATA=` / `x_xhh_tokenid=` 前缀。
 
 ### 配了 Cookie 之后有什么变化
 

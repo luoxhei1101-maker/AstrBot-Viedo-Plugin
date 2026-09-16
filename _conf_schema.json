@@ -301,7 +301,7 @@
       "biliSessData": {
         "description": "哔哩哔哩SESSDATA",
         "type": "string",
-        "hint": "如何获取具体参考我的文档说明：https://gitee.com/kyrzy0416/rconsole-plugin#Q&A",
+        "hint": "如何获取具体参考我的文档说明：https://gitee.com/kyrzy0416/rconsole-plugin#Q&A　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，插件自动拼。涉及字段：SESSDATA、bili_jct、DedeUserID、buvid3",
         "default": ""
       },
       "biliResolution": {
@@ -569,6 +569,37 @@
           "15",
           "20"
         ]
+      },
+      "biliSessDataFields": {
+        "description": "哔哩哔哩Cookie 逐项填写（可选）",
+        "type": "object",
+        "hint": "不想手动拼 Cookie 就逐项填这里，插件会自动拼成 key=value; key=value 的标准格式。其中 SESSDATA 至少要填一个。留空则使用上面的「整段 Cookie」。",
+        "items": {
+          "SESSDATA": {
+            "description": "SESSDATA",
+            "type": "string",
+            "default": "",
+            "hint": "必需。F12 -> Application -> Cookies 里的 SESSDATA"
+          },
+          "bili_jct": {
+            "description": "bili_jct",
+            "type": "string",
+            "default": "",
+            "hint": "选填，CSRF 校验用"
+          },
+          "DedeUserID": {
+            "description": "DedeUserID",
+            "type": "string",
+            "default": "",
+            "hint": "选填，你的 UID"
+          },
+          "buvid3": {
+            "description": "buvid3",
+            "type": "string",
+            "default": "",
+            "hint": "选填，设备标识"
+          }
+        }
       }
     }
   },
@@ -580,7 +611,7 @@
       "douyinCookie": {
         "description": "抖音的Cookie",
         "type": "string",
-        "hint": "登陆https://www.douyin.com/ - F12 - 自己替换一下：odin_tt=xxx;passport_fe_beating_status=xxx;sid_guard=xxx;uid_tt=xxx;uid_tt_ss=xxx;sid_tt=xxx;sessionid=xxx;sessionid_ss=xxx;sid_ucp_v1=xxx;ssid_ucp_v1=xxx;passport_assist_user=xxx;ttwid=xxx;",
+        "hint": "登陆https://www.douyin.com/ - F12 - 自己替换一下：odin_tt=xxx;passport_fe_beating_status=xxx;sid_guard=xxx;uid_tt=xxx;uid_tt_ss=xxx;sid_tt=xxx;sessionid=xxx;sessionid_ss=xxx;sid_ucp_v1=xxx;ssid_ucp_v1=xxx;passport_assist_user=xxx;ttwid=xxx;　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，插件自动拼。涉及字段：odin_tt、passport_fe_beating_status、sid_guard、uid_tt、uid_tt_ss、sid_tt、sessionid、sessionid_ss、sid_ucp_v1、ssid_ucp_v1、passport_assist_user、ttwid",
         "default": ""
       },
       "douyinDuration": {
@@ -668,6 +699,78 @@
           "语音",
           "自定义音乐卡片"
         ]
+      },
+      "douyinCookieFields": {
+        "description": "抖音Cookie 逐项填写（可选）",
+        "type": "object",
+        "hint": "不想手动拼 Cookie 就逐项填这里，插件会自动拼成 key=value; key=value 的标准格式。其中 sessionid 或 ttwid 至少要填一个。留空则使用上面的「整段 Cookie」。",
+        "items": {
+          "odin_tt": {
+            "description": "odin_tt",
+            "type": "string",
+            "default": "",
+            "hint": "设备标识"
+          },
+          "passport_fe_beating_status": {
+            "description": "passport_fe_beating_status",
+            "type": "string",
+            "default": ""
+          },
+          "sid_guard": {
+            "description": "sid_guard",
+            "type": "string",
+            "default": "",
+            "hint": "会话有效期凭据"
+          },
+          "uid_tt": {
+            "description": "uid_tt",
+            "type": "string",
+            "default": "",
+            "hint": "用户标识"
+          },
+          "uid_tt_ss": {
+            "description": "uid_tt_ss",
+            "type": "string",
+            "default": ""
+          },
+          "sid_tt": {
+            "description": "sid_tt",
+            "type": "string",
+            "default": ""
+          },
+          "sessionid": {
+            "description": "sessionid",
+            "type": "string",
+            "default": "",
+            "hint": "登录态主凭据，最关键的一个"
+          },
+          "sessionid_ss": {
+            "description": "sessionid_ss",
+            "type": "string",
+            "default": ""
+          },
+          "sid_ucp_v1": {
+            "description": "sid_ucp_v1",
+            "type": "string",
+            "default": ""
+          },
+          "ssid_ucp_v1": {
+            "description": "ssid_ucp_v1",
+            "type": "string",
+            "default": ""
+          },
+          "passport_assist_user": {
+            "description": "passport_assist_user",
+            "type": "string",
+            "default": ""
+          },
+          "ttwid": {
+            "description": "ttwid",
+            "type": "string",
+            "default": "",
+            "hint": "设备指纹，有它成功率明显更高"
+          }
+        }
       }
     }
   },
@@ -823,7 +926,7 @@
       "weiboCookie": {
         "description": "微博的Cookie",
         "type": "string",
-        "hint": "登陆https://m.weibo.cn/ - F12 - 格式：_T_WM=xxx; WEIBOCN_FROM=xxx; MLOGIN=xxx; XSRF-TOKEN=xxx; M_WEIBOCN_PARAMS=xxx",
+        "hint": "登陆https://m.weibo.cn/ - F12 - 格式：_T_WM=xxx; WEIBOCN_FROM=xxx; MLOGIN=xxx; XSRF-TOKEN=xxx; M_WEIBOCN_PARAMS=xxx　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，插件自动拼。涉及字段：_T_WM、WEIBOCN_FROM、MLOGIN、XSRF-TOKEN、M_WEIBOCN_PARAMS",
         "default": ""
       },
       "weiboComments": {
@@ -899,7 +1002,7 @@
       "kugouCookie": {
         "description": "酷狗搜索Cookie",
         "type": "string",
-        "hint": "仅在走 KuGouMusicApi 搜索兜底时使用，文档示例：token=xxx;userid=xxx;dfid=xxx；也可发送 #RKQ 自动扫码获取",
+        "hint": "仅在走 KuGouMusicApi 搜索兜底时使用，文档示例：token=xxx;userid=xxx;dfid=xxx；也可发送 #RKQ 自动扫码获取　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，插件自动拼。涉及字段：token、userid、dfid",
         "default": ""
       },
       "qqMusicCookie": {
@@ -933,7 +1036,7 @@
       "kuaishouCookie": {
         "description": "快手的Cookie",
         "type": "string",
-        "hint": "本移植版新增（原版快手的快手走第三方接口、不需要 Cookie）。配置后快手会优先走网页 SSR 直解，降低对第三方接口的依赖。浏览器登录 kuaishou.com 后 F12 -> Network -> 任意请求 -> Cookie 整段复制",
+        "hint": "本移植版新增（原版快手的快手走第三方接口、不需要 Cookie）。配置后快手会优先走网页 SSR 直解，降低对第三方接口的依赖。浏览器登录 kuaishou.com 后 F12 -> Network -> 任意请求 -> Cookie 整段复制　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，插件自动拼。涉及字段：did、didv、kpn、clientid",
         "default": ""
       },
       "miyousheCookie": {
@@ -941,6 +1044,97 @@
         "type": "string",
         "hint": "部分米游社文章需要登录态才能看到图片",
         "default": ""
+      },
+      "kuaishouCookieFields": {
+        "description": "快手Cookie 逐项填写（可选）",
+        "type": "object",
+        "hint": "不想手动拼 Cookie 就逐项填这里，插件会自动拼成 key=value; key=value 的标准格式。其中 did 或 didv 至少要填一个。留空则使用上面的「整段 Cookie」。",
+        "items": {
+          "did": {
+            "description": "did",
+            "type": "string",
+            "default": "",
+            "hint": "设备 ID，最关键的一个"
+          },
+          "didv": {
+            "description": "didv",
+            "type": "string",
+            "default": "",
+            "hint": "设备 ID 的校验值，一般和 did 成对出现"
+          },
+          "kpn": {
+            "description": "kpn",
+            "type": "string",
+            "default": "",
+            "hint": "客户端标识，网页端一般是 KUAISHOU_VISION"
+          },
+          "clientid": {
+            "description": "clientid",
+            "type": "string",
+            "default": "",
+            "hint": "客户端 ID"
+          }
+        }
+      },
+      "weiboCookieFields": {
+        "description": "微博Cookie 逐项填写（可选）",
+        "type": "object",
+        "hint": "不想手动拼 Cookie 就逐项填这里，插件会自动拼成 key=value; key=value 的标准格式。其中 _T_WM 或 MLOGIN 至少要填一个。留空则使用上面的「整段 Cookie」。",
+        "items": {
+          "_T_WM": {
+            "description": "_T_WM",
+            "type": "string",
+            "default": "",
+            "hint": "登录态主凭据"
+          },
+          "WEIBOCN_FROM": {
+            "description": "WEIBOCN_FROM",
+            "type": "string",
+            "default": ""
+          },
+          "MLOGIN": {
+            "description": "MLOGIN",
+            "type": "string",
+            "default": "",
+            "hint": "是否已登录标记（1 表示已登录）"
+          },
+          "XSRF-TOKEN": {
+            "description": "XSRF-TOKEN",
+            "type": "string",
+            "default": "",
+            "hint": "CSRF 令牌"
+          },
+          "M_WEIBOCN_PARAMS": {
+            "description": "M_WEIBOCN_PARAMS",
+            "type": "string",
+            "default": ""
+          }
+        }
+      },
+      "kugouCookieFields": {
+        "description": "酷狗Cookie 逐项填写（可选）",
+        "type": "object",
+        "hint": "不想手动拼 Cookie 就逐项填这里，插件会自动拼成 key=value; key=value 的标准格式。其中 token 或 userid 至少要填一个。留空则使用上面的「整段 Cookie」。",
+        "items": {
+          "token": {
+            "description": "token",
+            "type": "string",
+            "default": "",
+            "hint": "登录令牌"
+          },
+          "userid": {
+            "description": "userid",
+            "type": "string",
+            "default": "",
+            "hint": "用户 ID"
+          },
+          "dfid": {
+            "description": "dfid",
+            "type": "string",
+            "default": "",
+            "hint": "设备指纹"
+          }
+        }
       }
     }
   },
@@ -952,8 +1146,21 @@
       "xiaoheiheCookie": {
         "description": "小黑盒的Cookie",
         "type": "string",
-        "hint": "登陆https://www.xiaoheihe.cn/ - F12 - 格式：x_xhh_tokenid=xxx，小黑盒目前用的硬编码ck，有概率会出现需要验证码的情况，通常使用分享链接而不是web链接即可解决，后续有大佬出手的话可以换成动态ck",
+        "hint": "登陆https://www.xiaoheihe.cn/ - F12 - 格式：x_xhh_tokenid=xxx，小黑盒目前用的硬编码ck，有概率会出现需要验证码的情况，通常使用分享链接而不是web链接即可解决，后续有大佬出手的话可以换成动态ck　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，插件自动拼。涉及字段：x_xhh_tokenid",
         "default": ""
+      },
+      "xiaoheiheCookieFields": {
+        "description": "小黑盒Cookie 逐项填写（可选）",
+        "type": "object",
+        "hint": "不想手动拼 Cookie 就逐项填这里，插件会自动拼成 key=value; key=value 的标准格式。其中 x_xhh_tokenid 至少要填一个。留空则使用上面的「整段 Cookie」。",
+        "items": {
+          "x_xhh_tokenid": {
+            "description": "x_xhh_tokenid",
+            "type": "string",
+            "default": "",
+            "hint": "小黑盒的登录令牌，只有这一个字段"
+          }
+        }
       }
     }
   },

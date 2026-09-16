@@ -58,6 +58,7 @@ from .core.constants import (
     extract_urls,
     match_rule,
 )
+from .core.cookies import build_cookie
 from .core.downloader import MediaTooLarge, download_media
 from .core.external import describe_environment, find_tool
 from .core.http import HttpError
@@ -153,6 +154,19 @@ class Main(Star):
         return default if node is None else node
 
     def cookie_for(self, platform: str) -> str:
+        """取某个平台的 Cookie 字符串。
+
+        两种填法都支持（见 ``core/cookies.py``）：
+
+        - 用户直接粘了一整段 —— 原样返回
+        - 用户逐项填了「Cookie 逐项填写」—— 按 ``key=value; key=value`` 拼好
+
+        没有拆解方案的平台直接读整段字段。
+        """
+        built = build_cookie(platform, self.conf_get)
+        if built:
+            return built
+
         field = _COOKIE_FIELDS.get(platform)
         if not field:
             return ""

@@ -88,16 +88,12 @@ async def _resolve_bvid(link: str, ctx: ResolverContext) -> str | None:
 
 
 def _build_cookie(ctx: ResolverContext) -> str:
-    """拼 Cookie 头。
+    """取 B 站 Cookie。
 
-    配置里可能只填了 SESSDATA 的值，也可能填了完整的 Cookie 串，两种都支持。
+    组装逻辑（整段粘贴 / 逐项填写 / 单值补 SESSDATA= 前缀）统一在
+    ``core/cookies.py`` 里做，这里只负责拿结果。
     """
-    raw = ctx.cookie("bili").strip()
-    if not raw:
-        return ""
-    if "=" in raw:
-        return raw
-    return f"SESSDATA={raw}"
+    return ctx.cookie("bili").strip()
 
 
 def _pick_tracks(dash: dict, codec_pref: tuple[int, ...]) -> tuple[dict | None, dict | None]:
