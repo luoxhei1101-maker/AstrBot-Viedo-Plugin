@@ -51,6 +51,7 @@ from pathlib import Path
 import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.event.filter import CustomFilter
 from astrbot.api.star import Context, Star
 
 from .core import bili_login
@@ -73,6 +74,46 @@ from .core.external import describe_environment, find_tool
 from .core.http import HttpError
 from .platforms import ResolveResult, call
 from .platforms import names as resolver_names
+
+# B 站 QQ 小程序的 appid（判断 Json 消息段是不是 B 站小程序卡片用）
+_BILI_MINIAPP_APPID = "1109937557"
+
+
+def _find_bili_bvid_in_messages(messages: list) -> str | None:
+    """从消息组件链里提取 B 站小程序卡片的 bvid。
+
+    QQ 群里分享 B 站视频时，常以「小程序卡片」（``CQ:json`` 消息段）的形式
+    出现，而不是链接文本。这种消息的 ``get_message_str()`` 是空串，正则匹配
+    不到；但消息链里有 ``Json`` 组件，其 ``data`` 里藏着 B 站的 appid 和视频
+    的 BV 号（在 ``meta.miniapp.path`` / ``meta.detail_1.url`` 之类字段里）。
+
+    这里把 data 序列化成字符串，用 BV 号格式（``BV`` + 10 位字母数字）提取，
+    并确认确实是 B 站（含 bilibili / B 站 appid），避免误抓别的小程序。
+    """
+    for comp in messages:
+        if not isinstance(comp, Comp.Json):
+            continue
+        try:
+            raw = json.dumps(comp.data, ensure_ascii=False)
+        except (TypeError, ValueError):
+            continue
+        m = re.search(r"BV[0-9A-Za-z]{10}", raw)
+        if m and ("bilibili" in raw.lower() or _BILI_MINIAPP_APPID in raw):
+            return m.group(0)
+    return None
+
+
+class BiliMiniappFilter(CustomFilter):
+    """只在消息里出现 B 站小程序卡片时命中。
+
+    用自定义 filter 而不是 ``@filter.regex``：regex 匹配的是 ``get_message_str()``，
+    而小程序卡片是纯 Json 消息段、没有文本，regex 永远匹配不到。自定义 filter
+    直接检查消息组件链，并且只在命中时返回 True，不会污染其它消息的唤醒判定。
+    """
+
+    def filter(self, event: AstrMessageEvent, cfg: AstrBotConfig) -> bool:
+        return _find_bili_bvid_in_messages(event.get_messages()) is not None
+
 
 # 需要 event / Context 才能干活、不走 resolver 注册表的命令。
 # 值是对应的方法名（用 getattr 取，避免类还没定义完就互相引用）。
@@ -320,6 +361,28 @@ class Main(Star):
         也会命中——这一点和原版 Yunzai 的 rule 行为一致，是自动解析能成立的前提。
         """
         async for item in self._dispatch(event, event.get_message_str().strip()):
+            yield item
+
+    # ==================================================================
+    # 入口一点五：B 站小程序卡片（QQ 群里分享的 B 站视频小程序，不是链接）
+    # ==================================================================
+
+    @filter.custom_filter(BiliMiniappFilter)
+    async def on_bili_miniapp(self, event: AstrMessageEvent):
+        """B 站小程序卡片 → 提取 bvid → 走 B 站解析。
+
+        小程序卡片是 ``CQ:json`` 消息段，``get_message_str()`` 是空串，
+        正则匹配不到，所以用自定义 filter 检查消息组件链（见
+        ``BiliMiniappFilter``）。
+        """
+        bvid = _find_bili_bvid_in_messages(event.get_messages())
+        if not bvid:
+            return
+        logger.info(f"[R插件] 识别到 B 站小程序卡片: {bvid}")
+        link = f"https://www.bilibili.com/video/{bvid}"
+        async for item in self._dispatch(
+            event, link, forced_resolver="bilibili", forced_name="哔哩哔哩"
+        ):
             yield item
 
     # ==================================================================
