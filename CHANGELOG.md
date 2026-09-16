@@ -1,5 +1,49 @@
 # 更新日志
 
+## v1.1.4（2026-09-17）
+
+### 修复
+
+- **抖音动图仍然被发成静图**（v1.1.3 没修干净）。v1.1.3 修好了「逐项分流」的
+  代码逻辑，但**通道选错了**：我们一直只走 SSR 分享页，而实测 SSR 页面会把动图
+  **降级成静态图**。
+
+  **实测对照**（用服务器上的真实 Cookie 抓同一作品 `7676017468716436809`）：
+
+  | 通道 | `aweme_type` | `images[].video` | 能否识别动图 |
+  |---|---|---|---|
+  | 主接口 `aweme/detail`（a-bogus + Cookie） | **68** | **有完整视频轨** | ✅ |
+  | SSR `share/note` | **2** | **`None`（被抹掉）** | ❌ |
+  | SSR `share/slides` | 无 `_ROUTER_DATA`，完全拿不到数据 | | ❌ |
+
+  SSR 页面把 `aweme_type` 从 `68` 改写成 `2`，并把每张图自带的 `video` 整个抹掉、
+  只留 `url_list` —— 所以在 SSR 路径下怎么改判断逻辑都识别不出动图。原版对
+  `share/slides` 也是专走主接口（`apps/tools.js:548`）。
+
+  **修复**：`core/douyin_ssr.py` 新增 `fetch_aweme_by_api()`（主接口 + a-bogus 签名），
+  `resolve_by_ssr()` 改为**分场景选通道**：
+
+  - `share/slides` 链接 → **只能**走主接口（该页是客户端 SPA，SSR 无数据）
+  - 有 Cookie + 有 node → **优先**主接口（拿完整动图信息）
+  - 否则 → 回落 SSR（免登录，但动图会发成静图）
+
+  同时给主接口补上 `DY_SHARE_SLIDES_PAGE` 常量和 `share/slides` 的 ID 匹配规则。
+
+  **验证**：用户反馈的链接（`https://v.douyin.com/j9_O6iEkYYU/`）现在解析为
+  **抖音动图**、`album_kinds=['animated','animated']`、2 条视频直链（HTTP 206、
+  `Content-Type: video/mp4`），不再是 2 张静态图。
+
+### 新增
+
+- `tests/test_douyin_album.py` —— 动图/静态图分流逻辑的离线回归测试（11 项全通过）。
+  覆盖纯静态、纯动图、混排顺序、动图不进图片列表、`aweme_type` 判定、`slides`
+  链接识别等容易回退的点。
+
+### 文档
+
+- README 补充说明**为什么图集/动图必须配 Cookie**（SSR 降级动图的实测结论），
+  外部工具表新增 `node` 条目及其影响范围。
+
 ## v1.1.3（2026-09-16）
 
 ### 修复

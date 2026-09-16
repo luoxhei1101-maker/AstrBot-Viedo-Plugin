@@ -1,19 +1,42 @@
-"""抖音 SSR 解析内核 —— 原版 ``utils/douyin.js`` 的忠实移植。
+"""抖音解析内核 —— 原版 ``utils/douyin.js`` + ``apps/tools.js`` 的忠实移植。
 
-原版抖音有两条路：
-1. **主路**：带 Cookie 请求 ``aweme/v1/web/aweme/detail`` —— 需要 ``a-bogus``
-   签名（463 行混淆 JS）+ ``cycletls`` 做 TLS 指纹伪装。
-2. **兜底路（SSR）**：请求 ``iesdouyin.com/share/{video,note}/{id}/`` 分享页，
-   页面里内嵌 ``window._ROUTER_DATA``，直接挖出作品数据。**不需要签名。**
+抖音有**两条路**，本模块两条都实现：
 
-原版自己就实现了第 2 条（``resolveDouyinVideoBySsr``），并且做得比自己文档里
-写的还细：画质探测、匿名 ttwid 注册、canonical URL 兜底。这里逐段搬过来，
-没有做简化——包括那些看起来"多余"的容错分支，因为每一个都对应线上真实故障。
+1. **主接口**：带 Cookie 请求 ``aweme/v1/web/aweme/detail`` —— 需要
+   ``a-bogus`` 签名（463 行混淆 JS，见 ``core/a_bogus.py``）。
+2. **SSR 分享页**：请求 ``iesdouyin.com/share/{video,note}/{id}/``，页面里
+   内嵌 ``window._ROUTER_DATA`` 直接挖出作品数据，**不需要签名**。
+
+通道选择不是"能用哪个用哪个"，而是**分场景**（见 ``resolve_by_ssr``）：
+
+- ``share/slides`` 链接 → **只能**用主接口。该页是客户端 SPA，HTML 里没有
+  ``_ROUTER_DATA``，SSR 一点数据都拿不到。
+- 有 Cookie + 有 node → **优先**主接口。
+- 否则 → SSR（免登录，但没有动图信息，见下）。
+
+**为什么动图必须走主接口（实测结论，踩过的坑）**：
+
+========================  =============  ==================  ============
+通道                      aweme_type     images[].video      能否识别动图
+========================  =============  ==================  ============
+主接口（a-bogus）        **68**         **有完整视频轨**    ✅
+SSR ``share/note``        **2**          **None（被抹掉）**  ❌
+SSR ``share/slides``      无 ``_ROUTER_DATA``，拿不到数据   ❌
+========================  =============  ==================  ============
+
+SSR 页面**会把动图降级成静态图**：``aweme_type`` 从 68 改写成 2，
+``images[].video`` 整个抹掉只留 ``url_list``。所以在 SSR 路径下怎么改判断
+逻辑都识别不出动图——这就是"动图发出来还是静图"的根因。原版对
+``share/slides`` 也是专走主接口（``apps/tools.js:548``）。
 
 几个容易踩的点，都在代码里标了：
 
-- ``aweme_type`` 是判断视频/图文的**唯一可靠依据**。图集的 ``video.play_addr``
-  里装的是背景音乐，按视频发出去就是一条指向 mp3 的"视频"。
+- ``aweme_type`` 是判断视频/图文的**唯一可靠依据**。图集的
+  ``video.play_addr`` 里装的是**背景音乐**，按视频发出去就是一条指向 mp3 的
+  "视频"。
+- 图集**可混排**静态图与动图。动图标志是**该项自带视频轨**，必须**逐项**
+  判断（``album_items``），不能按"整条作品有没有动图"一刀切——那样混合
+  图集里的静态图会被丢掉。
 - 画质探测用 ``Range: bytes=0-1``：完整下载太重，而且同一个 video_id 在不同
   ratio 下**可能返回同一个文件**（档位不存在时服务端会退回默认档），所以要比
   对 Content-Length 去重，否则会把同一个档位当成四个。
@@ -29,10 +52,13 @@ from typing import Any
 
 from astrbot.api import logger
 
+from .a_bogus import generate_a_bogus, node_available
 from .constants import (
     DY_COMPRESSED_PLAY_RATIOS,
+    DY_INFO,
     DY_PLAY_RATIOS,
     DY_SHARE_NOTE_PAGE,
+    DY_SHARE_SLIDES_PAGE,
     DY_SHARE_VIDEO_PAGE,
     DY_TOUTIAO_INFO,
     DY_TTWID_PAYLOAD,
@@ -50,6 +76,7 @@ COMMON_USER_AGENT = (
 DOUYIN_REFERER = "https://www.douyin.com/"
 
 _ID_PATTERNS = (
+    re.compile(r"share/slides/(\d+)"),
     re.compile(r"share/video/(\d+)"),
     re.compile(r"share/note/(\d+)"),
     re.compile(r"video/(\d+)"),
@@ -89,6 +116,10 @@ def build_canonical_candidates(url: str) -> list[str]:
 
     ``note`` 链接优先试 note 页，其余优先试 video 页，另一个作为兜底——
     因为抖音偶尔会把图文作品塞进 video 页，反之亦然。
+
+    ``slides``（新版图集/动图分享页）**不在这里处理**：那个页面是客户端
+    SPA，HTML 里根本没有 ``_ROUTER_DATA``，SSR 拿不到任何东西。它必须走
+    主接口，见 ``is_slides_url`` / ``fetch_aweme_by_api``。
     """
     aweme_id = extract_aweme_id(url)
     if not aweme_id:
@@ -104,6 +135,11 @@ def build_canonical_candidates(url: str) -> list[str]:
     if "/note/" in url:
         return [note_page, video_page]
     return [video_page, note_page]
+
+
+def is_slides_url(url: str) -> bool:
+    """是不是新版 ``share/slides`` 链接（必须走主接口）。"""
+    return "share/slides" in (url or "")
 
 
 def extract_balanced_json(source: str, marker: str = "window._ROUTER_DATA") -> str:
@@ -508,6 +544,72 @@ async def register_anonymous_ttwid() -> str:
 # ==========================================================================
 
 
+async def fetch_aweme_by_api(aweme_id: str, cookie: str) -> dict[str, Any]:
+    """走**主接口** ``aweme/v1/web/aweme/detail``（需 a-bogus + Cookie）拿作品数据。
+
+    这是唯一能拿到**完整图集/动图数据**的通道，理由是实测结论：
+
+    ====================  =============  ====================  ==========
+    通道                 aweme_type     images[].video        能否识别动图
+    ====================  =============  ====================  ==========
+    主接口（a-bogus）    **68**         **有完整视频轨**       ✅
+    SSR ``share/note``   **2**          **None（被抹掉）**     ❌
+    SSR ``share/slides`` 无 ``_ROUTER_DATA``，完全拿不到数据    ❌
+    ====================  =============  ====================  ==========
+
+    也就是说：**SSR 页面会把动图降级成普通静态图**——``aweme_type`` 从 68
+    被改写成 2，``images[].video`` 整个抹掉，只留 ``url_list``。所以在 SSR
+    路径下无论怎么改判断逻辑都识别不出动图，这就是"动图发出来还是静图"的
+    根因。原版对 ``share/slides`` 也是专走主接口（``apps/tools.js:548``）。
+
+    Args:
+        aweme_id: 作品 ID。
+        cookie: 抖音 Cookie。**必需**——没有它主接口会返回空 ``aweme_detail``。
+
+    Raises:
+        HttpError: 没有 Cookie / 没有 node / 请求失败 / 返回里没有作品数据。
+    """
+    if not cookie:
+        raise HttpError("主接口需要抖音 Cookie（图集/动图解析依赖登录态）")
+    if not node_available():
+        raise HttpError("主接口需要 a-bogus 签名，但本机没有 node")
+
+    api = DY_INFO.replace("{}", aweme_id)
+    query = api.split("?", 1)[1]
+
+    signature = await generate_a_bogus(query, COMMON_USER_AGENT)
+    url = f"{api}&a_bogus={signature}"
+
+    headers = {
+        "Accept-Language": (
+            "zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2"
+        ),
+        "User-Agent": COMMON_USER_AGENT,
+        # 原版对图集专用逻辑用的是 open.douyin.com 这对 Origin/Referer
+        "Origin": "https://open.douyin.com",
+        "Referer": "https://open.douyin.com/",
+        "Cookie": cookie,
+    }
+
+    body, _ = await fetch(url, headers=headers, timeout=25.0)
+    try:
+        data = json.loads(body.decode("utf-8", errors="ignore"))
+    except json.JSONDecodeError as exc:
+        raise HttpError(f"主接口返回的不是 JSON: {exc}") from exc
+
+    aweme = data.get("aweme_detail")
+    if not aweme:
+        status = data.get("status_code")
+        raise HttpError(f"主接口没有返回作品数据（status_code={status}）")
+
+    logger.debug(
+        f"[R插件][抖音] 主接口命中 {aweme_id}，"
+        f"aweme_type={aweme.get('aweme_type')}，"
+        f"images={len(aweme.get('images') or [])}"
+    )
+    return aweme
+
+
 async def fetch_aweme(candidates: list[str], cookie: str) -> tuple[dict, str]:
     """依次尝试候选分享页，返回 ``(aweme, 命中地址)``。"""
     last_error: Exception | None = None
@@ -547,7 +649,16 @@ async def resolve_by_ssr(
     prefer_compressed: bool = False,
     probe: bool = True,
 ) -> dict[str, Any]:
-    """SSR 解析主入口，返回结构化结果。
+    """抖音解析主入口，返回结构化结果。
+
+    **通道选择**（关键）：
+
+    - ``share/slides`` 链接 → **必须**走主接口。该页面是客户端 SPA，HTML 里
+      没有 ``_ROUTER_DATA``，SSR 完全无数据可挖。
+    - 配了 Cookie 且 node 可用 → **优先主接口**。因为 SSR 页面会把动图的
+      ``images[].video`` 抹掉、把 ``aweme_type`` 从 68 降成 2，导致动图被
+      误判成静态图。主接口才能拿到完整视频轨。
+    - 主接口失败（或没 Cookie / 没 node）→ 回落 SSR，至少还能发普通视频和静态图。
 
     Args:
         cookie: 用户配置的抖音 Cookie，可为空。
@@ -563,7 +674,24 @@ async def resolve_by_ssr(
     if not aweme_id:
         raise ValueError("无法识别抖音 aweme_id")
 
-    aweme, canonical = await fetch_aweme(candidates, cookie)
+    slides = is_slides_url(url)
+    # 主接口要 a-bogus（node）+ Cookie，两个都满足才可用
+    api_ready = bool(cookie) and node_available()
+    aweme: dict[str, Any] | None = None
+    canonical = url
+
+    if slides or api_ready:
+        try:
+            aweme = await fetch_aweme_by_api(aweme_id, cookie)
+            canonical = DY_SHARE_SLIDES_PAGE.format(aweme_id) if slides else url
+        except HttpError as exc:
+            if slides:
+                # slides 页没有 SSR 兜底可言，直接把原因抛出去让用户看到
+                raise HttpError(f"抖音图集/动图解析失败：{exc}") from exc
+            logger.debug(f"[R插件][抖音] 主接口不可用，回落 SSR: {exc}")
+
+    if aweme is None:
+        aweme, canonical = await fetch_aweme(candidates, cookie)
 
     resolved: dict[str, Any] = {
         "aweme_id": str(aweme.get("aweme_id") or aweme_id),

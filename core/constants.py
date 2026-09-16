@@ -90,6 +90,9 @@ DY_TOUTIAO_INFO = "https://aweme.snssdk.com/aweme/v1/play/?video_id={}&ratio=108
 DY_TTWID_REGISTER = "https://ttwid.bytedance.com/ttwid/union/register/"
 DY_SHARE_VIDEO_PAGE = "https://www.iesdouyin.com/share/video/{}/"
 DY_SHARE_NOTE_PAGE = "https://www.iesdouyin.com/share/note/{}/"
+# 新版图集/动图分享页。**注意**：这个页面是客户端 SPA，HTML 里没有
+# _ROUTER_DATA，SSR 路径完全拿不到数据，必须走主接口（DY_INFO + a-bogus）。
+DY_SHARE_SLIDES_PAGE = "https://www.iesdouyin.com/share/slides/{}/"
 DY_LIVE_INFO = (
     "https://live.douyin.com/webcast/room/web/enter/"
     "?device_platform=webapp&aid=6383&channel=channel_pc_web&pc_client_type=1"
