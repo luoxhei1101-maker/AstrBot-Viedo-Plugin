@@ -1,0 +1,188 @@
+{
+  "enable": {
+    "description": "总开关",
+    "type": "bool",
+    "hint": "关闭后所有链接都不再自动解析",
+    "default": true
+  },
+  "enabled_platforms": {
+    "description": "启用自动解析的平台",
+    "type": "list",
+    "hint": "只对勾选的平台生效。抖音没配 Cookie 时会自动降级走通用接口",
+    "default": [
+      "douyin",
+      "bili",
+      "general",
+      "weibo",
+      "acfun",
+      "miyoushe",
+      "xiaoheihe",
+      "weishi",
+      "tieba",
+      "jike"
+    ],
+    "options": [
+      "douyin",
+      "tiktok",
+      "bili",
+      "twitter_x",
+      "instagram",
+      "acfun",
+      "xhs",
+      "bodianMusic",
+      "general",
+      "sy2b",
+      "miyoushe",
+      "netease",
+      "weibo",
+      "weishi",
+      "zuiyou",
+      "freyr",
+      "linkShareSummary",
+      "qqMusic",
+      "kugouMusic",
+      "qishuiMusic",
+      "aircraft",
+      "xiaoheihe",
+      "weixinChannel"
+    ]
+  },
+  "parse_endpoints": {
+    "description": "通用解析接口（按顺序尝试，失败自动轮换）",
+    "type": "list",
+    "hint": "填 URL 模板，用 {} 代表目标链接。接口挂了就把它删掉或排到后面",
+    "default": [
+      "http://47.99.158.118/video-crack/v2/parse?content={}",
+      "https://api.jkyai.top/API/jhspjx.php?url={}",
+      "https://api.yujn.cn/api/pipixia.php?url={}",
+      "https://api.bugpk.com/api/pipixia?url={}"
+    ]
+  },
+  "send_mode": {
+    "description": "视频发送方式",
+    "type": "string",
+    "hint": "url=直接发解析出的地址（快，部分平台适配器不支持）；download=先下到本地再发（稳，吃内存和流量）",
+    "default": "url",
+    "options": ["url", "download"]
+  },
+  "max_video_size_mb": {
+    "description": "视频大小上限（MB）",
+    "type": "int",
+    "hint": "仅在 download 模式下生效，超过则不发送",
+    "default": 50
+  },
+  "max_images": {
+    "description": "单条消息最多发送的图片数量",
+    "type": "int",
+    "hint": "图集类链接可能一次返回几十张图，设个上限避免刷屏",
+    "default": 9
+  },
+  "only_group": {
+    "description": "只在群聊生效",
+    "type": "bool",
+    "hint": "打开后私聊发链接不解析",
+    "default": false
+  },
+  "allow_multiple_links": {
+    "description": "一条消息里解析多个链接",
+    "type": "bool",
+    "hint": "默认只解析第一个命中的链接（与原插件行为一致）",
+    "default": false
+  },
+  "stop_on_match": {
+    "description": "解析成功后阻止消息继续传给 LLM",
+    "type": "bool",
+    "hint": "打开可以避免机器人既发解析结果、又让 AI 多嘴一句",
+    "default": true
+  },
+  "reply_on_error": {
+    "description": "解析失败时回复提示",
+    "type": "bool",
+    "hint": "默认静默失败，避免接口抽风时在群里刷错误信息",
+    "default": false
+  },
+  "identify_prefix": {
+    "description": "识别结果文案前缀",
+    "type": "string",
+    "default": "🔗 识别："
+  },
+  "show_desc": {
+    "description": "一起发送视频/图片的文字描述",
+    "type": "bool",
+    "default": true
+  },
+
+  "bili_cookie": {
+    "description": "B站 Cookie（SESSDATA）",
+    "type": "string",
+    "hint": "留空则走免登录主干（只能拿到 360P 直链）。格式：SESSDATA=xxx; bili_jct=xxx",
+    "default": ""
+  },
+  "weibo_cookie": {
+    "description": "微博 Cookie",
+    "type": "string",
+    "hint": "部分微博不登录看不到图片，留空可能解析失败",
+    "default": ""
+  },
+  "xiaohongshu_cookie": {
+    "description": "小红书 Cookie",
+    "type": "string",
+    "hint": "小红书解析暂未移植，此项预留",
+    "default": ""
+  },
+  "douyin_cookie": {
+    "description": "抖音 Cookie",
+    "type": "string",
+    "hint": "留空则走 SSR 免 Cookie 路线（拿不到评论和部分高清档位）",
+    "default": ""
+  },
+  "weixin_channel_cookie": {
+    "description": "微信视频号（腾讯元宝）Cookie",
+    "type": "string",
+    "hint": "视频号解析暂未移植，此项预留",
+    "default": ""
+  },
+  "miyoushe_cookie": {
+    "description": "米游社 Cookie",
+    "type": "string",
+    "hint": "部分文章需要登录，留空可能解析失败",
+    "default": ""
+  },
+  "xiaoheihe_cookie": {
+    "description": "小黑盒 Cookie",
+    "type": "string",
+    "hint": "一般不需要，接口自带签名",
+    "default": ""
+  },
+  "x_cookie": {
+    "description": "X（Twitter）Cookie",
+    "type": "string",
+    "hint": "格式：name=value; name2=value2。X 解析暂未移植，此项预留",
+    "default": ""
+  },
+  "instagram_cookie": {
+    "description": "Instagram Cookie",
+    "type": "string",
+    "hint": "Instagram 解析暂未移植，此项预留",
+    "default": ""
+  },
+  "kugou_api_server": {
+    "description": "酷狗 API 服务器地址",
+    "type": "string",
+    "hint": "对应原插件的 kugouApiServer，留空则酷狗解析不可用",
+    "default": ""
+  },
+  "bili_resolution": {
+    "description": "B站优先请求的画质",
+    "type": "string",
+    "hint": "免登录接口最高只能拿到 360P，此项在有 SESSDATA 时才有意义",
+    "default": "360P",
+    "options": ["360P", "480P", "720P", "1080P", "1080P+", "1080P60", "4K"]
+  },
+  "external_tools": {
+    "description": "外部命令路径（可选）",
+    "type": "string",
+    "hint": "留空则从系统 PATH 自动查找。用于 ffmpeg / yt-dlp / BBDown / aria2c / tdl",
+    "default": ""
+  }
+}

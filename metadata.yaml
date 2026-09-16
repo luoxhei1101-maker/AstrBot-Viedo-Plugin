@@ -1,0 +1,21 @@
+name: astrbot_plugin_rconsole
+display_name: R插件（链接解析）
+short_desc: 发链接自动解析视频／图片／音乐，移植自 Yunzai 的 rconsole-plugin
+desc: >-
+  自动识别聊天中的分享链接并解析出媒体内容。移植自 Yunzai-Bot 插件
+  rconsole-plugin（作者 zhiyu1998），覆盖抖音、B站、快手、微博、AcFun、小红书、
+  米游社、小黑盒、微视、网易云／QQ音乐／酷狗等平台，并保留原版的第三方接口轮换、
+  失败降级、AI 链接总结与翻译能力。
+version: 1.0.0
+author: Echo (port)
+repo: https://gitee.com/MuLinYa259/astrbot-viedo
+astrbot_version: ">=4.16,<5"
+support_platforms:
+  - aiocqhttp
+  - telegram
+  - discord
+  - lark
+  - wecom
+  - qq_official
+  - slack
+  - dingtalk
