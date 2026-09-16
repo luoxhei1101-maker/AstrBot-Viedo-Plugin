@@ -118,6 +118,18 @@
         "hint": "抖音动图是一组短视频，需要多条一起发；普通视频只会有 1 条",
         "default": 9
       },
+      "album_forward_when_exceed": {
+        "description": "图集超限时合并成聊天记录完整发送",
+        "type": "bool",
+        "hint": "图集图片数超过上面的 max_images 时，不再丢弃多余的图，而是用「合并转发（聊天记录）」的形式完整发出来。关闭则退回旧的「只发前 max_images 张」行为。",
+        "default": true
+      },
+      "download_concurrency": {
+        "description": "媒体下载并发数",
+        "type": "int",
+        "hint": "图集合并转发、多视频下载时同时下载的数量。设大点下载更快，但会吃更多内存和带宽。一般 6 就够。",
+        "default": 6
+      },
       "douyin_probe_quality": {
         "description": "抖音画质探测",
         "type": "bool",

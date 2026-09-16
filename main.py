@@ -68,7 +68,7 @@ from .core.constants import (
     match_rule,
 )
 from .core.cookies import build_cookie
-from .core.downloader import MediaTooLarge, download_media
+from .core.downloader import MediaTooLarge, download_media, download_many
 from .core.external import describe_environment, find_tool
 from .core.http import HttpError
 from .platforms import ResolveResult, call
@@ -453,22 +453,27 @@ class Main(Star):
     async def _render(self, event: AstrMessageEvent, result: ResolveResult):
         """把解析结果渲染成 AstrBot 消息。
 
-        顺序统一为「先媒体，后文字」——原版是各分支各写各的（视频先发视频、
-        图文先发文字），统一之后观感一致，也少一类"这条怎么没标题"的疑问。
+        顺序统一为「先简介（类型 + 标题 + 作者），后媒体」——用户要的是先看到
+        这条作品是什么、谁发的，再看到视频/图集本身，而不是先被媒体刷屏。
 
         一个作品可能同时有多种媒体：抖音动图就是「多个视频 + BGM」，
         B 站合并产出的是本地视频。所以这里不是 if/elif 一路到底，
-        而是依次追加，最后补一条文字说明。
+        而是依次追加。
         """
         # 识别前缀沿用原 Guoba 面板配置；原版默认空串，这里给个更直观的兜底
         prefix = str(self.conf_get("global.identifyPrefix", "") or "").strip() or "🔗 识别："
         show_desc = self.conf_get("plugin.show_desc", True)
-        send_mode = self.conf_get("plugin.send_mode", "url")
 
         # ---- 纯文本类结果（AI 总结 / 翻译）----
         if result.extra.get("text_only") and result.desc:
             yield event.plain_result(f"{prefix}{result.platform}\n{result.desc}")
             return
+
+        # ---- 先发文字简介（类型 + 标题 + 作者）----
+        if show_desc:
+            intro = self._build_intro(result, prefix)
+            if intro:
+                yield event.plain_result(intro)
 
         sent_media = False
 
@@ -486,6 +491,7 @@ class Main(Star):
 
         # ---- 视频直链 ----
         elif result.videos:
+            send_mode = self.conf_get("plugin.send_mode", "url")
             local_path: str | None = None
             if send_mode == "download":
                 local_path, oversize_msg = await self._download_video(result)
@@ -529,38 +535,113 @@ class Main(Star):
                     logger.warning(f"[R插件] 发送语音失败，降级为链接: {exc}")
                     yield event.plain_result(url)
 
-        # ---- 图片 ----
+        # ---- 图片（图集超限走合并转发）----
         if result.images:
-            limit = max(1, int(self.conf_get("plugin.max_images", 9) or 9))
-            picked = result.images[:limit]
+            async for item in self._send_images(event, result):
+                yield item
+            sent_media = True
 
+        # ---- 没有任何媒体可发时的兜底 ----
+        if not sent_media and not result.images and not result.audios:
+            if not (show_desc and (result.title or result.author)):
+                # 简介也没发出去，把已知文字情报补上
+                async for item in self._render_text_only(event, result):
+                    yield item
+
+    def _build_intro(self, result: ResolveResult, prefix: str) -> str:
+        """简介：类型 + 标题 + 作者。三者都没有时返回空串。"""
+        ctype = self._content_type(result)
+        lines = [f"{prefix}{result.platform}"]
+        if ctype:
+            lines.append(f"类型：{ctype}")
+        if result.title:
+            lines.append(f"标题：{result.title}")
+        if result.author:
+            lines.append(f"作者：{result.author}")
+        if len(lines) == 1:
+            return ""
+        return "\n".join(lines)
+
+    def _content_type(self, result: ResolveResult) -> str:
+        """根据媒体字段推断作品类型。"""
+        nv = len(result.videos)
+        ni = len(result.images)
+        if nv > 1:
+            return "动图"  # 抖音动图是一组短视频
+        if nv == 1 and ni:
+            return "图文"
+        if nv == 1:
+            return "视频"
+        if ni:
+            return "图集"
+        if result.audios:
+            return "音频"
+        return ""
+
+    async def _send_images(self, event: AstrMessageEvent, result: ResolveResult):
+        """发送图片列表。图集数量超过 ``max_images`` 时用合并转发完整发出。"""
+        limit = max(1, int(self.conf_get("plugin.max_images", 9) or 9))
+        urls = result.images
+        total = len(urls)
+
+        # ---- 不超过阈值：直接一条消息链发完 ----
+        if total <= limit:
             chain = []
-            for img in picked:
+            for img in urls:
                 try:
                     chain.append(Comp.Image.fromURL(img))
                 except Exception as exc:  # noqa: BLE001 - 单张图失败不该拖垮整条
                     logger.debug(f"[R插件] 跳过无效图片 {img}: {exc}")
-
             if chain:
                 yield event.chain_result(chain)
-
-            if len(result.images) > limit:
-                yield event.plain_result(
-                    f"（共 {len(result.images)} 张，只发了前 {limit} 张）"
-                )
-
-        # ---- 文字说明 ----
-        if not show_desc:
             return
-        text = (result.title or result.desc or "").strip()
-        if not text:
+
+        # ---- 超过阈值：合并转发完整发出 ----
+        if not self.conf_get("plugin.album_forward_when_exceed", True):
+            # 用户关掉了转发，退回「只发前 limit 张 + 提示」的旧行为
+            picked = urls[:limit]
+            chain = []
+            for img in picked:
+                try:
+                    chain.append(Comp.Image.fromURL(img))
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[R插件] 跳过无效图片 {img}: {exc}")
+            if chain:
+                yield event.chain_result(chain)
+            yield event.plain_result(f"（共 {total} 张，只发了前 {limit} 张）")
             return
-        if sent_media or result.images or result.audios:
-            yield event.plain_result(f"{prefix}{result.platform}\n{text[:300]}")
-        else:
-            # 解析成功却没有任何媒体，把已知的文字情报发出去
-            async for item in self._render_text_only(event, result):
-                yield item
+
+        # 并发下载所有图片到本地，用本地文件构造转发节点。
+        # 好处：并发（快）+ Node 内部转 base64 时不再重复走网络下载。
+        concurrency = max(1, int(self.conf_get("plugin.download_concurrency", 6) or 6))
+        max_mb = int(self.conf_get("global.videoSizeLimit", 70) or 70)
+        paths = await download_many(
+            urls,
+            prefix="album",
+            max_bytes=max_mb * 1024 * 1024,
+            concurrency=concurrency,
+        )
+
+        node_name = (result.author or result.platform).strip() or "解析结果"
+        node_uin = str(event.get_self_id())
+
+        nodes = []
+        for url, path in zip(urls, paths):
+            if path is not None:
+                event.track_temporary_local_file(str(path))
+                img = Comp.Image.fromFileSystem(str(path))
+            else:
+                # 下载失败退回 URL，交给 Node 内部转 base64 兜底
+                try:
+                    img = Comp.Image.fromURL(url)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[R插件] 跳过无效图片 {url}: {exc}")
+                    continue
+            nodes.append(Comp.Node([img], name=node_name, uin=node_uin))
+
+        if nodes:
+            yield event.plain_result(f"（共 {total} 张，已合并为聊天记录）")
+            yield event.chain_result([Comp.Nodes(nodes)])
 
     async def _download_video(self, result: ResolveResult) -> tuple[str | None, str]:
         """下载视频到本地。
