@@ -804,26 +804,37 @@ class Main(Star):
             concurrency=concurrency,
         )
 
-        node_name = (result.author or result.platform).strip() or "解析结果"
-        node_uin = str(event.get_self_id())
+        # 合并转发的「发送者」用发起解析的这个用户：昵称 + QQ 号都取发送者
+        node_name = (event.get_sender_name() or "").strip() or "解析结果"
+        node_uin = str(event.get_sender_id() or "")
 
         nodes = []
+        skipped = 0
         for url, path in zip(urls, paths):
-            if path is not None:
-                event.track_temporary_local_file(str(path))
-                img = Comp.Image.fromFileSystem(str(path))
-            else:
-                # 下载失败退回 URL，交给 Node 内部转 base64 兜底
-                try:
-                    img = Comp.Image.fromURL(url)
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug(f"[R插件] 跳过无效图片 {url}: {exc}")
-                    continue
+            if path is None:
+                # 下载失败（防盗链 / 链接过期等）直接跳过，不要用 URL 塞进 Node——
+                # Node 转 base64 时会再下载一次，那张图再失败会拖垮整条合并转发。
+                skipped += 1
+                continue
+            event.track_temporary_local_file(str(path))
+            img = Comp.Image.fromFileSystem(str(path))
             nodes.append(Comp.Node([img], name=node_name, uin=node_uin))
 
-        if nodes:
-            yield event.plain_result(f"（共 {total} 张，已合并为聊天记录）")
-            yield event.chain_result([Comp.Nodes(nodes)])
+        if not nodes:
+            # 全部下载失败，退回「直发前 limit 张 URL」的旧行为，至少别让用户干等
+            chain = []
+            for img in urls[:limit]:
+                try:
+                    chain.append(Comp.Image.fromURL(img))
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[R插件] 跳过无效图片 {img}: {exc}")
+            if chain:
+                yield event.chain_result(chain)
+            return
+
+        if skipped:
+            yield event.plain_result(f"（{skipped} 张下载失败，已跳过）")
+        yield event.chain_result([Comp.Nodes(nodes)])
 
     async def _download_video(self, result: ResolveResult) -> tuple[str | None, str]:
         """下载视频到本地。

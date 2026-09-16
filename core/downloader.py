@@ -58,6 +58,33 @@ def _guess_ext(url: str, content_type: str = "") -> str:
     return ".bin"
 
 
+# 常见媒体站的防盗链 Referer 映射。很多平台的图片 URL（如抖音
+# p3-sign.douyinpic.com）会校验 Referer，不带正确的来源就直接 403。
+_REFERER_BY_HOST = {
+    "douyinpic.com": "https://www.douyin.com/",
+    "douyin.com": "https://www.douyin.com/",
+    "iesdouyin.com": "https://www.douyin.com/",
+    "amemv.com": "https://www.douyin.com/",
+    "hdslb.com": "https://www.bilibili.com/",
+    "bilibili.com": "https://www.bilibili.com/",
+    "sinaimg.cn": "https://weibo.com/",
+    "weibo.com": "https://weibo.com/",
+    "kuaishou.com": "https://www.kuaishou.com/",
+    "yximgs.com": "https://www.kuaishou.com/",
+}
+
+
+def _headers_for(url: str) -> dict[str, str]:
+    """按 URL 域名补上防盗链需要的 Referer，其余沿用浏览器头。"""
+    headers = dict(BROWSER_HEADERS)
+    host = (urlparse(url).netloc or "").lower()
+    for key, referer in _REFERER_BY_HOST.items():
+        if key in host:
+            headers["Referer"] = referer
+            break
+    return headers
+
+
 def _temp_dir() -> Path:
     """插件专属临时目录，避免和别的插件抢同一个目录。"""
     d = Path(tempfile.gettempdir()) / "astrbot_plugin_rconsole"
@@ -109,7 +136,7 @@ async def _stream_one(
 ) -> Path:
     """用共享 session 流式下载单个文件。"""
     async with session.get(
-        url, headers=BROWSER_HEADERS, allow_redirects=True
+        url, headers=_headers_for(url), allow_redirects=True
     ) as resp:
         if resp.status != 200:
             raise HttpError(f"下载失败 HTTP {resp.status}: {url}")
