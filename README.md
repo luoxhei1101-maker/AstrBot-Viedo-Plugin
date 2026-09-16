@@ -55,46 +55,18 @@ B站扫码登录（`#RBQ`）需要 `qrcode[pil]`。**AstrBot 官方 Docker 镜�
 
 ## 安装步骤
 
-> **仓库地址**（两个仓库内容完全一致、随时同步，按网络情况二选一）：
-> - **GitHub（海外）**：`https://github.com/luoxhei1101-maker/AstrBot-Viedo-Plugin`
-> - **Gitee（国内）**：`https://gitee.com/MuLinYa259/astrbot-viedo`
->
-> 国内访问 Gitee 更快；海外、或需要用 GitHub Actions / Issue 的场景用 GitHub。
-
-### 方式一：Docker 部署（推荐）
-
-AstrBot 官方推荐用 Docker 跑，插件目录是宿主机上挂载出来的 `AstrBot/data/plugins`：
+进入 AstrBot 插件目录 `data/plugins`（Docker 部署即宿主机挂载的 `AstrBot/data/plugins`，本地部署即 AstrBot 安装目录下的 `data/plugins`）：
 
 ```bash
-# 1. 先按 AstrBot 官方文档起容器（把 data 目录挂出来）
-docker run -d --name astrbot \
-  -p 6185:6185 \
-  -v $PWD/AstrBot/data:/AstrBot/data \
-  soulter/astrbot
-
-# 2. 把插件 clone 到插件目录（国内用 Gitee、海外用 GitHub，二选一）
-cd AstrBot/data/plugins
-git clone https://gitee.com/MuLinYa259/astrbot-viedo.git astrbot_plugin_rconsole                                  # 国内
-# git clone https://github.com/luoxhei1101-maker/AstrBot-Viedo-Plugin.git astrbot_plugin_rconsole                 # 海外
-
-# 3. 重启容器（或到 WebUI 点重载插件）
-docker restart astrbot
+# 国内（Gitee）
+git clone https://gitee.com/MuLinYa259/astrbot-viedo.git astrbot_plugin_rconsole
+# 海外（GitHub）
+git clone https://github.com/luoxhei1101-maker/AstrBot-Viedo-Plugin.git astrbot_plugin_rconsole
 ```
 
-### 方式二：本地部署
+两个仓库内容一致，二选一。装完后到 AstrBot WebUI「插件」页点重载即可生效。
 
-AstrBot 本地（非 Docker）跑的话，插件目录在 AstrBot 安装目录下的 `data/plugins`：
-
-```bash
-cd <AstrBot安装目录>/data/plugins
-git clone https://gitee.com/MuLinYa259/astrbot-viedo.git astrbot_plugin_rconsole                                  # 国内
-# git clone https://github.com/luoxhei1101-maker/AstrBot-Viedo-Plugin.git astrbot_plugin_rconsole                 # 海外
-```
-
-### 方式三：下载 zip（不装 git）
-
-从上面**任一仓库页**下载 zip → 解压 → 把**解压出来的目录**放进 `data/plugins`，目录名保持
-`astrbot_plugin_rconsole`（去掉 zip 自带的 `-main` 后缀）。
+> 不想装 git：从仓库页下载 zip 解压放进 `data/plugins`，目录名保持 `astrbot_plugin_rconsole`。
 
 ### 安装后
 
