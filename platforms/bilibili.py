@@ -30,7 +30,7 @@ from ..core.constants import (
     BILI_RESOLUTION_LIST,
 )
 from ..core.http import HttpError, expand_short_url, fetch_json
-from ..core.media import MergeError, ffmpeg_available, merge_dash
+from ..core.media import ffmpeg_available
 from .base import ResolveResult, ResolverContext, register
 
 _BV_RE = re.compile(r"(BV[1-9A-Za-z]{10})")
@@ -384,31 +384,19 @@ async def resolve_bilibili(link: str, ctx: ResolverContext) -> ResolveResult:
             extra=extra,
         )
 
-    # ---- 合并 ----
-    try:
-        merged = await merge_dash(video_url, audio_url, tag=f"bili_{bvid}", headers=headers)
-        extra["merged"] = True
-        extra["merged_size_mb"] = round(merged.stat().st_size / 1024 / 1024, 1)
-        return ResolveResult.ok(
-            "哔哩哔哩",
-            local_videos=[str(merged)],
-            images=[cover] if cover else [],
-            title=title,
-            author=author,
-            desc=desc,
-            cover=cover,
-            extra=extra,
-        )
-    except MergeError as exc:
-        logger.warning(f"[R插件][B站] 合并失败，降级为单独的视频轨: {exc}")
-        return ResolveResult.ok(
-            "哔哩哔哩",
-            videos=[video_url],
-            images=[cover] if cover else [],
-            title=title,
-            author=author,
-            desc=desc,
-            cover=cover,
-            error=f"音视频合并失败，发出的视频没有声音（{exc}）",
-            extra=extra,
-        )
+    # ---- 延迟合并：只返回 DASH 轨 URL，交给 main.py 先发简介再合并 ----
+    # 对齐原版「先 reply 信息、再下载合并」的流程：标题/作者等元信息立刻
+    # 返回给用户，音视频轨的下载合并（几秒）放到渲染阶段异步做，不阻塞简介。
+    extra["dash_merge"] = {
+        "video": video_url,
+        "audio": audio_url,
+    }
+    return ResolveResult.ok(
+        "哔哩哔哩",
+        images=[cover] if cover else [],
+        title=title,
+        author=author,
+        desc=desc,
+        cover=cover,
+        extra=extra,
+    )

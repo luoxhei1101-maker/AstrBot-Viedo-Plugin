@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from pathlib import Path
 
 import astrbot.api.message_components as Comp
@@ -72,6 +73,7 @@ from .core.cookies import build_cookie
 from .core.downloader import MediaTooLarge, download_media, download_many
 from .core.external import describe_environment, find_tool
 from .core.http import HttpError
+from .core.media import MergeError, merge_dash
 from .platforms import ResolveResult, call
 from .platforms import names as resolver_names
 
@@ -210,6 +212,11 @@ class Main(Star):
         # 插件卸载时统一取消，不留野任务。
         self._bg_tasks: set[asyncio.Task] = set()
 
+        # 作品解析结果缓存：key 是链接，value 是 (写入时间戳, 结果)。
+        # 重复发同一个链接时命中缓存直接重发，跳过网络解析，2 小时过期。
+        self._result_cache: dict[str, tuple[float, ResolveResult]] = {}
+        self._cache_ttl: float = 2 * 3600.0
+
         registered = set(resolver_names())
         # 本地命令（扫码登录之类）不走 resolver 注册表，自检时要排除掉，
         # 否则会误报「规则表引用了不存在的 resolver」
@@ -231,6 +238,54 @@ class Main(Star):
         # 配置类型自愈。必须放在日志之后：它可能要写文件，先让加载日志落盘，
         # 万一自愈出问题也能看到插件已经起来了。
         self._heal_config_types()
+
+    async def initialize(self) -> None:
+        """插件启动后调用。起一个缓存定时清理任务。"""
+        task = asyncio.create_task(
+            self._cache_cleanup_loop(), name="rconsole_cache_cleanup"
+        )
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    # ==================================================================
+    # 作品缓存
+    # ==================================================================
+
+    async def _cache_cleanup_loop(self) -> None:
+        """每 2 小时清一次过期缓存。"""
+        while True:
+            await asyncio.sleep(self._cache_ttl)
+            removed = self._purge_cache()
+            if removed:
+                logger.info(f"[R插件] 缓存清理：移除 {removed} 条过期作品")
+
+    def _purge_cache(self) -> int:
+        """清理过期缓存，返回清理条数。"""
+        now = time.time()
+        expired = [
+            k for k, (ts, _) in self._result_cache.items()
+            if now - ts > self._cache_ttl
+        ]
+        for k in expired:
+            self._result_cache.pop(k, None)
+        return len(expired)
+
+    def _get_cached(self, url: str) -> ResolveResult | None:
+        """取缓存；命中且未过期返回结果，过期则删掉并返回 None。"""
+        entry = self._result_cache.get(url)
+        if not entry:
+            return None
+        ts, result = entry
+        if time.time() - ts > self._cache_ttl:
+            self._result_cache.pop(url, None)
+            return None
+        return result
+
+    def _cache_result(self, url: str, result: ResolveResult) -> None:
+        """写入缓存；顺便做一次惰性清理，防止内存无上限。"""
+        self._result_cache[url] = (time.time(), result)
+        if len(self._result_cache) > 300:
+            self._purge_cache()
 
     def _heal_config_types(self) -> None:
         """校正配置里残留的旧类型值。
@@ -497,9 +552,18 @@ class Main(Star):
                 platform_name = candidate.name
 
             resolved_any = True
-            logger.info(f"[R插件] 解析 {platform_name or resolver}: {url}")
 
-            result = await call(resolver, url, ctx, platform_name or resolver)
+            # 先查缓存（仅自动识别的链接）：重复发同一链接、命中且未过期就直接
+            # 重发，跳过网络解析。命令式规则（翻译 / AI 总结）不缓存。
+            cached = self._get_cached(url) if forced_resolver is None else None
+            if cached is not None:
+                result = cached
+                logger.info(f"[R插件] 命中缓存，直接重发: {url}")
+            else:
+                logger.info(f"[R插件] 解析 {platform_name or resolver}: {url}")
+                result = await call(resolver, url, ctx, platform_name or resolver)
+                if forced_resolver is None and result.success and result.has_media:
+                    self._cache_result(url, result)
 
             if not result.success or not result.has_media:
                 if not result.success:
@@ -565,8 +629,34 @@ class Main(Star):
                 yield event.plain_result(intro)
 
         sent_media = False
+        skip_images = False
 
-        # ---- 本地视频（B 站 DASH 合并产物）----
+        # ---- B站 DASH 延迟合并（简介已先发出，这里才下载合并）----
+        dash_merge = result.extra.get("dash_merge")
+        if dash_merge and dash_merge.get("video") and dash_merge.get("audio"):
+            try:
+                merged = await merge_dash(
+                    dash_merge["video"],
+                    dash_merge["audio"],
+                    tag=f"bili_{result.extra.get('bvid', 'x')}",
+                )
+                event.track_temporary_local_file(str(merged))
+                yield event.chain_result([Comp.Video.fromFileSystem(str(merged))])
+                sent_media = True
+                skip_images = True  # 视频已发，封面图不再单独发
+            except MergeError as exc:
+                logger.warning(f"[R插件][B站] 合并失败，降级为无声视频轨: {exc}")
+                try:
+                    yield event.chain_result(
+                        [Comp.Video.fromURL(dash_merge["video"])]
+                    )
+                    sent_media = True
+                    skip_images = True
+                except Exception as exc2:  # noqa: BLE001
+                    logger.warning(f"[R插件][B站] 无声视频轨也发送失败: {exc2}")
+                    yield event.plain_result(f"⚠️ B站视频发送失败：{exc}")
+
+        # ---- 本地视频（其它平台的合并产物）----
         if result.local_videos:
             path = result.local_videos[0]
             # 登记给 AstrBot，事件结束后自动回收
@@ -625,7 +715,7 @@ class Main(Star):
                     yield event.plain_result(url)
 
         # ---- 图片（图集超限走合并转发）----
-        if result.images:
+        if result.images and not skip_images:
             async for item in self._send_images(event, result):
                 yield item
             sent_media = True
@@ -653,6 +743,9 @@ class Main(Star):
 
     def _content_type(self, result: ResolveResult) -> str:
         """根据媒体字段推断作品类型。"""
+        # B站 DASH 延迟合并：有 dash_merge 就是视频（videos 为空、images 是封面）
+        if result.extra.get("dash_merge"):
+            return "视频"
         nv = len(result.videos)
         ni = len(result.images)
         if nv > 1:

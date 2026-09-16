@@ -127,8 +127,8 @@
       "download_concurrency": {
         "description": "媒体下载并发数",
         "type": "int",
-        "hint": "图集合并转发、多视频下载时同时下载的数量。设大点下载更快，但会吃更多内存和带宽。一般 6 就够。",
-        "default": 6
+        "hint": "图集合并转发、多视频下载时同时下载的数量。设大点下载更快，但会吃更多内存和带宽。一般 8 就够。",
+        "default": 8
       },
       "douyin_probe_quality": {
         "description": "抖音画质探测",
