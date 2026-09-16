@@ -71,10 +71,15 @@ git clone https://gitee.com/MuLinYa259/astrbot-viedo.git astrbot_plugin_rconsole
 | 填法 | 适合 | 怎么做 |
 |---|---|---|
 | ① **整段 Cookie** | 已经复制了一整段 | 直接粘进原字段（`抖音的Cookie` 等），插件原样透传 |
-| ② **逐项填写** | 只想填关键的几个 | 展开「XXXCookie 逐项填写」，一项一项填，插件自动拼 |
+| ② **逐项填写** | 只想填关键的几个 | 点「添加条目」→ **下拉栏选字段名** → **输入框填值** |
 
-逐项填写时插件会自动组成标准格式 `key=value; key=value; ...`，
-并且**会根据必需项做体检**——缺关键项时在日志里点名，不用你去猜为什么解析失败。
+逐项填写用的是 AstrBot 的 `dict` + `template_schema` 键值编辑器
+（就是系统设置里「自定义请求体参数」那种控件）：可选字段名以下拉形式给出，
+已选过的键会自动从下拉里移除，条目可增删。
+
+插件按 `key=value; key=value; ...` 组装，**并按字段的定义顺序排列**
+（有些服务端认顺序）。还会**做必需项体检**——缺关键项时在日志里点名，
+不用你去猜为什么解析失败。
 
 ### 支持逐项填写的平台
 
@@ -87,8 +92,12 @@ git clone https://gitee.com/MuLinYa259/astrbot-viedo.git astrbot_plugin_rconsole
 | 酷狗 | `other` → 酷狗的Cookie / **逐项填写** | `token` `userid` `dfid` | `token` 或 `userid` |
 | 小黑盒 | `xiaoheihe` → 小黑盒的Cookie / **逐项填写** | `x_xhh_tokenid` | `x_xhh_tokenid` |
 
+每个字段在下拉里都带一句说明（比如 `sessionid` 标了「登录态主凭据，最关键的一个」），
+不用去翻文档猜哪个重要。
+
 > key 列表不是我猜的，是原插件 `config/tools.yaml` 注释里明确写出的格式拆出来的。
 > B 站和小黑盒的「整段」字段存的是单值，填进去会自动补 `SESSDATA=` / `x_xhh_tokenid=` 前缀。
+> 下拉之外的字段也能加（`dict` 是自由映射），插件照样带上，不会静默丢弃。
 
 ### 配了 Cookie 之后有什么变化
 
