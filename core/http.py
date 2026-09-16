@@ -228,6 +228,95 @@ async def fetch_json(
         raise HttpError(f"接口返回非 JSON: {text[:120]}")
 
 
+async def fetch_with_cookies(
+    url: str,
+    *,
+    timeout: float = 15.0,
+    headers: dict[str, str] | None = None,
+    retries: int = 2,
+) -> tuple[bytes, str, dict[str, str]]:
+    """GET 一个 URL，跟随重定向，并收集重定向链上的所有 Set-Cookie。
+
+    普通 ``fetch`` 只返回响应体，把响应头丢了。但 B 站扫码登录的 SESSDATA
+    是 poll 接口在登录成功时通过 ``Set-Cookie`` 响应头下发的，拿不到响应头
+    就等于拿不到登录态。这里用 CookieJar 把整条重定向链的 Cookie 都收进来。
+
+    Returns:
+        ``(body_bytes, final_url, cookies)`` —— ``cookies`` 是 ``{cookie名: 值}``，
+        值保留 URL 编码形式（与浏览器实际发送的一致，例如 SESSDATA 里的
+        ``%2C`` 逗号不会被 decode 掉）。
+    """
+    merged = dict(BROWSER_HEADERS)
+    if headers:
+        merged.update(headers)
+
+    last_err: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            jar = aiohttp.CookieJar(unsafe=True)
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=timeout),
+                connector=connector,
+                cookie_jar=jar,
+            ) as session:
+                async with session.get(
+                    url, headers=merged, allow_redirects=True
+                ) as resp:
+                    body = await resp.read()
+                    final_url = str(resp.url)
+                    cookies: dict[str, str] = {}
+                    for key, morsel in resp.cookies.items():
+                        # coded_value 保留 %2C 等编码，和浏览器发出的 cookie 一致
+                        try:
+                            cookies[key] = morsel.coded_value
+                        except AttributeError:  # pragma: no cover - 旧版 aiohttp 兜底
+                            cookies[key] = morsel.value
+                    return body, final_url, cookies
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            if _is_dns_error(exc):
+                raise HttpError(f"域名解析失败（接口可能已失效）: {url}") from exc
+            if attempt < retries:
+                await asyncio.sleep(0.8 * (attempt + 1))
+                continue
+
+    raise HttpError(f"请求失败: {url} -> {last_err}") from last_err
+
+
+async def fetch_json_with_cookies(
+    url: str,
+    *,
+    timeout: float = 15.0,
+    headers: dict[str, str] | None = None,
+    retries: int = 2,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """GET 一个 URL 解析成 JSON，同时返回响应链上的 Set-Cookie。
+
+    ``fetch_json`` 的增强版，专给 B 站扫码登录这类「登录态在 Set-Cookie 里」
+    的接口用。返回 ``(json_dict, cookies)``。
+    """
+    body, _, cookies = await fetch_with_cookies(
+        url, timeout=timeout, headers=headers, retries=retries
+    )
+    text = body.decode("utf-8", errors="ignore").strip()
+    if not text:
+        raise HttpError(f"接口返回空内容: {url}")
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            try:
+                data = json.loads(text[start : end + 1])
+            except json.JSONDecodeError as exc:
+                raise HttpError(f"接口返回非 JSON: {text[:120]}") from exc
+        else:
+            raise HttpError(f"接口返回非 JSON: {text[:120]}")
+    return data, cookies
+
+
 async def expand_short_url(url: str, *, timeout: float = 10.0) -> str:
     """展开短链，拿到最终跳转地址。
 

@@ -12,8 +12,10 @@
    - ``86090`` 已扫描，等用户在手机上确认
    - ``86038`` 二维码已过期
    - ``0``     登录成功
-4. 成功后返回的 ``data.url`` 是一串带参数的跳转地址，里面就带着
-   ``SESSDATA`` / ``bili_jct`` / ``DedeUserID`` —— 直接抠出来写进配置。
+4. 成功后，``SESSDATA`` / ``bili_jct`` / ``DedeUserID`` 是通过 poll 接口的
+   **``Set-Cookie`` 响应头**下发的（老版会放在 ``data.url`` 的 query 里，
+   现在没了）。所以 poll 请求必须用能拿到响应头的封装（``fetch_json_with_cookies``），
+   再从 Set-Cookie 里抠出来写进配置。
 
 关于二维码图片：容器里已经有 ``qrcode`` 和 ``PIL``，本地生成 PNG 就行，
 不用依赖任何外部二维码服务。
@@ -31,7 +33,7 @@ from urllib.parse import parse_qs, urlparse
 
 from astrbot.api import logger
 
-from .http import HttpError, fetch_json
+from .http import HttpError, fetch_json, fetch_json_with_cookies, fetch_with_cookies
 
 _QR_GENERATE = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
 _QR_POLL = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key={}"
@@ -113,13 +115,16 @@ async def create_login_qrcode() -> tuple[str, str, Path]:
     return key, url, _qr_image(url)
 
 
-async def poll_once(qrcode_key: str) -> tuple[int, dict]:
+async def poll_once(qrcode_key: str) -> tuple[int, dict, dict]:
     """轮询一次。
 
     Returns:
-        ``(状态码, data)``；拿到 ``CODE_SUCCESS`` 时 data 里包含跳转 url。
+        ``(状态码, data, cookies)`` —— 拿到 ``CODE_SUCCESS`` 时 cookies 里
+        含 B 站通过 Set-Cookie 下发的 SESSDATA / bili_jct / DedeUserID 等。
     """
-    data = await fetch_json(_QR_POLL.format(qrcode_key), headers=_HEADERS, retries=1)
+    data, cookies = await fetch_json_with_cookies(
+        _QR_POLL.format(qrcode_key), headers=_HEADERS, retries=1
+    )
     payload = data.get("data") or {}
     # 外层 code 是接口本身是否正常，真正表示扫码状态的是 data.code
     code = payload.get("code", data.get("code", -1))
@@ -127,7 +132,7 @@ async def poll_once(qrcode_key: str) -> tuple[int, dict]:
         code = int(code)
     except (TypeError, ValueError):
         code = -1
-    return code, payload
+    return code, payload, cookies
 
 
 async def wait_for_login(
@@ -147,7 +152,7 @@ async def wait_for_login(
 
     while elapsed < timeout:
         try:
-            code, payload = await poll_once(qrcode_key)
+            code, payload, cookies = await poll_once(qrcode_key)
         except HttpError as exc:
             logger.debug(f"[R插件][B站扫码] 轮询失败（继续）: {exc}")
             await asyncio.sleep(interval)
@@ -162,9 +167,22 @@ async def wait_for_login(
             last_status = code
 
         if code == CODE_SUCCESS:
+            # 凭据来源有三层，按可信度从高到低依次覆盖：
+            #   1. 老版：data.url 的 query 里直接带 SESSDATA（parse_qs 会 decode）
+            #   2. 新版：poll 响应头的 Set-Cookie（保留 %2C 编码，与浏览器一致）
+            #   3. 兜底：请求跳转地址，从重定向链的 Set-Cookie 拿
             credentials = parse_credentials(payload.get("url") or "")
+            credentials.update(_pick_wanted(cookies))
+            if not credentials.get("SESSDATA") and payload.get("url"):
+                credentials.update(await _credentials_via_redirect(payload["url"]))
+
             if not credentials.get("SESSDATA"):
-                return {"error": "登录成功但没能从返回地址里解析到 SESSDATA"}
+                logger.warning(
+                    f"[R插件][B站扫码] 登录成功但拿不到 SESSDATA。"
+                    f"data.url={str(payload.get('url'))[:200]!r} "
+                    f"cookies={list(cookies.keys())}"
+                )
+                return {"error": "登录成功但没能从响应里解析到 SESSDATA"}
             credentials["refresh_token"] = payload.get("refresh_token", "")
             credentials["timestamp"] = payload.get("timestamp", 0)
             return credentials
@@ -203,6 +221,29 @@ def parse_credentials(redirect_url: str) -> dict[str, str]:
         if values and values[0]:
             result[key] = values[0]
     return result
+
+
+_WANTED_COOKIES = ("SESSDATA", "bili_jct", "DedeUserID", "buvid3", "buvid4")
+
+
+def _pick_wanted(cookies: dict[str, str]) -> dict[str, str]:
+    """从 cookie 字典里挑出我们关心的登录态字段。"""
+    result: dict[str, str] = {}
+    for key in _WANTED_COOKIES:
+        value = cookies.get(key)
+        if value:
+            result[key] = value
+    return result
+
+
+async def _credentials_via_redirect(url: str) -> dict[str, str]:
+    """兜底：请求登录成功返回的跳转地址，从重定向链的 Set-Cookie 抠凭据。"""
+    try:
+        _, _, cookies = await fetch_with_cookies(url, headers=_HEADERS, retries=1)
+    except HttpError as exc:
+        logger.warning(f"[R插件][B站扫码] 请求跳转地址拿 Cookie 失败: {exc}")
+        return {}
+    return _pick_wanted(cookies)
 
 
 async def fetch_login_state(cookie: str) -> dict:
