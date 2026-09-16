@@ -142,24 +142,11 @@ async def resolve_aircraft(link: str, ctx: ResolverContext) -> ResolveResult:
 # ==========================================================================
 # 管理类命令（对应原版的 permission: 'master'）
 # ==========================================================================
-
-
-@register("bili_scan")
-async def resolve_bili_scan(link: str, ctx: ResolverContext) -> ResolveResult:
-    """B 站扫码登录。"""
-    return not_ported(
-        "B站扫码",
-        "扫码登录涉及二维码生成 + 轮询 + SESSDATA 落库，未移植",
-        "原版 apps/tools.js 的 biliScan handler",
-    )
-
-
-@register("bili_state")
-async def resolve_bili_state(link: str, ctx: ResolverContext) -> ResolveResult:
-    """B 站账号状态。"""
-    return not_ported("B站状态", "依赖扫码登录后的 Cookie，未移植", "先完成 B 站扫码登录")
-
-
+#
+# 注意：`bili_scan`（#RBQ）和 `bili_state`（#RBS）**不在这里** ——
+# 它们需要 event 和 Context，由 main.py 的 _LOCAL_COMMAND_METHODS 直接处理，
+# 不走 resolver 注册表。实现见 core/bili_login.py。
+#
 @register("netease_status")
 async def resolve_netease_status(link: str, ctx: ResolverContext) -> ResolveResult:
     """网易云账号状态。"""

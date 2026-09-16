@@ -24,7 +24,11 @@ import re
 from astrbot.api import logger
 
 from ..core.bili_wbi import signed_get_json
-from ..core.constants import BILI_RESOLUTION_LIST
+from ..core.constants import (
+    BILI_QUALITY_INDEX_TO_QN,
+    BILI_QN_TO_NAME,
+    BILI_RESOLUTION_LIST,
+)
 from ..core.http import HttpError, expand_short_url, fetch_json
 from ..core.media import MergeError, ffmpeg_available, merge_dash
 from .base import ResolveResult, ResolverContext, register
@@ -94,6 +98,26 @@ def _build_cookie(ctx: ResolverContext) -> str:
     ``core/cookies.py`` 里做，这里只负责拿结果。
     """
     return ctx.cookie("bili").strip()
+
+
+def _resolve_qn(ctx: ResolverContext) -> tuple[int, str]:
+    """决定请求哪个画质。
+
+    优先用原插件的 ``bili.biliResolution`` —— 注意它存的是**下拉索引**
+    （0=8K … 10=360P），不是 B 站的 qn，要过一遍映射表。
+    没配或值不合法时，退回本移植版自己的 ``plugin.bili_quality_when_logged_in``。
+
+    Returns:
+        ``(qn, 展示名)``
+    """
+    raw = str(ctx.conf("bili.biliResolution", "") or "").strip()
+    if raw.lstrip("-").isdigit():
+        qn = BILI_QUALITY_INDEX_TO_QN.get(int(raw))
+        if qn:
+            return qn, BILI_QN_TO_NAME.get(qn, f"qn={qn}")
+
+    name = str(ctx.conf("plugin.bili_quality_when_logged_in", "1080P") or "1080P")
+    return BILI_RESOLUTION_LIST.get(name, 80), name
 
 
 def _pick_tracks(dash: dict, codec_pref: tuple[int, ...]) -> tuple[dict | None, dict | None]:
@@ -234,8 +258,9 @@ async def resolve_bilibili(link: str, ctx: ResolverContext) -> ResolveResult:
     # ==================================================================
     # 模式 B：已登录 —— WBI 签名 + DASH + ffmpeg 合并
     # ==================================================================
-    quality_name = str(ctx.conf("plugin.bili_quality_when_logged_in", "1080P") or "1080P")
-    qn = BILI_RESOLUTION_LIST.get(quality_name, 80)
+    # 画质：优先用原插件的 biliResolution（下拉索引），退回本版自己的配置项
+    qn, quality_name = _resolve_qn(ctx)
+    logger.debug(f"[R插件][B站] 请求画质 {quality_name}（qn={qn}）")
 
     codec_name = str(ctx.conf("global.videoCodec", "auto") or "auto")
     codec_pref = _CODEC_PREFERENCE.get(codec_name, _CODEC_PREFERENCE["auto"])
@@ -309,10 +334,9 @@ async def resolve_bilibili(link: str, ctx: ResolverContext) -> ResolveResult:
     video_url = _track_url(video_track)
     audio_url = _track_url(audio_track) if audio_track else ""
 
-    actual_quality = {
-        120: "4K", 116: "1080P60", 112: "1080P+", 80: "1080P",
-        64: "720P", 32: "480P", 16: "360P",
-    }.get(video_track.get("id"), f"qn={video_track.get('id')}")
+    actual_quality = BILI_QN_TO_NAME.get(
+        video_track.get("id"), f"qn={video_track.get('id')}"
+    )
 
     extra = {
         **base_info,

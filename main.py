@@ -43,13 +43,19 @@ Yunzai                        AstrBot
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
+from pathlib import Path
 
 import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star
 
+from .core import bili_login
+from .core.bili_login import QRCodeUnavailable
+from .core.config_migrate import heal as heal_config
 from .core.constants import (
     AUTO_RULES,
     COMMAND_RULES,
@@ -64,6 +70,13 @@ from .core.external import describe_environment, find_tool
 from .core.http import HttpError
 from .platforms import ResolveResult, call
 from .platforms import names as resolver_names
+
+# 需要 event / Context 才能干活、不走 resolver 注册表的命令。
+# 值是对应的方法名（用 getattr 取，避免类还没定义完就互相引用）。
+_LOCAL_COMMAND_METHODS: dict[str, str] = {
+    "bili_scan": "cmd_bili_scan",
+    "bili_state": "cmd_bili_state",
+}
 
 # 自动识别用的合并正则。必须是模块级常量——装饰器在类定义时求值，
 # 那时候还读不到用户配置；精细开关在 handler 里再判一次。
@@ -120,8 +133,19 @@ class Main(Star):
         super().__init__(context, config)
         self.conf_data: AstrBotConfig | dict = config or {}
 
+        # 扫码登录的轮询任务。Context.register_task 已经弃用
+        # （源码注释：改用 initialize() 里起后台任务），但扫码是「按需触发」的，
+        # 属于每次调用各自的短任务，所以自己 create_task 并持有句柄，
+        # 插件卸载时统一取消，不留野任务。
+        self._bg_tasks: set[asyncio.Task] = set()
+
         registered = set(resolver_names())
-        configured = {r.resolver for r in AUTO_RULES} | {r["handler"] for r in COMMAND_RULES}
+        # 本地命令（扫码登录之类）不走 resolver 注册表，自检时要排除掉，
+        # 否则会误报「规则表引用了不存在的 resolver」
+        configured = (
+            {r.resolver for r in AUTO_RULES}
+            | {r["handler"] for r in COMMAND_RULES}
+        ) - set(_LOCAL_COMMAND_METHODS)
         missing = sorted(configured - registered)
         if missing:
             # 规则表里写了但没实现，早点说出来，别等用户触发才发现
@@ -132,6 +156,41 @@ class Main(Star):
             f"命令规则 {len(COMMAND_RULES)} 条 / 已注册 resolver {len(registered)} 个"
         )
         logger.info(f"[R插件] 外部工具环境：{describe_environment()}")
+
+        # 配置类型自愈。必须放在日志之后：它可能要写文件，先让加载日志落盘，
+        # 万一自愈出问题也能看到插件已经起来了。
+        self._heal_config_types()
+
+    def _heal_config_types(self) -> None:
+        """校正配置里残留的旧类型值。
+
+        schema 类型变过之后，老配置里的值还是旧类型，WebUI 一保存就报
+        「期望是 string, 得到了 int」——用户根本没碰那个字段。详见
+        ``core/config_migrate.py`` 的说明。
+        """
+        schema_path = Path(__file__).parent / "_conf_schema.json"
+        if not schema_path.is_file():
+            return
+        try:
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning(f"[R插件] 读取配置 schema 失败，跳过自愈: {exc}")
+            return
+
+        saver = getattr(self.conf_data, "save_config", None)
+        changes = heal_config(
+            self.conf_data,
+            schema,
+            save=saver if callable(saver) else None,
+        )
+        if not changes:
+            return
+
+        logger.info(f"[R插件] 配置类型自愈：修正 {len(changes)} 处旧类型的值")
+        for line in changes[:8]:
+            logger.info(f"    · {line}")
+        if len(changes) > 8:
+            logger.info(f"    · ... 另外 {len(changes) - 8} 处")
 
     # ==================================================================
     # 配置读取
@@ -193,6 +252,30 @@ class Main(Star):
         response = await provider.text_chat(prompt=prompt)
         return getattr(response, "completion_text", "") or ""
 
+    def _is_admin(self, event: AstrMessageEvent) -> bool:
+        """判定发送者是不是 AstrBot 管理员。
+
+        主判据是 ``event.is_admin()`` —— 源码里它就是 ``self.role == "admin"``，
+        而 ``role`` 由 AstrBot 的 ``waking_check`` 阶段按全局配置的
+        ``admins_id`` 设置。也就是说走的是 AstrBot 官方的管理员名单，
+        和 ``@filter.permission_type(PermissionType.ADMIN)`` 完全同一套语义。
+
+        再加一层兜底：直接读一次全局 ``admins_id`` 比对 sender_id。
+        某些平台的适配器如果没把 role 传下来，这一层能补上。
+        """
+        if event.is_admin():
+            return True
+
+        try:
+            cfg = self.context.get_config()
+            admins = cfg.get("admins_id") or []
+        except Exception as exc:  # noqa: BLE001 - 读不到就别放行
+            logger.debug(f"[R插件] 读取 admins_id 失败: {exc}")
+            return False
+
+        sender = str(event.get_sender_id())
+        return sender in {str(a) for a in admins}
+
     def _enabled_keys(self) -> set[str]:
         """启用自动解析的平台集合。"""
         keys = self.conf_get("plugin.enabled_platforms", [r.key for r in AUTO_RULES])
@@ -234,14 +317,29 @@ class Main(Star):
         handled: str | None = None
         for cmd in COMMAND_RULES:
             if re.search(cmd["pattern"], text, re.IGNORECASE | re.MULTILINE):
-                if cmd["admin"] and not event.is_admin():
-                    yield event.plain_result("❌ 该指令需要管理员权限")
+                if cmd["admin"] and not self._is_admin(event):
+                    # 拒绝并记录。默认静默（不回消息），避免向普通成员
+                    # 暴露「这里有个管理员指令」，也少刷屏
+                    logger.warning(
+                        f"[R插件] 非管理员 {event.get_sender_id()} 尝试执行受限指令 "
+                        f"{cmd['name']}（{cmd['key']}），已拒绝"
+                    )
+                    if not self.conf_get("plugin.silent_on_no_permission", True):
+                        yield event.plain_result("❌ 该指令仅限管理员使用")
                     event.stop_event()
                     return
                 handled = cmd["handler"]
                 break
 
         if not handled:
+            return
+
+        # 需要 event / Context 的命令（扫码登录之类）本地处理
+        local_method = _LOCAL_COMMAND_METHODS.get(handled)
+        if local_method:
+            async for item in getattr(self, local_method)(event):
+                yield item
+            event.stop_event()
             return
 
         async for item in self._dispatch(
@@ -436,6 +534,159 @@ class Main(Star):
             elif show_desc and result.desc:
                 yield event.plain_result(result.desc[:300])
 
+    # ==================================================================
+    # B 站扫码登录（对应原插件的 #RBQ / #RBS）
+    # ==================================================================
+
+    async def cmd_bili_scan(self, event: AstrMessageEvent):
+        """``#RBQ`` —— 扫码登录 B 站，拿到 Cookie 后自动写进配置。"""
+        try:
+            qrcode_key, qr_url, img_path = await bili_login.create_login_qrcode()
+        except QRCodeUnavailable as exc:
+            yield event.plain_result(f"❌ {exc}")
+            return
+        except HttpError as exc:
+            yield event.plain_result(f"❌ 申请二维码失败：{exc}")
+            return
+
+        logger.info("[R插件][B站扫码] 已生成登录二维码")
+
+        # 登记给 AstrBot，事件结束后自动回收
+        event.track_temporary_local_file(str(img_path))
+        yield event.plain_result(
+            "请用 **B站手机客户端** 扫描下面的二维码登录。\n"
+            "扫码后还需要在手机上点一下「确认登录」。"
+        )
+        try:
+            yield event.image_result(str(img_path))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[R插件][B站扫码] 二维码图片发送失败: {exc}")
+            yield event.plain_result(f"二维码图片发送失败，可手动打开：{qr_url}")
+
+        # 轮询放到后台，不然这里会把 handler 挂住几分钟
+        umo = event.unified_msg_origin
+        timeout = float(self.conf_get("plugin.bili_login_timeout", 180) or 180)
+        task = asyncio.create_task(
+            self._bili_login_worker(qrcode_key, umo, timeout),
+            name="rconsole_bili_login",
+        )
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def cmd_bili_state(self, event: AstrMessageEvent):
+        """``#RBS`` —— 查当前 B 站 Cookie 的登录状态。"""
+        cookie = self.cookie_for("bili")
+        if not cookie:
+            yield event.plain_result(
+                "❌ 还没配置 B 站 Cookie。\n"
+                "发 `#RBQ` 扫码登录，或在插件配置里手动填。"
+            )
+            return
+
+        state = await bili_login.fetch_login_state(cookie)
+
+        lines = ["📺 **B站账号状态**"]
+        if state.get("logged_in"):
+            lines.append(f"登录状态：✅ 已登录（{state.get('msg')}）")
+            lines.append(f"昵称：{state.get('uname')}")
+            lines.append(f"UID：{state.get('mid')}")
+            lines.append(f"等级：Lv{state.get('level')}")
+            lines.append(f"会员：{state.get('vip_label')}")
+            lines.append(f"当前 Cookie：`{bili_login.mask_cookie(cookie)}`")
+        else:
+            lines.append(f"登录状态：❌ {state.get('msg')}")
+            lines.append("可以发 `#RBQ` 重新扫码登录。")
+        yield event.plain_result("\n".join(lines))
+
+    async def _bili_login_worker(self, qrcode_key: str, umo: str, timeout: float) -> None:
+        """后台轮询扫码结果，成功后写配置并通知用户。"""
+        try:
+            result = await bili_login.wait_for_login(qrcode_key, timeout=timeout)
+        except asyncio.CancelledError:
+            logger.info("[R插件][B站扫码] 轮询任务被取消")
+            raise
+        except Exception as exc:  # noqa: BLE001 - 后台任务里的异常不能让整个插件炸
+            logger.error(f"[R插件][B站扫码] 轮询异常: {type(exc).__name__}: {exc}")
+            await self._notify(umo, f"❌ B站扫码登录出错：{exc}")
+            return
+
+        if result.get("error"):
+            await self._notify(umo, f"❌ B站扫码登录失败：{result['error']}")
+            return
+
+        saved = self._save_bili_credentials(result)
+
+        # 顺手验一下这份 Cookie 到底有没有用，省得用户以为成功了其实没生效
+        state = await bili_login.fetch_login_state(saved)
+        lines = ["✅ **B站登录成功，Cookie 已写入配置**"]
+        if state.get("logged_in"):
+            lines.append(
+                f"账号：{state.get('uname')}（UID {state.get('mid')}，"
+                f"{state.get('vip_label')}，Lv{state.get('level')}）"
+            )
+        else:
+            lines.append(f"⚠️ 但状态校验没通过：{state.get('msg')}")
+        lines.append("现在发 B 站视频链接就会走登录态解析（DASH + ffmpeg 合并高清）。")
+        lines.append("可用 `#RBS` 随时查看账号状态。")
+        await self._notify(umo, "\n".join(lines))
+
+    def _save_bili_credentials(self, creds: dict) -> str:
+        """把扫码拿到的凭据写进插件配置。
+
+        只写「逐项填写」那栏（``bili.biliSessDataFields``），并把「整段 Cookie」
+        （``bili.biliSessData``）清空 —— 因为整段那条路优先级更高，留着旧值会把
+        刚扫出来的新凭据盖掉，用户改了逐项也不生效。单一数据源，避免这种鬼打墙。
+
+        Returns:
+            组装好的 Cookie 字符串（供立刻校验用）。
+        """
+        keys = ("SESSDATA", "bili_jct", "DedeUserID", "buvid3")
+        picked = {k: creds[k] for k in keys if creds.get(k)}
+        cookie = "; ".join(f"{k}={v}" for k, v in picked.items())
+
+        try:
+            bili_conf = self.conf_data.setdefault("bili", {})
+            fields = bili_conf.setdefault("biliSessDataFields", {})
+            if isinstance(fields, dict):
+                for key in keys:
+                    fields[key] = picked.get(key, "")
+
+            old_raw = str(bili_conf.get("biliSessData") or "").strip()
+            if old_raw:
+                logger.info("[R插件][B站扫码] 清空旧的「整段 Cookie」，避免覆盖新凭据")
+                bili_conf["biliSessData"] = ""
+
+            saver = getattr(self.conf_data, "save_config", None)
+            if callable(saver):
+                saver()
+                logger.info("[R插件][B站扫码] 凭据已持久化到配置文件")
+            else:
+                logger.warning("[R插件][B站扫码] 配置对象不支持保存，凭据仅存在于内存")
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[R插件][B站扫码] 写配置失败: {type(exc).__name__}: {exc}")
+
+        return cookie
+
+    async def _notify(self, umo: str, text: str) -> None:
+        """向指定会话主动发消息。"""
+        if not umo:
+            logger.warning("[R插件] 没有 umo，无法发送主动消息")
+            return
+        try:
+            ok = await self.context.send_message(umo, MessageChain().message(text))
+            if not ok:
+                logger.warning(f"[R插件] 主动消息未送达（找不到会话 {umo}）")
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[R插件] 主动消息发送失败: {type(exc).__name__}: {exc}")
+
     async def terminate(self):
         """插件卸载时调用。"""
+        # 取消还在跑的扫码轮询，不留野任务
+        for task in list(self._bg_tasks):
+            if not task.done():
+                task.cancel()
+        if self._bg_tasks:
+            await asyncio.gather(*self._bg_tasks, return_exceptions=True)
+            self._bg_tasks.clear()
+
         logger.info("[R插件] 已卸载")

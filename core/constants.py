@@ -180,6 +180,52 @@ BILI_RESOLUTION_LIST = {
     "360P": 16,
 }
 
+# 原插件 config 里 biliResolution 存的是**下拉索引**，不是 qn。
+# 对应 constants/constant.js 的 BILI_RESOLUTION_LIST（value -> qn）。
+# 面板上显示的中文名见 BILI_QUALITY_INDEX_LABELS。
+BILI_QUALITY_INDEX_TO_QN: dict[int, int] = {
+    0: 127,   # 8K 超高清
+    1: 126,   # 杜比视界
+    2: 125,   # HDR 真彩
+    3: 120,   # 4K 超清
+    4: 116,   # 1080P60 高帧率
+    5: 112,   # 1080P+ 高码率
+    6: 80,    # 1080P 高清
+    7: 74,    # 720P60 高帧率
+    8: 64,    # 720P 高清
+    9: 32,    # 480P 清晰
+    10: 16,   # 360P 流畅
+}
+
+BILI_QUALITY_INDEX_LABELS: tuple[str, ...] = (
+    "8K 超高清",
+    "杜比视界",
+    "HDR 真彩",
+    "4K 超清",
+    "1080P60 高帧率",
+    "1080P+ 高码率",
+    "1080P 高清",
+    "720P60 高帧率",
+    "720P 高清",
+    "480P 清晰",
+    "360P 流畅",
+)
+
+# qn -> 展示名，用于日志和回复文案
+BILI_QN_TO_NAME: dict[int, str] = {
+    127: "8K",
+    126: "杜比视界",
+    125: "HDR",
+    120: "4K",
+    116: "1080P60",
+    112: "1080P+",
+    80: "1080P",
+    74: "720P60",
+    64: "720P",
+    32: "480P",
+    16: "360P",
+}
+
 # 抖音视频类型映射
 DOUYIN_TYPE_MAP = {
     2: "image",
