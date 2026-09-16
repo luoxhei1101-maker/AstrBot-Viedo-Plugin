@@ -637,6 +637,7 @@ class Main(Star):
 
         sent_media = False
         skip_images = False
+        skip_videos = False
 
         # ---- B站 DASH 延迟合并（简介已先发出，这里才下载合并）----
         dash_merge = result.extra.get("dash_merge")
@@ -675,8 +676,18 @@ class Main(Star):
                 logger.warning(f"[R插件] 发送本地视频失败: {exc}")
                 yield event.plain_result(f"⚠️ {result.platform} 视频发送失败：{exc}")
 
+        # ---- 图像册（抖音图集，可能混排静态图与动图）----
+        # 单独走一条链路：动图必须按视频发、静态图按图片发，而且顺序要和
+        # 作品里一致，所以不能拆成「视频链 + 图片链」两段（那样顺序会乱）。
+        if result.extra.get("album_kinds"):
+            async for item in self._send_album(event, result):
+                yield item
+            sent_media = True
+            skip_images = True
+            skip_videos = True
+
         # ---- 视频直链 ----
-        elif result.videos:
+        if result.videos and not skip_videos:
             send_mode = self.conf_get("plugin.send_mode", "url")
             local_path: str | None = None
             if send_mode == "download":
@@ -722,7 +733,7 @@ class Main(Star):
                     yield event.plain_result(url)
 
         # ---- 图片（图集超限走合并转发）----
-        if result.images and not skip_images:
+        if result.images and not skip_images and not skip_videos:
             async for item in self._send_images(event, result):
                 yield item
             sent_media = True
@@ -842,6 +853,16 @@ class Main(Star):
         # B站 DASH 延迟合并：有 dash_merge 就是视频（videos 为空、images 是封面）
         if result.extra.get("dash_merge"):
             return "视频"
+        # 抖音图集：按逐项类型判，混排时明确写「图集（含动图）」
+        if result.extra.get("album_kinds"):
+            kinds = result.extra["album_kinds"]
+            n_anim = kinds.count("animated")
+            n_still = kinds.count("still")
+            if n_anim and n_still:
+                return "图集（含动图）"
+            if n_anim:
+                return "动图"
+            return "图集"
         nv = len(result.videos)
         ni = len(result.images)
         if nv > 1:
@@ -855,6 +876,173 @@ class Main(Star):
         if result.audios:
             return "音频"
         return ""
+
+    async def _send_album(self, event: AstrMessageEvent, result: ResolveResult):
+        """发送抖音图集 —— **静态图当图片发，动图当视频发，顺序按作品原样**。
+
+        原版 ``processDouyinImageAlbum`` 就是这么做的：逐项看有没有视频轨，
+        有就下载下来当视频发（还会用 ffmpeg 合 BGM），没有就 ``segment.image``。
+        移植时为了省掉落盘和 ffmpeg，动图改成发**播放直链**（``Comp.Video.fromURL``）
+        ——音轨本来就在动图的视频轨里，不是静音视频。
+
+        发送规则（和普通图集一致）：
+
+        - 项数不超过 ``max_images``：一条消息链按顺序发完
+        - 超过阈值：先把静态图并发下载到本地，用合并转发完整发出（顺序不变）
+        """
+        limit = max(1, int(self.conf_get("plugin.max_images", 9) or 9))
+        kinds = result.extra.get("album_kinds") or []
+        n_still = kinds.count("still")
+        n_anim = kinds.count("animated")
+
+        # 动图直链：videos 里全是动图，顺序与作品一致
+        anim_videos = list(result.videos)
+        still_images = list(result.images)
+        candidates = result.extra.get("image_candidates")
+
+        logger.debug(
+            f"[R插件][抖音] 发送图集：静态图 {n_still} 张，动图 {n_anim} 个，"
+            f"发送模式={'合并转发' if len(kinds) > limit else '直发'}"
+        )
+
+        # ---- 不超过阈值：单条消息链按顺序发 ----
+        if len(kinds) <= limit:
+            chain = []
+            # 逐项还原顺序：动图从 videos 队列取，静态图从 images 队列取
+            vi = 0
+            ii = 0
+            for kind in kinds:
+                if kind == "animated":
+                    if vi < len(anim_videos):
+                        try:
+                            chain.append(Comp.Video.fromURL(anim_videos[vi]))
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(f"[R插件] 跳过无效动图 {anim_videos[vi]}: {exc}")
+                        vi += 1
+                else:
+                    if ii < len(still_images):
+                        try:
+                            chain.append(Comp.Image.fromURL(still_images[ii]))
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(f"[R插件] 跳过无效图片 {still_images[ii]}: {exc}")
+                        ii += 1
+            if chain:
+                yield event.chain_result(chain)
+            return
+
+        # ---- 超过阈值 ----
+        if not self.conf_get("plugin.album_forward_when_exceed", True):
+            # 用户关掉了转发，退回「只发前 limit 项 + 提示」
+            chain = []
+            vi = 0
+            ii = 0
+            sent = 0
+            for kind in kinds:
+                if sent >= limit:
+                    break
+                if kind == "animated" and vi < len(anim_videos):
+                    try:
+                        chain.append(Comp.Video.fromURL(anim_videos[vi]))
+                        sent += 1
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(f"[R插件] 跳过无效动图: {exc}")
+                    vi += 1
+                elif kind == "still" and ii < len(still_images):
+                    try:
+                        chain.append(Comp.Image.fromURL(still_images[ii]))
+                        sent += 1
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(f"[R插件] 跳过无效图片: {exc}")
+                    ii += 1
+            if chain:
+                yield event.chain_result(chain)
+            yield event.plain_result(f"（共 {len(kinds)} 项，只发了前 {limit} 项）")
+            return
+
+        # 并发下载静态图（抖音每张图带候选 URL，签名时效不一，逐个尝试）
+        concurrency = max(1, int(self.conf_get("plugin.download_concurrency", 6) or 6))
+        max_mb = int(self.conf_get("global.videoSizeLimit", 70) or 70)
+        max_bytes = max_mb * 1024 * 1024
+
+        still_paths: list[Path | None] = []
+        if still_images:
+            if (
+                isinstance(candidates, list)
+                and candidates
+                and isinstance(candidates[0], list)
+                and len(candidates) == len(still_images)
+            ):
+                still_paths = await download_many_candidates(
+                    candidates,
+                    prefix="album",
+                    max_bytes=max_bytes,
+                    concurrency=concurrency,
+                )
+            else:
+                still_paths = await download_many(
+                    still_images,
+                    prefix="album",
+                    max_bytes=max_bytes,
+                    concurrency=concurrency,
+                )
+
+        # 合并转发的「发送者」用发起解析的这个用户：昵称 + QQ 号都取发送者
+        node_name = (event.get_sender_name() or "").strip() or "解析结果"
+        node_uin = str(event.get_sender_id() or "")
+
+        nodes = []
+        skipped = 0
+        vi = 0
+        ii = 0
+        for kind in kinds:
+            if kind == "animated":
+                if vi >= len(anim_videos):
+                    continue
+                url = anim_videos[vi]
+                vi += 1
+                try:
+                    nodes.append(
+                        Comp.Node(
+                            [Comp.Video.fromURL(url)], name=node_name, uin=node_uin
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[R插件] 跳过无效动图 {url}: {exc}")
+                    skipped += 1
+            else:
+                if ii >= len(still_paths):
+                    continue
+                path = still_paths[ii]
+                ii += 1
+                if path is None:
+                    # 下载失败（防盗链 / 签名过期）直接跳过，别把 URL 塞进 Node——
+                    # Node 转 base64 时会再下载一次，失败会拖垮整条合并转发
+                    skipped += 1
+                    continue
+                event.track_temporary_local_file(str(path))
+                img = Comp.Image.fromFileSystem(str(path))
+                nodes.append(Comp.Node([img], name=node_name, uin=node_uin))
+
+        if not nodes:
+            # 全部失败，退回「直发 URL」的旧行为，至少别让用户干等
+            chain = []
+            for url in still_images[:limit]:
+                try:
+                    chain.append(Comp.Image.fromURL(url))
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[R插件] 跳过无效图片 {url}: {exc}")
+            for url in anim_videos[:limit]:
+                try:
+                    chain.append(Comp.Video.fromURL(url))
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[R插件] 跳过无效动图 {url}: {exc}")
+            if chain:
+                yield event.chain_result(chain)
+            return
+
+        if skipped:
+            yield event.plain_result(f"（{skipped} 项发送失败，已跳过）")
+        yield event.chain_result([Comp.Nodes(nodes)])
 
     async def _send_images(self, event: AstrMessageEvent, result: ResolveResult):
         """发送图片列表。图集数量超过 ``max_images`` 时用合并转发完整发出。"""

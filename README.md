@@ -198,6 +198,7 @@ aiocqhttp（QQ OneBot）、Telegram、Discord、飞书 / Lark、企业微信、Q
 
 **抖音**：SSR 分享页带 Cookie 数据更完整；主解析走 SSR（免 `a-bogus`），
 图集做多 CDN 候选下载（签名失效自动换节点），评论复用原版 `a-bogus` 签名（需 Cookie）。
+图集**逐项分流**——动图（自带视频轨）按视频发、静态图按图片发，顺序与作品一致。
 
 **快手**：双路——优先网页 SSR 直解，失败回落第三方接口。
 
@@ -214,7 +215,7 @@ aiocqhttp（QQ OneBot）、Telegram、Discord、飞书 / Lark、企业微信、Q
 | AcFun | ✅ | ajaxpipe 抠 JSON → m3u8 |
 | 哔哩哔哩 | ✅ 主干 | WBI 签名 + Cookie + DASH + ffmpeg 合并；扫码登录；评论（合并转发）；BBDown / 番剧 / 直播未移植 |
 | AI 总结 / 翻译 | ✅ | 复用 AstrBot 自带的 LLM |
-| 抖音 | ✅ 主干 | SSR 路线 + 图集候选下载；评论（复用 a-bogus，需 Cookie） |
+| 抖音 | ✅ 主干 | SSR 路线 + 图集候选下载 + **动图/静态图逐项分流**；评论（复用 a-bogus，需 Cookie） |
 | 小黑盒 | 🟡 | 帖子解析（含 hkey 签名）；游戏页未移植 |
 | 米游社 / 微视 | 🟡 | 主干已移植 |
 | 网易云 / QQ音乐 / 汽水 | 🟡 | 第三方直链；扫码、歌单、音质未移植 |

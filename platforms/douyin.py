@@ -15,6 +15,18 @@
 **一个必须说清楚的坑**：图集（``aweme_type`` 2/68/150）的
 ``video.play_addr`` 里装的是**背景音乐**，不是视频。早期版本把它当视频发，
 用户收到的是一条指向 mp3 的"视频"。现在按 ``aweme_type`` 严格分流。
+
+**第二个坑：图集里的动图**。抖音图集可以**混排**静态图和动图。动图的标志是
+**该项自带视频轨**（``image.video.play_addr_h264.uri``），静态图只有
+``url_list``。原版 ``processDouyinImageAlbum`` 就是逐项判断：
+
+- 有视频轨 → 下载下来用 ``segment.video`` 发（再用 ffmpeg 合 BGM）
+- 没有视频轨 → ``segment.image`` 发
+
+早期移植版按「整条作品有没有动图」一刀切：只要有一张动图，整条就标成动图、
+只发视频轨，**静态图全被丢掉**，而且静态图会被当图片发出来的观感也和"动图"
+对不上。现在改成 ``core.douyin_ssr.album_items`` 逐项拆分，静态图/动图各按
+各的形式发，顺序严格按作品原样（见 ``main.py`` 的 ``_send_album``）。
 """
 
 from __future__ import annotations
@@ -23,24 +35,21 @@ from astrbot.api import logger
 
 from ..core.constants import DY_TOUTIAO_INFO
 from ..core.douyin_ssr import (
-    animated_image_uris,
-    has_animated_images,
+    album_items,
     music_info,
     resolve_by_ssr,
-    static_image_candidates,
     static_image_urls,
 )
 from ..core.http import HttpError, expand_short_url
 from .base import ResolveResult, ResolverContext, register
 
 
-def _play_url(uri: str, compressed: bool) -> str:
-    """按分辨率偏好拼播放地址。
+def _play_url(uri: str, ratio: str = "1080p") -> str:
+    """拼播放地址。
 
-    ``DY_TOUTIAO_INFO`` 模板里 ratio 写死 1080p，压缩时替换成 720p
-    ——和原版 ``douyinCompression`` 的行为一致。
+    ``DY_TOUTIAO_INFO`` 模板里 ratio 写死 1080p，按偏好替换——压缩时用
+    720p，和原版 ``douyinCompression`` 的行为一致。
     """
-    ratio = "720p" if compressed else "1080p"
     return DY_TOUTIAO_INFO.replace("1080p", ratio).replace("{}", uri)
 
 
@@ -99,24 +108,48 @@ async def resolve_douyin(link: str, ctx: ResolverContext) -> ResolveResult:
             extra={**extra, "duration": data.get("duration_seconds", 0)},
         )
 
-    # ---- 图集 / 动图 ----
+    # ---- 图集 / 动图（可能混排）----
     if kind == "image":
-        images = static_image_urls(aweme)
-        animated = has_animated_images(aweme)
-        # 候选 URL：每张图全部 url_list，下载时逐个尝试（签名时效不一）
-        if images:
-            extra["image_candidates"] = static_image_candidates(aweme)
+        # 逐项拆分：普通图当图片发，动图（自带视频轨）当视频发。
+        # 顺序严格按作品里的排列来，不能把动图和静态图分组后再发，
+        # 否则用户看到的顺序和作品对不上。
+        items = album_items(aweme)
+        items = [it for it in items if it["kind"] == "still" or it["video_url"]]
 
-        videos: list[str] = []
-        if animated:
-            # 动图：每张图自带视频轨，按顺序拼成播放地址。
-            # 原版这里会下载每个动图并用 ffmpeg 和 BGM 合并，代价太高；
-            # 这里改成直接发直链（BGM 单独作为语音发出，见下），
-            # 效果等价但不用落地磁盘。
-            videos = [_play_url(uri, compressed) for uri in animated_image_uris(aweme)]
-
-        if not images and not videos:
+        if not items:
             return ResolveResult.fail("抖音", "这条作品里没有可下载的媒体")
+
+        if compressed:
+            for it in items:
+                if it["kind"] == "animated":
+                    it["video_url"] = _play_url(it["video_uri"], "720p")
+
+        images: list[str] = []
+        image_candidates: list[str] = []
+        videos: list[str] = []
+        for it in items:
+            if it["kind"] == "animated":
+                videos.append(it["video_url"])
+            else:
+                images.append(it["image_url"])
+                image_candidates.append(it["image_candidates"])
+
+        animated = any(it["kind"] == "animated" for it in items)
+
+        extra["animated"] = animated
+        extra["mixed"] = bool(videos and images)
+        # 逐项类型，供发送端按顺序还原（动图视频 / 静态图）
+        extra["album_kinds"] = [it["kind"] for it in items]
+        if image_candidates:
+            extra["image_candidates"] = image_candidates
+        if animated:
+            # 动图按视频发，播放地址顺序与作品一致
+            extra["animated_videos"] = videos
+
+        logger.info(
+            f"[R插件][抖音] 图集解析：共 {len(items)} 项，"
+            f"静态图 {len(images)} 张，动图 {len(videos)} 个"
+        )
 
         # ---- 背景音乐 ----
         audios: list[str] = []
@@ -137,7 +170,12 @@ async def resolve_douyin(link: str, ctx: ResolverContext) -> ResolveResult:
                     "改成「语音」即可发送"
                 )
 
-        label = "抖音动图" if videos else "抖音"
+        if videos and not images:
+            label = "抖音动图"
+        elif videos and images:
+            label = "抖音图集"
+        else:
+            label = "抖音"
         return ResolveResult.ok(
             label,
             videos=videos,
@@ -147,7 +185,7 @@ async def resolve_douyin(link: str, ctx: ResolverContext) -> ResolveResult:
             author=data["author_nickname"],
             desc=data["desc"],
             cover=data["cover_url"],
-            extra={**extra, "animated": animated},
+            extra=extra,
         )
 
     # ---- 兜底：未知类型 ----

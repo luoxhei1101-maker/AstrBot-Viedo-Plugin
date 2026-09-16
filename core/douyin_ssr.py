@@ -271,69 +271,104 @@ def normalize_duration_seconds(duration: Any) -> int:
     return int(value / 1000) if value > 1000 else int(value)
 
 
-def has_animated_images(aweme: dict[str, Any]) -> bool:
-    """图集里有没有动图（每张图自带视频轨）。"""
-    for image in aweme.get("images") or []:
-        if not isinstance(image, dict):
-            continue
-        video = image.get("video") or {}
-        if (video.get("play_addr_h264") or {}).get("uri") or (
-            video.get("play_addr") or {}
-        ).get("uri"):
-            return True
-    return False
-
-
-def animated_image_uris(aweme: dict[str, Any]) -> list[str]:
-    """取每张动图的视频 uri（用于拼播放地址）。"""
-    uris: list[str] = []
-    for image in aweme.get("images") or []:
-        if not isinstance(image, dict):
-            continue
-        video = image.get("video") or {}
-        uri = (video.get("play_addr_h264") or {}).get("uri") or (
-            video.get("play_addr") or {}
-        ).get("uri")
-        if uri:
-            uris.append(uri)
-    return uris
-
-
 def static_image_urls(aweme: dict[str, Any]) -> list[str]:
-    """静态图集：每张图取 ``url_list[0]``（无水印高清，作为第一候选）。
+    """静态图集：取每张**静态图**的 ``url_list[0]``（无水印高清，第一候选）。
+
+    **动图会被跳过**——动图要按视频发，不能混进图片列表。历史上这个函数
+    是在 ``has_animated_images``/``animated_image_uris`` 旁边用的：先看整条
+    作品有没有动图，再决定图片/视频。那套「整条作品一刀切」的做法对混排
+    图集是错的（静态图会被丢掉），现在统一走 ``album_items`` 逐项分流。
 
     注意：``url_list[0]`` 带 ``-sign`` 签名、时效短，可能 403。真正下载时
     应该配合 ``static_image_candidates`` 逐个尝试，这里只取第一候选。
     """
-    urls: list[str] = []
-    for image in aweme.get("images") or []:
-        if not isinstance(image, dict):
-            continue
-        url_list = image.get("url_list") or []
-        if url_list:
-            urls.append(url_list[0])
-    return urls
+    return [item["image_url"] for item in album_items(aweme) if item["kind"] == "still"]
 
 
 def static_image_candidates(aweme: dict[str, Any]) -> list[list[str]]:
-    """静态图集：每张图返回**全部候选 URL**（去重，保持顺序）。
+    """静态图集：每张静态图返回**全部候选 URL**（去重，保持顺序）。
 
     抖音 url_list 里有多个 CDN 节点（p3-sign / p11-sign / p5-ex-gddgtc-sign …），
     每个的签名时效不一样——实测同一张图有的 URL 403、有的 200，没有固定哪个
     位置一定可用。所以把全部候选给下载层，逐个尝试，第一个能下的用。
     """
-    result: list[list[str]] = []
-    for image in aweme.get("images") or []:
+    return [item["image_candidates"] for item in album_items(aweme) if item["image_candidates"]]
+
+
+def album_items(aweme: dict[str, Any]) -> list[dict[str, Any]]:
+    """把图集拆成**有序的逐项媒体列表**，区分静态图与动图。
+
+    这是「动图/静态图混合图集」的核心。抖音一个图集里可以既有普通 JPG，
+    也有实况/动图（该项自带视频轨），原版 ``processDouyinImageAlbum``
+    就是逐项判断 ``imageItem.video.play_addr_h264`` 存不存在来分流：
+
+    - **有视频轨** → 当视频发（``kind="animated"``）。原始音轨就挂在视频轨里，
+      即使不额外合 BGM 也不是静音视频——原版用 ffmpeg 合 BGM 只是为了换成
+      作品原声，代价高且要落盘，这里改成发直链（BGM 另外单独发语音）。
+    - **没有视频轨** → 当图片发（``kind="still"``）。
+
+    **不能按「整条作品有没有动图」一刀切。** 早期版本是这么干的：只要
+    ``has_animated_images`` 为真，就把整条作品标成动图，然后只发视频轨，
+    于是混合图集里的普通静态图**全部被丢掉**，用户只收到几张动图。
+
+    Args:
+        aweme: 作品对象。
+
+    Returns:
+        与 ``aweme["images"]`` 等长的有序列表，每项形如::
+
+            {
+                "index": 0,
+                "kind": "still" | "animated",
+                "image_url": "首个图片直链",          # 动图时为空
+                "image_candidates": [...],            # 动图时为空
+                "video_uri": "视频轨 uri",            # 静态图时为空
+                "video_url": "拼好的播放地址",         # 静态图时为空
+            }
+    """
+    items: list[dict[str, Any]] = []
+    for index, image in enumerate(aweme.get("images") or []):
         if not isinstance(image, dict):
             continue
+
+        video = image.get("video") or {}
+        video_uri = (video.get("play_addr_h264") or {}).get("uri") or (
+            video.get("play_addr") or {}
+        ).get("uri") or ""
+
+        if video_uri:
+            items.append(
+                {
+                    "index": index,
+                    "kind": "animated",
+                    "image_url": "",
+                    "image_candidates": [],
+                    # 直接给 1080p 模板；要压到 720p 由调用方改写 ratio
+                    "video_uri": video_uri,
+                    "video_url": DY_TOUTIAO_INFO.replace("{}", video_uri),
+                    "duration": normalize_duration_seconds(video.get("duration") or 0),
+                }
+            )
+            continue
+
         url_list = image.get("url_list") or []
-        seen: list[str] = []
+        candidates: list[str] = []
         for url in url_list:
-            if url and url not in seen:
-                seen.append(url)
-        if seen:
-            result.append(seen)
-    return result
+            if url and url not in candidates:
+                candidates.append(url)
+        if candidates:
+            items.append(
+                {
+                    "index": index,
+                    "kind": "still",
+                    "image_url": candidates[0],
+                    "image_candidates": candidates,
+                    "video_uri": "",
+                    "video_url": "",
+                }
+            )
+
+    return items
 
 
 def _looks_like_audio(url: str) -> bool:
