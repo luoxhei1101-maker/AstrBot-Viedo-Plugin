@@ -8,7 +8,7 @@ desc: >-
   失败降级、AI 链接总结与翻译能力。
 version: 1.0.0
 author: Echo (port)
-repo: https://gitee.com/MuLinYa259/astrbot-viedo
+repo: https://github.com/luoxhei1101-maker/AstrBot-Viedo-Plugin
 astrbot_version: ">=4.16,<5"
 support_platforms:
   - aiocqhttp
