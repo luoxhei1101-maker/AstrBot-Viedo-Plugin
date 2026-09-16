@@ -220,6 +220,7 @@ async def resolve_bilibili(link: str, ctx: ResolverContext) -> ResolveResult:
     base_info = {
         "bvid": bvid,
         "cid": cid,
+        "aid": data.get("aid"),
         "duration": duration,
         "url": f"https://www.bilibili.com/video/{bvid}",
     }

@@ -57,6 +57,7 @@ from astrbot.api.star import Context, Star
 
 from .core import bili_login
 from .core.bili_login import QRCodeUnavailable
+from .core.bili_comment import fetch_bili_comments
 from .core.config_migrate import (
     heal as heal_config,
     migrate_cookie_fields,
@@ -726,6 +727,50 @@ class Main(Star):
                 # 简介也没发出去，把已知文字情报补上
                 async for item in self._render_text_only(event, result):
                     yield item
+
+        # ---- B站评论（附加功能，失败不拖垮主流程）----
+        async for item in self._maybe_send_bili_comments(event, result):
+            yield item
+
+    async def _maybe_send_bili_comments(
+        self, event: AstrMessageEvent, result: ResolveResult
+    ):
+        """B 站视频解析成功后，按配置抓评论并用合并转发发出来。
+
+        评论是附加功能：平台不是 B 站、开关没开、没有 aid、抓不到，都直接
+        跳过，绝不影响主流程。发出去的形态用原版截图失败时的兜底方案——
+        文本合并转发（不依赖截图）。
+        """
+        if result.platform != "哔哩哔哩":
+            return
+        if not self.conf_get("bili.biliComments", False):
+            return
+        aid = result.extra.get("aid")
+        if not aid:
+            return
+
+        limit = max(1, int(self.conf_get("bili.biliCommentCount", 5) or 5))
+        cookie = self.cookie_for("bili")
+
+        try:
+            comments = await fetch_bili_comments(aid, limit=limit, cookie=cookie)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[R插件][B站评论] 抓取失败，跳过: {exc}")
+            return
+
+        if not comments:
+            return
+
+        # 昵称用评论者，QQ 号用发起解析的用户（对齐合并转发的身份规则）
+        sender_uin = str(event.get_sender_id() or "")
+        nodes = [
+            Comp.Node([Comp.Plain(c["text"])], name=c["nickname"], uin=sender_uin)
+            for c in comments
+        ]
+        try:
+            yield event.chain_result([Comp.Nodes(nodes)])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[R插件][B站评论] 合并转发发送失败: {exc}")
 
     def _build_intro(self, result: ResolveResult, prefix: str) -> str:
         """简介：类型 + 标题 + 作者。三者都没有时返回空串。"""
