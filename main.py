@@ -58,6 +58,7 @@ from astrbot.api.star import Context, Star
 from .core import bili_login
 from .core.bili_login import QRCodeUnavailable
 from .core.bili_comment import fetch_bili_comments
+from .core.douyin_comment import fetch_douyin_comments
 from .core.config_migrate import (
     heal as heal_config,
     migrate_cookie_fields,
@@ -732,6 +733,10 @@ class Main(Star):
         async for item in self._maybe_send_bili_comments(event, result):
             yield item
 
+        # ---- 抖音评论（附加功能，失败不拖垮主流程）----
+        async for item in self._maybe_send_douyin_comments(event, result):
+            yield item
+
     async def _maybe_send_bili_comments(
         self, event: AstrMessageEvent, result: ResolveResult
     ):
@@ -771,6 +776,47 @@ class Main(Star):
             yield event.chain_result([Comp.Nodes(nodes)])
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[R插件][B站评论] 合并转发发送失败: {exc}")
+
+    async def _maybe_send_douyin_comments(
+        self, event: AstrMessageEvent, result: ResolveResult
+    ):
+        """抖音作品解析成功后，按配置抓评论并用合并转发发出来。
+
+        依赖 a-bogus 签名（``core/a_bogus.py`` 用容器里的 node 生成）。评论是
+        附加功能：平台不是抖音、开关没开、没有 aweme_id、node 缺失、抓不到，
+        都直接跳过，绝不影响主流程。
+        """
+        if result.platform != "抖音":
+            return
+        if not self.conf_get("douyin.douyinComments", False):
+            return
+        aweme_id = result.extra.get("aweme_id")
+        if not aweme_id:
+            return
+
+        limit = max(1, int(self.conf_get("douyin.douyinCommentCount", 5) or 5))
+        cookie = self.cookie_for("douyin")
+
+        try:
+            comments = await fetch_douyin_comments(
+                aweme_id, cookie=cookie, limit=limit
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[R插件][抖音评论] 抓取失败，跳过: {exc}")
+            return
+
+        if not comments:
+            return
+
+        sender_uin = str(event.get_sender_id() or "")
+        nodes = [
+            Comp.Node([Comp.Plain(c["text"])], name=c["nickname"], uin=sender_uin)
+            for c in comments
+        ]
+        try:
+            yield event.chain_result([Comp.Nodes(nodes)])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[R插件][抖音评论] 合并转发发送失败: {exc}")
 
     def _build_intro(self, result: ResolveResult, prefix: str) -> str:
         """简介：类型 + 标题 + 作者。三者都没有时返回空串。"""
