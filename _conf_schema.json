@@ -112,6 +112,18 @@
         "hint": "图集类链接可能一次返回几十张图，设个上限避免刷屏",
         "default": 9
       },
+      "max_videos": {
+        "description": "单条消息最多发送的视频数量",
+        "type": "int",
+        "hint": "抖音动图是一组短视频，需要多条一起发；普通视频只会有 1 条",
+        "default": 9
+      },
+      "douyin_probe_quality": {
+        "description": "抖音画质探测",
+        "type": "bool",
+        "hint": "开启后对同一视频试 1080p/720p/540p/360p，挑真实可用的最高档（多 1-4 次 Range 请求，只下 1 字节，很便宜）。关闭则直接用 1080p 模板地址，解析更快但可能拿到不存在的档位。",
+        "default": true
+      },
       "allow_multiple_links": {
         "description": "一条消息里解析多个链接",
         "type": "bool",
@@ -313,7 +325,7 @@
       "biliSessData": {
         "description": "哔哩哔哩SESSDATA",
         "type": "string",
-        "hint": "如何获取具体参考我的文档说明：https://gitee.com/kyrzy0416/rconsole-plugin#Q&A　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，下拉选字段、输入框填值。涉及字段：SESSDATA、bili_jct、DedeUserID、buvid3",
+        "hint": "如何获取具体参考我的文档说明：https://gitee.com/kyrzy0416/rconsole-plugin#Q&A　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，表格里下拉选字段、填值。涉及字段：SESSDATA、bili_jct、DedeUserID、buvid3",
         "default": ""
       },
       "biliResolution": {
@@ -584,29 +596,53 @@
       },
       "biliSessDataFields": {
         "description": "哔哩哔哩Cookie 逐项填写（可选）",
-        "type": "dict",
-        "hint": "点「添加条目」→ 从下拉里选字段名 → 填值。插件会自动拼成 key=value; key=value 的标准格式，不用你自己拼分号。其中 SESSDATA 至少要填一个。留空则使用上面的「整段 Cookie」。",
-        "default": {},
-        "template_schema": {
+        "type": "template_list",
+        "hint": "点「添加条目」→ 下拉选字段名 → 填值，一行一个字段。插件会自动拼成 key=value; key=value 的标准格式，不用你自己拼分号。其中 SESSDATA 至少要填一个。留空则使用上面的「整段 Cookie」。",
+        "default": [],
+        "templates": {
           "SESSDATA": {
             "name": "SESSDATA",
-            "description": "必需。F12 -> Application -> Cookies 里的 SESSDATA",
-            "hint": "必需。F12 -> Application -> Cookies 里的 SESSDATA"
+            "hint": "必需。F12 -> Application -> Cookies 里的 SESSDATA",
+            "items": {
+              "value": {
+                "description": "SESSDATA 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "bili_jct": {
             "name": "bili_jct",
-            "description": "选填，CSRF 校验用",
-            "hint": "选填，CSRF 校验用"
+            "hint": "选填，CSRF 校验用",
+            "items": {
+              "value": {
+                "description": "bili_jct 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "DedeUserID": {
             "name": "DedeUserID",
-            "description": "选填，你的 UID",
-            "hint": "选填，你的 UID"
+            "hint": "选填，你的 UID",
+            "items": {
+              "value": {
+                "description": "DedeUserID 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "buvid3": {
             "name": "buvid3",
-            "description": "选填，设备标识",
-            "hint": "选填，设备标识"
+            "hint": "选填，设备标识",
+            "items": {
+              "value": {
+                "description": "buvid3 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           }
         }
       }
@@ -620,7 +656,7 @@
       "douyinCookie": {
         "description": "抖音的Cookie",
         "type": "string",
-        "hint": "登陆https://www.douyin.com/ - F12 - 自己替换一下：odin_tt=xxx;passport_fe_beating_status=xxx;sid_guard=xxx;uid_tt=xxx;uid_tt_ss=xxx;sid_tt=xxx;sessionid=xxx;sessionid_ss=xxx;sid_ucp_v1=xxx;ssid_ucp_v1=xxx;passport_assist_user=xxx;ttwid=xxx;　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，下拉选字段、输入框填值。涉及字段：odin_tt、passport_fe_beating_status、sid_guard、uid_tt、uid_tt_ss、sid_tt、sessionid、sessionid_ss、sid_ucp_v1、ssid_ucp_v1、passport_assist_user、ttwid",
+        "hint": "登陆https://www.douyin.com/ - F12 - 自己替换一下：odin_tt=xxx;passport_fe_beating_status=xxx;sid_guard=xxx;uid_tt=xxx;uid_tt_ss=xxx;sid_tt=xxx;sessionid=xxx;sessionid_ss=xxx;sid_ucp_v1=xxx;ssid_ucp_v1=xxx;passport_assist_user=xxx;ttwid=xxx;　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，表格里下拉选字段、填值。涉及字段：odin_tt、passport_fe_beating_status、sid_guard、uid_tt、uid_tt_ss、sid_tt、sessionid、sessionid_ss、sid_ucp_v1、ssid_ucp_v1、passport_assist_user、ttwid",
         "default": ""
       },
       "douyinDuration": {
@@ -711,69 +747,141 @@
       },
       "douyinCookieFields": {
         "description": "抖音Cookie 逐项填写（可选）",
-        "type": "dict",
-        "hint": "点「添加条目」→ 从下拉里选字段名 → 填值。插件会自动拼成 key=value; key=value 的标准格式，不用你自己拼分号。其中 sessionid 或 ttwid 至少要填一个。留空则使用上面的「整段 Cookie」。",
-        "default": {},
-        "template_schema": {
+        "type": "template_list",
+        "hint": "点「添加条目」→ 下拉选字段名 → 填值，一行一个字段。插件会自动拼成 key=value; key=value 的标准格式，不用你自己拼分号。其中 sessionid 或 ttwid 至少要填一个。留空则使用上面的「整段 Cookie」。",
+        "default": [],
+        "templates": {
           "odin_tt": {
             "name": "odin_tt",
-            "description": "设备标识",
-            "hint": "设备标识"
+            "hint": "设备标识",
+            "items": {
+              "value": {
+                "description": "odin_tt 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "passport_fe_beating_status": {
             "name": "passport_fe_beating_status",
-            "description": "passport_fe_beating_status",
-            "hint": "抖音 Cookie 的 passport_fe_beating_status 字段"
+            "hint": "抖音 Cookie 的 passport_fe_beating_status 字段",
+            "items": {
+              "value": {
+                "description": "passport_fe_beating_status 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "sid_guard": {
             "name": "sid_guard",
-            "description": "会话有效期凭据",
-            "hint": "会话有效期凭据"
+            "hint": "会话有效期凭据",
+            "items": {
+              "value": {
+                "description": "sid_guard 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "uid_tt": {
             "name": "uid_tt",
-            "description": "用户标识",
-            "hint": "用户标识"
+            "hint": "用户标识",
+            "items": {
+              "value": {
+                "description": "uid_tt 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "uid_tt_ss": {
             "name": "uid_tt_ss",
-            "description": "uid_tt_ss",
-            "hint": "抖音 Cookie 的 uid_tt_ss 字段"
+            "hint": "抖音 Cookie 的 uid_tt_ss 字段",
+            "items": {
+              "value": {
+                "description": "uid_tt_ss 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "sid_tt": {
             "name": "sid_tt",
-            "description": "sid_tt",
-            "hint": "抖音 Cookie 的 sid_tt 字段"
+            "hint": "抖音 Cookie 的 sid_tt 字段",
+            "items": {
+              "value": {
+                "description": "sid_tt 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "sessionid": {
             "name": "sessionid",
-            "description": "登录态主凭据，最关键的一个",
-            "hint": "登录态主凭据，最关键的一个"
+            "hint": "登录态主凭据，最关键的一个",
+            "items": {
+              "value": {
+                "description": "sessionid 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "sessionid_ss": {
             "name": "sessionid_ss",
-            "description": "sessionid_ss",
-            "hint": "抖音 Cookie 的 sessionid_ss 字段"
+            "hint": "抖音 Cookie 的 sessionid_ss 字段",
+            "items": {
+              "value": {
+                "description": "sessionid_ss 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "sid_ucp_v1": {
             "name": "sid_ucp_v1",
-            "description": "sid_ucp_v1",
-            "hint": "抖音 Cookie 的 sid_ucp_v1 字段"
+            "hint": "抖音 Cookie 的 sid_ucp_v1 字段",
+            "items": {
+              "value": {
+                "description": "sid_ucp_v1 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "ssid_ucp_v1": {
             "name": "ssid_ucp_v1",
-            "description": "ssid_ucp_v1",
-            "hint": "抖音 Cookie 的 ssid_ucp_v1 字段"
+            "hint": "抖音 Cookie 的 ssid_ucp_v1 字段",
+            "items": {
+              "value": {
+                "description": "ssid_ucp_v1 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "passport_assist_user": {
             "name": "passport_assist_user",
-            "description": "passport_assist_user",
-            "hint": "抖音 Cookie 的 passport_assist_user 字段"
+            "hint": "抖音 Cookie 的 passport_assist_user 字段",
+            "items": {
+              "value": {
+                "description": "passport_assist_user 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "ttwid": {
             "name": "ttwid",
-            "description": "设备指纹，有它成功率明显更高",
-            "hint": "设备指纹，有它成功率明显更高"
+            "hint": "设备指纹，有它成功率明显更高",
+            "items": {
+              "value": {
+                "description": "ttwid 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           }
         }
       }
@@ -931,7 +1039,7 @@
       "weiboCookie": {
         "description": "微博的Cookie",
         "type": "string",
-        "hint": "登陆https://m.weibo.cn/ - F12 - 格式：_T_WM=xxx; WEIBOCN_FROM=xxx; MLOGIN=xxx; XSRF-TOKEN=xxx; M_WEIBOCN_PARAMS=xxx　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，下拉选字段、输入框填值。涉及字段：_T_WM、WEIBOCN_FROM、MLOGIN、XSRF-TOKEN、M_WEIBOCN_PARAMS",
+        "hint": "登陆https://m.weibo.cn/ - F12 - 格式：_T_WM=xxx; WEIBOCN_FROM=xxx; MLOGIN=xxx; XSRF-TOKEN=xxx; M_WEIBOCN_PARAMS=xxx　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，表格里下拉选字段、填值。涉及字段：_T_WM、WEIBOCN_FROM、MLOGIN、XSRF-TOKEN、M_WEIBOCN_PARAMS",
         "default": ""
       },
       "weiboComments": {
@@ -1007,7 +1115,7 @@
       "kugouCookie": {
         "description": "酷狗搜索Cookie",
         "type": "string",
-        "hint": "仅在走 KuGouMusicApi 搜索兜底时使用，文档示例：token=xxx;userid=xxx;dfid=xxx；也可发送 #RKQ 自动扫码获取　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，下拉选字段、输入框填值。涉及字段：token、userid、dfid",
+        "hint": "仅在走 KuGouMusicApi 搜索兜底时使用，文档示例：token=xxx;userid=xxx;dfid=xxx；也可发送 #RKQ 自动扫码获取　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，表格里下拉选字段、填值。涉及字段：token、userid、dfid",
         "default": ""
       },
       "qqMusicCookie": {
@@ -1041,7 +1149,7 @@
       "kuaishouCookie": {
         "description": "快手的Cookie",
         "type": "string",
-        "hint": "本移植版新增（原版快手的快手走第三方接口、不需要 Cookie）。配置后快手会优先走网页 SSR 直解，降低对第三方接口的依赖。浏览器登录 kuaishou.com 后 F12 -> Network -> 任意请求 -> Cookie 整段复制　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，下拉选字段、输入框填值。涉及字段：did、didv、kpn、clientid",
+        "hint": "本移植版新增（原版快手的快手走第三方接口、不需要 Cookie）。配置后快手会优先走网页 SSR 直解，降低对第三方接口的依赖。浏览器登录 kuaishou.com 后 F12 -> Network -> 任意请求 -> Cookie 整段复制　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，表格里下拉选字段、填值。涉及字段：did、didv、kpn、clientid",
         "default": ""
       },
       "miyousheCookie": {
@@ -1052,85 +1160,157 @@
       },
       "kuaishouCookieFields": {
         "description": "快手Cookie 逐项填写（可选）",
-        "type": "dict",
-        "hint": "点「添加条目」→ 从下拉里选字段名 → 填值。插件会自动拼成 key=value; key=value 的标准格式，不用你自己拼分号。其中 did 或 didv 至少要填一个。留空则使用上面的「整段 Cookie」。",
-        "default": {},
-        "template_schema": {
+        "type": "template_list",
+        "hint": "点「添加条目」→ 下拉选字段名 → 填值，一行一个字段。插件会自动拼成 key=value; key=value 的标准格式，不用你自己拼分号。其中 did 或 didv 至少要填一个。留空则使用上面的「整段 Cookie」。",
+        "default": [],
+        "templates": {
           "did": {
             "name": "did",
-            "description": "设备 ID，最关键的一个",
-            "hint": "设备 ID，最关键的一个"
+            "hint": "设备 ID，最关键的一个",
+            "items": {
+              "value": {
+                "description": "did 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "didv": {
             "name": "didv",
-            "description": "设备 ID 的校验值，一般和 did 成对出现",
-            "hint": "设备 ID 的校验值，一般和 did 成对出现"
+            "hint": "设备 ID 的校验值，一般和 did 成对出现",
+            "items": {
+              "value": {
+                "description": "didv 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "kpn": {
             "name": "kpn",
-            "description": "客户端标识，网页端一般是 KUAISHOU_VISION",
-            "hint": "客户端标识，网页端一般是 KUAISHOU_VISION"
+            "hint": "客户端标识，网页端一般是 KUAISHOU_VISION",
+            "items": {
+              "value": {
+                "description": "kpn 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "clientid": {
             "name": "clientid",
-            "description": "客户端 ID",
-            "hint": "客户端 ID"
+            "hint": "客户端 ID",
+            "items": {
+              "value": {
+                "description": "clientid 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           }
         }
       },
       "weiboCookieFields": {
         "description": "微博Cookie 逐项填写（可选）",
-        "type": "dict",
-        "hint": "点「添加条目」→ 从下拉里选字段名 → 填值。插件会自动拼成 key=value; key=value 的标准格式，不用你自己拼分号。其中 _T_WM 或 MLOGIN 至少要填一个。留空则使用上面的「整段 Cookie」。",
-        "default": {},
-        "template_schema": {
+        "type": "template_list",
+        "hint": "点「添加条目」→ 下拉选字段名 → 填值，一行一个字段。插件会自动拼成 key=value; key=value 的标准格式，不用你自己拼分号。其中 _T_WM 或 MLOGIN 至少要填一个。留空则使用上面的「整段 Cookie」。",
+        "default": [],
+        "templates": {
           "_T_WM": {
             "name": "_T_WM",
-            "description": "登录态主凭据",
-            "hint": "登录态主凭据"
+            "hint": "登录态主凭据",
+            "items": {
+              "value": {
+                "description": "_T_WM 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "WEIBOCN_FROM": {
             "name": "WEIBOCN_FROM",
-            "description": "WEIBOCN_FROM",
-            "hint": "微博 Cookie 的 WEIBOCN_FROM 字段"
+            "hint": "微博 Cookie 的 WEIBOCN_FROM 字段",
+            "items": {
+              "value": {
+                "description": "WEIBOCN_FROM 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "MLOGIN": {
             "name": "MLOGIN",
-            "description": "是否已登录标记（1 表示已登录）",
-            "hint": "是否已登录标记（1 表示已登录）"
+            "hint": "是否已登录标记（1 表示已登录）",
+            "items": {
+              "value": {
+                "description": "MLOGIN 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "XSRF-TOKEN": {
             "name": "XSRF-TOKEN",
-            "description": "CSRF 令牌",
-            "hint": "CSRF 令牌"
+            "hint": "CSRF 令牌",
+            "items": {
+              "value": {
+                "description": "XSRF-TOKEN 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "M_WEIBOCN_PARAMS": {
             "name": "M_WEIBOCN_PARAMS",
-            "description": "M_WEIBOCN_PARAMS",
-            "hint": "微博 Cookie 的 M_WEIBOCN_PARAMS 字段"
+            "hint": "微博 Cookie 的 M_WEIBOCN_PARAMS 字段",
+            "items": {
+              "value": {
+                "description": "M_WEIBOCN_PARAMS 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           }
         }
       },
       "kugouCookieFields": {
         "description": "酷狗Cookie 逐项填写（可选）",
-        "type": "dict",
-        "hint": "点「添加条目」→ 从下拉里选字段名 → 填值。插件会自动拼成 key=value; key=value 的标准格式，不用你自己拼分号。其中 token 或 userid 至少要填一个。留空则使用上面的「整段 Cookie」。",
-        "default": {},
-        "template_schema": {
+        "type": "template_list",
+        "hint": "点「添加条目」→ 下拉选字段名 → 填值，一行一个字段。插件会自动拼成 key=value; key=value 的标准格式，不用你自己拼分号。其中 token 或 userid 至少要填一个。留空则使用上面的「整段 Cookie」。",
+        "default": [],
+        "templates": {
           "token": {
             "name": "token",
-            "description": "登录令牌",
-            "hint": "登录令牌"
+            "hint": "登录令牌",
+            "items": {
+              "value": {
+                "description": "token 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "userid": {
             "name": "userid",
-            "description": "用户 ID",
-            "hint": "用户 ID"
+            "hint": "用户 ID",
+            "items": {
+              "value": {
+                "description": "userid 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "dfid": {
             "name": "dfid",
-            "description": "设备指纹",
-            "hint": "设备指纹"
+            "hint": "设备指纹",
+            "items": {
+              "value": {
+                "description": "dfid 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           }
         }
       }
@@ -1144,19 +1324,25 @@
       "xiaoheiheCookie": {
         "description": "小黑盒的Cookie",
         "type": "string",
-        "hint": "登陆https://www.xiaoheihe.cn/ - F12 - 格式：x_xhh_tokenid=xxx，小黑盒目前用的硬编码ck，有概率会出现需要验证码的情况，通常使用分享链接而不是web链接即可解决，后续有大佬出手的话可以换成动态ck　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，下拉选字段、输入框填值。涉及字段：x_xhh_tokenid",
+        "hint": "登陆https://www.xiaoheihe.cn/ - F12 - 格式：x_xhh_tokenid=xxx，小黑盒目前用的硬编码ck，有概率会出现需要验证码的情况，通常使用分享链接而不是web链接即可解决，后续有大佬出手的话可以换成动态ck　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，表格里下拉选字段、填值。涉及字段：x_xhh_tokenid",
         "default": ""
       },
       "xiaoheiheCookieFields": {
         "description": "小黑盒Cookie 逐项填写（可选）",
-        "type": "dict",
-        "hint": "点「添加条目」→ 从下拉里选字段名 → 填值。插件会自动拼成 key=value; key=value 的标准格式，不用你自己拼分号。其中 x_xhh_tokenid 至少要填一个。留空则使用上面的「整段 Cookie」。",
-        "default": {},
-        "template_schema": {
+        "type": "template_list",
+        "hint": "点「添加条目」→ 下拉选字段名 → 填值，一行一个字段。插件会自动拼成 key=value; key=value 的标准格式，不用你自己拼分号。其中 x_xhh_tokenid 至少要填一个。留空则使用上面的「整段 Cookie」。",
+        "default": [],
+        "templates": {
           "x_xhh_tokenid": {
             "name": "x_xhh_tokenid",
-            "description": "小黑盒的登录令牌，只有这一个字段",
-            "hint": "小黑盒的登录令牌，只有这一个字段"
+            "hint": "小黑盒的登录令牌，只有这一个字段",
+            "items": {
+              "value": {
+                "description": "x_xhh_tokenid 的值",
+                "type": "string",
+                "default": ""
+              }
+            }
           }
         }
       }

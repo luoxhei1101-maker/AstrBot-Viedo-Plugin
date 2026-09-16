@@ -85,6 +85,102 @@ async def fetch(
     raise HttpError(f"请求失败: {url} -> {last_err}") from last_err
 
 
+async def fetch_head_info(
+    url: str,
+    *,
+    timeout: float = 15.0,
+    headers: dict[str, str] | None = None,
+    range_bytes: str | None = None,
+    retries: int = 1,
+) -> tuple[int, dict[str, str], str, str]:
+    """只取响应头（可选只下前几个字节），不读完整响应体。
+
+    抖音的画质探测就是靠这个：对同一个视频 ID 试不同 ``ratio``，比较
+    ``Content-Range`` / ``Content-Length`` 判断这个档位是否真实存在。
+    完整下载一遍太贵，用 ``Range: bytes=0-1`` 把一个字节的响应拉回来即可。
+
+    Returns:
+        ``(status, headers_lowercase_keys, set_cookie, final_url)``
+
+        ``set_cookie`` 是 ``Set-Cookie`` 响应头的原始值（多条用 ``\\n`` 连接），
+        ttwid 注册要用。
+    """
+    merged = dict(BROWSER_HEADERS)
+    if headers:
+        merged.update(headers)
+    if range_bytes:
+        merged["Range"] = range_bytes
+
+    last_err: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=timeout),
+                connector=connector,
+            ) as session:
+                async with session.get(
+                    url, headers=merged, allow_redirects=True
+                ) as resp:
+                    # 头拿到了就够了，响应体直接丢弃——aiohttp 会在退出上下文时释放
+                    hdrs = {k.lower(): v for k, v in resp.headers.items()}
+                    set_cookie = "\n".join(resp.headers.getall("Set-Cookie", []))
+                    return resp.status, hdrs, set_cookie, str(resp.url)
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            if _is_dns_error(exc):
+                raise HttpError(f"域名解析失败（接口可能已失效）: {url}") from exc
+            if attempt < retries:
+                await asyncio.sleep(0.6 * (attempt + 1))
+                continue
+
+    raise HttpError(f"请求失败: {url} -> {last_err}") from last_err
+
+
+async def post_json(
+    url: str,
+    payload: Any,
+    *,
+    timeout: float = 15.0,
+    headers: dict[str, str] | None = None,
+    retries: int = 1,
+) -> tuple[Any, str]:
+    """POST 一个 JSON，返回 ``(解析后的响应体, Set-Cookie 原始串)``。
+
+    用于抖音匿名 ttwid 注册（``ttwid.bytedance.com``）——原版也是纯协议
+    POST，不依赖任何登录态。
+    """
+    merged = dict(BROWSER_HEADERS)
+    merged["Content-Type"] = "application/json"
+    if headers:
+        merged.update(headers)
+
+    last_err: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=timeout),
+                connector=connector,
+            ) as session:
+                async with session.post(url, json=payload, headers=merged) as resp:
+                    set_cookie = "\n".join(resp.headers.getall("Set-Cookie", []))
+                    text = await resp.text()
+                    try:
+                        return json.loads(text), set_cookie
+                    except json.JSONDecodeError:
+                        return {"_raw": text[:500]}, set_cookie
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            if _is_dns_error(exc):
+                raise HttpError(f"域名解析失败: {url}") from exc
+            if attempt < retries:
+                await asyncio.sleep(0.6 * (attempt + 1))
+                continue
+
+    raise HttpError(f"请求失败: {url} -> {last_err}") from last_err
+
+
 def _is_dns_error(exc: BaseException) -> bool:
     """判断是不是 DNS 解析类错误。"""
     name = type(exc).__name__

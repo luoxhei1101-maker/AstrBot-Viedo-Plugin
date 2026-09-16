@@ -104,6 +104,38 @@ DY_LIVE_INFO_2 = (
     "?type_id=0&live_id=1&sec_user_id=&version_code=99.99.99&app_id=1128&room_id={}"
 )
 
+# 抖音作品类型映射，照抄原版 constants/constant.js 的 douyinTypeMap。
+# 决定这条作品该按视频发还是按图文发——**不能靠猜**：
+# 图集的 video.play_addr 里装的其实是背景音乐，把它当视频发出去，
+# 用户收到的是一条指向音乐文件的"视频"。
+DY_TYPE_MAP: dict[int, str] = {
+    0: "video",
+    2: "image",
+    4: "video",
+    51: "video",
+    55: "video",
+    58: "video",
+    61: "video",
+    68: "image",
+    109: "video",
+    150: "image",
+}
+
+# 画质探测的档位顺序（从高到低），对应 DY_TOUTIAO_INFO 里的 ratio 参数
+DY_PLAY_RATIOS: tuple[str, ...] = ("1080p", "720p", "540p", "360p")
+DY_COMPRESSED_PLAY_RATIOS: tuple[str, ...] = ("720p", "540p", "360p")
+
+# 抖音匿名 ttwid 注册用的固定载荷（原版 TTWID_REGISTER_PAYLOAD）
+DY_TTWID_PAYLOAD: dict = {
+    "aid": 1768,
+    "union": True,
+    "needFid": False,
+    "region": "cn",
+    "cbUrlProtocol": "https",
+    "service": "www.ixigua.com",
+    "migrate_info": {"ticket": "", "source": "node"},
+}
+
 # ---- 小红书 ----
 XHS_VIDEO = "http://sns-video-bd.xhscdn.com/"
 XHS_REQ_LINK = "https://www.xiaohongshu.com/explore/"

@@ -55,7 +55,10 @@ from astrbot.api.star import Context, Star
 
 from .core import bili_login
 from .core.bili_login import QRCodeUnavailable
-from .core.config_migrate import heal as heal_config
+from .core.config_migrate import (
+    heal as heal_config,
+    migrate_cookie_fields,
+)
 from .core.constants import (
     AUTO_RULES,
     COMMAND_RULES,
@@ -167,6 +170,10 @@ class Main(Star):
         schema 类型变过之后，老配置里的值还是旧类型，WebUI 一保存就报
         「期望是 string, 得到了 int」——用户根本没碰那个字段。详见
         ``core/config_migrate.py`` 的说明。
+
+        先做 Cookie 逐项填写「dict -> template_list」的结构性迁移，
+        再做通用类型自愈。顺序不能反：通用自愈会把 template_list 的
+        旧 dict 值包成 ``[{...}]``，反而弄坏配置。
         """
         schema_path = Path(__file__).parent / "_conf_schema.json"
         if not schema_path.is_file():
@@ -178,15 +185,25 @@ class Main(Star):
             return
 
         saver = getattr(self.conf_data, "save_config", None)
-        changes = heal_config(
-            self.conf_data,
-            schema,
-            save=saver if callable(saver) else None,
-        )
+        save = saver if callable(saver) else None
+
+        # 1) Cookie 逐项填写：dict -> template_list（结构性迁移，先做）
+        migrate_changes = migrate_cookie_fields(self.conf_data)
+
+        # 2) 通用类型自愈（不在这里触发保存，等两处都处理完统一存一次）
+        heal_changes = heal_config(self.conf_data, schema, save=None)
+
+        changes = migrate_changes + heal_changes
         if not changes:
             return
 
-        logger.info(f"[R插件] 配置类型自愈：修正 {len(changes)} 处旧类型的值")
+        if save:
+            try:
+                save()
+            except Exception as exc:  # noqa: BLE001
+                logger.error(f"[R插件][配置自愈] 保存失败: {type(exc).__name__}: {exc}")
+
+        logger.info(f"[R插件] 配置自愈/迁移：共 {len(changes)} 处")
         for line in changes[:8]:
             logger.info(f"    · {line}")
         if len(changes) > 8:
@@ -441,11 +458,26 @@ class Main(Star):
         yield event.plain_result("\n".join(lines))
 
     async def _render(self, event: AstrMessageEvent, result: ResolveResult):
-        """把解析结果渲染成 AstrBot 消息。"""
+        """把解析结果渲染成 AstrBot 消息。
+
+        顺序统一为「先媒体，后文字」——原版是各分支各写各的（视频先发视频、
+        图文先发文字），统一之后观感一致，也少一类"这条怎么没标题"的疑问。
+
+        一个作品可能同时有多种媒体：抖音动图就是「多个视频 + BGM」，
+        B 站合并产出的是本地视频。所以这里不是 if/elif 一路到底，
+        而是依次追加，最后补一条文字说明。
+        """
         # 识别前缀沿用原 Guoba 面板配置；原版默认空串，这里给个更直观的兜底
         prefix = str(self.conf_get("global.identifyPrefix", "") or "").strip() or "🔗 识别："
         show_desc = self.conf_get("plugin.show_desc", True)
         send_mode = self.conf_get("plugin.send_mode", "url")
+
+        # ---- 纯文本类结果（AI 总结 / 翻译）----
+        if result.extra.get("text_only") and result.desc:
+            yield event.plain_result(f"{prefix}{result.platform}\n{result.desc}")
+            return
+
+        sent_media = False
 
         # ---- 本地视频（B 站 DASH 合并产物）----
         if result.local_videos:
@@ -454,65 +486,55 @@ class Main(Star):
             event.track_temporary_local_file(path)
             try:
                 yield event.chain_result([Comp.Video.fromFileSystem(path)])
+                sent_media = True
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[R插件] 发送本地视频失败: {exc}")
                 yield event.plain_result(f"⚠️ {result.platform} 视频发送失败：{exc}")
 
-            if show_desc and (result.title or result.desc):
-                yield event.plain_result(
-                    f"{prefix}{result.platform}\n{(result.title or result.desc)[:300]}"
-                )
-            return
-
         # ---- 视频直链 ----
-        if result.videos:
-            video_url = result.videos[0]
-            sent = False
-
+        elif result.videos:
+            local_path: str | None = None
             if send_mode == "download":
-                try:
-                    # 大小上限沿用原 Guoba 面板的 videoSizeLimit（单位 MB）
-                    max_mb = int(self.conf_get("global.videoSizeLimit", 70) or 70)
-                    path = await download_media(
-                        video_url, prefix="video", max_bytes=max_mb * 1024 * 1024
-                    )
-                    event.track_temporary_local_file(str(path))
-                    yield event.chain_result([Comp.Video.fromFileSystem(str(path))])
-                    sent = True
-                except MediaTooLarge as exc:
-                    yield event.plain_result(f"⚠️ {result.platform} 视频过大，已跳过：{exc}")
+                local_path, oversize_msg = await self._download_video(result)
+                if oversize_msg:
+                    # 超限是明确结论，不再尝试直链——原版也是直接放弃
+                    yield event.plain_result(oversize_msg)
                     return
-                except (HttpError, OSError) as exc:
-                    logger.warning(f"[R插件] 视频下载失败，回退直发链接: {exc}")
 
-            if not sent:
+            if local_path:
+                event.track_temporary_local_file(local_path)
                 try:
-                    yield event.chain_result([Comp.Video.fromURL(video_url)])
-                except Exception as exc:  # noqa: BLE001 - 部分平台适配器不支持 video
-                    logger.warning(f"[R插件] 平台不支持发送视频，降级为文本链接: {exc}")
-                    yield event.plain_result(f"{prefix}{result.platform}\n{video_url}")
+                    yield event.chain_result(
+                        [Comp.Video.fromFileSystem(local_path)]
+                    )
+                    sent_media = True
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[R插件] 发送下载后的视频失败: {exc}")
 
-            if show_desc and (result.title or result.desc):
-                yield event.plain_result(
-                    f"{prefix}{result.platform}\n{(result.title or result.desc)[:300]}"
-                )
-            return
+            if not sent_media:
+                chain = self._build_video_chain(result)
+                if chain:
+                    try:
+                        yield event.chain_result(chain)
+                        sent_media = True
+                    except Exception as exc:  # noqa: BLE001 - 适配器不支持 video
+                        logger.warning(
+                            f"[R插件] 平台不支持发送视频，降级为文本链接: {exc}"
+                        )
+                if not sent_media:
+                    yield event.plain_result(
+                        f"{prefix}{result.platform}\n{result.videos[0]}"
+                    )
+                    sent_media = True
 
-        # ---- 音频 ----
+        # ---- 音频（音乐平台结果 / 抖音背景音乐）----
         if result.audios:
-            try:
-                yield event.chain_result([Comp.Record.fromURL(result.audios[0])])
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"[R插件] 发送语音失败，降级为链接: {exc}")
-                yield event.plain_result(f"{prefix}{result.platform}\n{result.audios[0]}")
-            if show_desc and result.title:
-                yield event.plain_result(f"{result.title} - {result.author}".strip(" -"))
-            return
-
-        # ---- 纯文本类结果（AI 总结 / 翻译）----
-        if result.extra.get("text_only") and result.desc:
-            yield event.plain_result(f"{prefix}{result.platform}\n{result.desc}")
-            return
+            for url in result.audios[:3]:
+                try:
+                    yield event.chain_result([Comp.Record.fromURL(url)])
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[R插件] 发送语音失败，降级为链接: {exc}")
+                    yield event.plain_result(url)
 
         # ---- 图片 ----
         if result.images:
@@ -530,9 +552,54 @@ class Main(Star):
                 yield event.chain_result(chain)
 
             if len(result.images) > limit:
-                yield event.plain_result(f"（共 {len(result.images)} 张，只发了前 {limit} 张）")
-            elif show_desc and result.desc:
-                yield event.plain_result(result.desc[:300])
+                yield event.plain_result(
+                    f"（共 {len(result.images)} 张，只发了前 {limit} 张）"
+                )
+
+        # ---- 文字说明 ----
+        if not show_desc:
+            return
+        text = (result.title or result.desc or "").strip()
+        if not text:
+            return
+        if sent_media or result.images or result.audios:
+            yield event.plain_result(f"{prefix}{result.platform}\n{text[:300]}")
+        else:
+            # 解析成功却没有任何媒体，把已知的文字情报发出去
+            async for item in self._render_text_only(event, result):
+                yield item
+
+    async def _download_video(self, result: ResolveResult) -> tuple[str | None, str]:
+        """下载视频到本地。
+
+        Returns:
+            ``(本地路径, 超限提示)``。下载失败时路径为 None 且提示为空
+            （调用方会退回直链），超限时提示非空（调用方应直接放弃）。
+        """
+        video_url = result.videos[0]
+        try:
+            # 大小上限沿用原 Guoba 面板的 videoSizeLimit（单位 MB）
+            max_mb = int(self.conf_get("global.videoSizeLimit", 70) or 70)
+            path = await download_media(
+                video_url, prefix="video", max_bytes=max_mb * 1024 * 1024
+            )
+            return str(path), ""
+        except MediaTooLarge as exc:
+            return None, f"⚠️ {result.platform} 视频过大，已跳过：{exc}"
+        except (HttpError, OSError) as exc:
+            logger.warning(f"[R插件] 视频下载失败，回退直发链接: {exc}")
+            return None, ""
+
+    def _build_video_chain(self, result: ResolveResult) -> list:
+        """把视频直链拼成消息链。抖音动图会有多条，一次发出去。"""
+        limit = max(1, int(self.conf_get("plugin.max_videos", 9) or 9))
+        chain = []
+        for url in result.videos[:limit]:
+            try:
+                chain.append(Comp.Video.fromURL(url))
+            except Exception as exc:  # noqa: BLE001 - 单条失败不该拖垮整条
+                logger.debug(f"[R插件] 跳过无效视频 {url}: {exc}")
+        return chain
 
     # ==================================================================
     # B 站扫码登录（对应原插件的 #RBQ / #RBS）
@@ -646,8 +713,16 @@ class Main(Star):
 
         try:
             bili_conf = self.conf_data.setdefault("bili", {})
-            fields = bili_conf.setdefault("biliSessDataFields", {})
-            if isinstance(fields, dict):
+            fields = bili_conf.setdefault("biliSessDataFields", [])
+            if isinstance(fields, list):
+                # 新版 template_list 格式：清掉旧的，按顺序写入有值的项
+                fields.clear()
+                for key in keys:
+                    val = picked.get(key, "")
+                    if val:
+                        fields.append({"__template_key": key, "value": val})
+            elif isinstance(fields, dict):
+                # 兼容还没被迁移的旧 dict 格式
                 for key in keys:
                     fields[key] = picked.get(key, "")
 

@@ -1,274 +1,170 @@
 """抖音 resolver。
 
-原版的抖音解析有两条路：
-1. **主路**：带 Cookie 请求 ``aweme/v1/web/aweme/detail`` —— 但要 ``a-bogus`` 签名，
-   签名算法在 ``utils/a-bogus.cjs``（463 行混淆 JS），还依赖 ``cycletls`` 做 TLS 指纹伪装。
-2. **兜底路（SSR）**：请求 ``iesdouyin.com/share/video/{id}/`` 分享页，
-   页面里内嵌 ``window._ROUTER_DATA``，直接把视频地址挖出来。**这条路不需要 Cookie。**
+分三层，职责清晰：
 
-移植时选了第 2 条。原因很直接：第 1 条要搬的是加密混淆代码 + TLS 指纹库，
-不是"移植"是"重写"；而第 2 条是纯 HTTP + JSON，逻辑干净、可验证。
-代价是拿不到评论、直播、部分高清档位。
+1. ``core/douyin_ssr.py`` —— SSR 内核（原版 ``utils/douyin.js`` 的移植）：
+   抓分享页、抠 ``_ROUTER_DATA``、画质探测、匿名 ttwid。
+2. **本文件** —— 把内核结果翻译成 ``ResolveResult``：判类型、挑媒体、带 BGM。
+3. ``main.py`` —— 渲染成 AstrBot 消息。
+
+为什么不做原版的「主路」（``aweme/v1/web/aweme/detail``）？
+那条路要 ``a-bogus`` 签名——``utils/a-bogus.cjs`` 463 行混淆 JS，还依赖
+``cycletls`` 做 TLS 指纹伪装。原版自己也知道它脆，所以写了 SSR 兜底；
+这里就把 SSR 当主路用。
+
+**一个必须说清楚的坑**：图集（``aweme_type`` 2/68/150）的
+``video.play_addr`` 里装的是**背景音乐**，不是视频。早期版本把它当视频发，
+用户收到的是一条指向 mp3 的"视频"。现在按 ``aweme_type`` 严格分流。
 """
 
 from __future__ import annotations
 
-import json
-import re
-
 from astrbot.api import logger
 
-from ..core.http import HttpError, expand_short_url, fetch
+from ..core.constants import DY_TOUTIAO_INFO
+from ..core.douyin_ssr import (
+    animated_image_uris,
+    has_animated_images,
+    music_info,
+    resolve_by_ssr,
+    static_image_urls,
+)
+from ..core.http import HttpError, expand_short_url
 from .base import ResolveResult, ResolverContext, register
 
-# 抖音视频/图文的短链
-_SHORT_RE = re.compile(r"(?:v|live)\.douyin\.com/[A-Za-z0-9_-]+")
-# 长链里的 id
-_LONG_VIDEO_RE = re.compile(r"douyin\.com/video/(\d+)")
-_LONG_NOTE_RE = re.compile(r"douyin\.com/note/(\d+)")
 
-_UA = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
-    "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-)
+def _play_url(uri: str, compressed: bool) -> str:
+    """按分辨率偏好拼播放地址。
 
-
-def _extract_router_data(html: str) -> dict | None:
-    """从分享页里抠出 window._ROUTER_DATA 的 JSON。
-
-    不能简单地按行切——JSON 里可能有 ``</script>`` 之外的任意内容，
-    所以要按大括号配对来定位结尾。
+    ``DY_TOUTIAO_INFO`` 模板里 ratio 写死 1080p，压缩时替换成 720p
+    ——和原版 ``douyinCompression`` 的行为一致。
     """
-    marker = "window._ROUTER_DATA"
-    idx = html.find(marker)
-    if idx == -1:
-        return None
-
-    start = html.find("{", idx)
-    if start == -1:
-        return None
-
-    depth = 0
-    in_str = False
-    escape = False
-    for pos in range(start, len(html)):
-        ch = html[pos]
-        if in_str:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(html[start : pos + 1])
-                except json.JSONDecodeError as exc:
-                    logger.debug(f"[R插件][抖音] _ROUTER_DATA 解析失败: {exc}")
-                    return None
-    return None
-
-
-def _dig_item(router_data: dict) -> dict | None:
-    """在 _ROUTER_DATA 里定位到 item_list[0]。
-
-    抖音会随版本改变外层 key（``video_(id)/page`` / ``note_(id)/page``），
-    所以这里按结构特征找，而不是写死 key。
-    """
-    loader = router_data.get("loaderData") or {}
-    for _, page in loader.items():
-        if not isinstance(page, dict):
-            continue
-        info = page.get("videoInfoRes")
-        if isinstance(info, dict):
-            items = info.get("item_list") or []
-            if items:
-                return items[0]
-        items = page.get("item_list")
-        if isinstance(items, list) and items:
-            return items[0]
-
-    # 再兜一层：全局搜 item_list
-    def _walk(node):
-        if isinstance(node, dict):
-            if isinstance(node.get("item_list"), list) and node["item_list"]:
-                return node["item_list"][0]
-            for value in node.values():
-                found = _walk(value)
-                if found:
-                    return found
-        elif isinstance(node, list):
-            for value in node:
-                found = _walk(value)
-                if found:
-                    return found
-        return None
-
-    return _walk(router_data)
-
-
-def _pick_video_url(item: dict) -> list[str]:
-    """从 item 里抽视频地址，按清晰度从高到低试。"""
-    videos: list[str] = []
-    video = item.get("video") or {}
-
-    # play_addr 的 url_list 里通常第一个就是可用的
-    for addr_key in ("play_addr", "play_addr_h264", "download_addr", "play_addr_265"):
-        addr = video.get(addr_key)
-        if isinstance(addr, dict):
-            for url in addr.get("url_list") or []:
-                if url and url not in videos:
-                    videos.append(url)
-
-    # 旧字段
-    for url in (video.get("playApi") or [],):
-        if url and url not in videos:
-            videos.append(url)
-
-    # 把 playwm（带水印）换成 play（无水印）是抖音的老套路
-    normalized: list[str] = []
-    for url in videos:
-        normalized.append(url.replace("/playwm/", "/play/"))
-    return normalized or videos
-
-
-def _pick_images(item: dict) -> list[str]:
-    """图文 / 动图帖子的图片列表。"""
-    images: list[str] = []
-    for img in item.get("images") or []:
-        if not isinstance(img, dict):
-            continue
-        for url in img.get("url_list") or []:
-            if url:
-                images.append(url)
-                break
-    return images
+    ratio = "720p" if compressed else "1080p"
+    return DY_TOUTIAO_INFO.replace("1080p", ratio).replace("{}", uri)
 
 
 @register("douyin")
 async def resolve_douyin(link: str, ctx: ResolverContext) -> ResolveResult:
-    """抖音视频 / 图文解析（SSR 免 Cookie 路线）。"""
-    aweme_id: str | None = None
-    is_note = False
-
-    m = _LONG_VIDEO_RE.search(link)
-    if m:
-        aweme_id = m.group(1)
-    else:
-        m = _LONG_NOTE_RE.search(link)
-        if m:
-            aweme_id = m.group(1)
-            is_note = True
-
-    if not aweme_id:
-        short = _SHORT_RE.search(link)
-        if short:
-            expanded = await expand_short_url(f"https://{short.group(0)}")
-            logger.debug(f"[R插件][抖音] 短链展开: {expanded}")
-            m = _LONG_VIDEO_RE.search(expanded) or _LONG_NOTE_RE.search(expanded)
-            if m:
-                aweme_id = m.group(1)
-                is_note = "note" in expanded
-            else:
-                # 展开后可能落到 discover 之类的聚合页
-                m = re.search(r"/(?:video|note)/(\d+)", expanded)
-                if m:
-                    aweme_id = m.group(1)
-
-    if not aweme_id:
-        return ResolveResult.fail("抖音", "无法从链接中提取作品 ID（短链可能已失效）")
-
-    # ---- 抓分享页 ----
-    candidates = []
-    if is_note:
-        from ..core.constants import DY_SHARE_NOTE_PAGE
-
-        candidates.append(DY_SHARE_NOTE_PAGE.format(aweme_id))
-    from ..core.constants import DY_SHARE_VIDEO_PAGE
-
-    candidates.append(DY_SHARE_VIDEO_PAGE.format(aweme_id))
-
-    # 配了 Cookie 就带上：SSR 页面在登录态下返回的数据更完整，
-    # 部分需要登录才能看的作品也只有带 Cookie 才拿得到。
+    """抖音视频 / 图集 / 动图解析。"""
     cookie = ctx.cookie("douyin")
-    headers = {
-        "User-Agent": _UA,
-        "Referer": "https://www.douyin.com/",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9",
-    }
-    if cookie:
-        headers["Cookie"] = cookie
+    compressed = bool(ctx.conf("douyin.douyinCompression", False))
+    # 画质探测会多发 1-4 个 Range 请求。默认开，追求最快可以关（直接用 1080p 模板）
+    probe = bool(ctx.conf("plugin.douyin_probe_quality", True))
 
-    html = ""
-    for url in candidates:
+    # 短链先展开。展开失败也不算错——SSR 内核自己也会再试一次。
+    if "v.douyin.com" in link:
         try:
-            body, _ = await fetch(url, headers=headers, retries=1, timeout=20.0)
-            html = body.decode("utf-8", errors="ignore")
-            if "_ROUTER_DATA" in html:
-                break
+            expanded = await expand_short_url(link)
+            if expanded and "douyin.com" in expanded:
+                link = expanded
         except HttpError as exc:
-            logger.debug(f"[R插件][抖音] 分享页抓取失败 {url}: {exc}")
+            logger.debug(f"[R插件][抖音] 短链展开失败，交给 SSR 内核处理: {exc}")
 
-    if "_ROUTER_DATA" not in html:
+    try:
+        data = await resolve_by_ssr(
+            link, cookie=cookie, prefer_compressed=compressed, probe=probe
+        )
+    except HttpError as exc:
         hint = (
-            "可能需要更新 Cookie（已配置但已失效）"
+            "Cookie 可能已失效，可在配置里更新或清空走免登录 SSR"
             if cookie
-            else "可尝试在配置里填抖音 Cookie 提高成功率"
+            else "SSR 免登录通道暂时不可用，可尝试配置抖音 Cookie"
         )
-        return ResolveResult.fail("抖音", f"分享页没有返回预期内容（{hint}）")
+        return ResolveResult.fail("抖音", f"{exc}（{hint}）")
+    except ValueError as exc:
+        return ResolveResult.fail("抖音", str(exc))
 
-    if "_ROUTER_DATA" not in html:
-        return ResolveResult.fail(
-            "抖音", "分享页没有返回预期内容（可能需要配置 Cookie 走签名接口）"
+    kind = data["content_type"]
+    aweme = data["aweme"]
+    extra = {
+        "aweme_id": data["aweme_id"],
+        "douyin_kind": kind,
+        "canonical_url": data.get("canonical_url", ""),
+    }
+    if data.get("selected_ratio"):
+        extra["ratio"] = data["selected_ratio"]
+    if data.get("available_ratios"):
+        extra["available_ratios"] = data["available_ratios"]
+
+    # ---- 视频 ----
+    if kind == "video":
+        return ResolveResult.ok(
+            "抖音",
+            videos=[data["video_url"]],
+            title=data["desc"],
+            author=data["author_nickname"],
+            desc=data["desc"],
+            cover=data["cover_url"],
+            extra={**extra, "duration": data.get("duration_seconds", 0)},
         )
 
-    router_data = _extract_router_data(html)
-    if not router_data:
-        return ResolveResult.fail("抖音", "_ROUTER_DATA 解析失败")
+    # ---- 图集 / 动图 ----
+    if kind == "image":
+        images = static_image_urls(aweme)
+        animated = has_animated_images(aweme)
 
-    item = _dig_item(router_data)
-    if not item:
-        return ResolveResult.fail("抖音", "分享页里没有找到作品数据")
+        videos: list[str] = []
+        if animated:
+            # 动图：每张图自带视频轨，按顺序拼成播放地址。
+            # 原版这里会下载每个动图并用 ffmpeg 和 BGM 合并，代价太高；
+            # 这里改成直接发直链（BGM 单独作为语音发出，见下），
+            # 效果等价但不用落地磁盘。
+            videos = [_play_url(uri, compressed) for uri in animated_image_uris(aweme)]
 
-    videos = _pick_video_url(item)
-    images = _pick_images(item)
+        if not images and not videos:
+            return ResolveResult.fail("抖音", "这条作品里没有可下载的媒体")
 
-    if not videos and not images:
-        return ResolveResult.fail("抖音", "作品里没有可下载的媒体")
+        # ---- 背景音乐 ----
+        audios: list[str] = []
+        if bool(ctx.conf("douyin.douyinMusic", True)):
+            send_type = str(ctx.conf("douyin.douyinBGMSendType", "voice") or "voice")
+            if send_type == "voice":
+                bgm = music_info(aweme)
+                if bgm["url"]:
+                    audios = [bgm["url"]]
+                    extra["bgm"] = (
+                        f"{bgm['title']} - {bgm['author']}".strip(" -")
+                    )
+            else:
+                # 音乐卡片要走协议端私有接口（NapCat 之类），AstrBot 这层没有
+                # 统一抽象，硬做会让插件绑死某个适配器。明确记一条日志。
+                logger.debug(
+                    "[R插件][抖音] 音乐卡片发送方式未移植，跳过 BGM；"
+                    "改成「语音」即可发送"
+                )
 
-    desc = (item.get("desc") or "")[:300]
-    author = ((item.get("author") or {}).get("nickname")) or ""
-    cover = ""
-    video = item.get("video") or {}
-    cover_info = video.get("cover") or video.get("origin_cover") or {}
-    if isinstance(cover_info, dict):
-        urls = cover_info.get("url_list") or []
-        cover = urls[0] if urls else ""
+        label = "抖音动图" if videos else "抖音"
+        return ResolveResult.ok(
+            label,
+            videos=videos,
+            images=images,
+            audios=audios,
+            title=data["desc"],
+            author=data["author_nickname"],
+            desc=data["desc"],
+            cover=data["cover_url"],
+            extra={**extra, "animated": animated},
+        )
 
-    # 无水印直链的常见形态是把域名换成 aweme.snssdk.com 并带上 video_id
-    result_videos: list[str] = []
-    video_id = video.get("vid") or video.get("video_id")
-    if video_id:
-        from ..core.constants import DY_TOUTIAO_INFO
+    # ---- 兜底：未知类型 ----
+    # 抖音偶尔会引入新的 aweme_type。此时宁可按图文发（图集至少能看到图），
+    # 也不要把可能指向音乐文件的 play_addr 当视频发出去。
+    images = static_image_urls(aweme)
+    if images:
+        logger.info(
+            f"[R插件][抖音] 未知 aweme_type="
+            f"{aweme.get('aweme_type')}，降级按图文处理（{len(images)} 张）"
+        )
+        return ResolveResult.ok(
+            "抖音",
+            images=images,
+            title=data["desc"],
+            author=data["author_nickname"],
+            desc=data["desc"],
+            cover=data["cover_url"],
+            extra={**extra, "fallback": True},
+        )
 
-        result_videos.append(DY_TOUTIAO_INFO.format(video_id))
-    result_videos.extend(videos[:1])
-
-    return ResolveResult.ok(
-        "抖音",
-        videos=result_videos[:1],
-        images=images,
-        title=desc,
-        author=author,
-        desc=desc,
-        cover=cover,
-        extra={"aweme_id": aweme_id},
+    return ResolveResult.fail(
+        "抖音", f"无法识别的作品类型（aweme_type={aweme.get('aweme_type')}）"
     )

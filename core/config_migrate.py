@@ -171,3 +171,49 @@ def heal(conf: dict, schema: dict, *, save=None) -> list[str]:
             logger.error(f"[R插件][配置自愈] 保存失败: {type(exc).__name__}: {exc}")
 
     return changes
+
+
+def migrate_cookie_fields(conf: dict) -> list[str]:
+    """把旧版「dict」格式的 Cookie 逐项填写，迁到新版「template_list」格式。
+
+    旧 schema 用 ``type: "dict"`` + ``template_schema``，存的是
+    ``{"sessionid": "", "ttwid": ""}`` 这样的 dict；新 schema 改成
+    ``type: "template_list"``，存的是
+    ``[{"__template_key": "sessionid", "value": ""}]`` 这样的 list。
+
+    这个迁移**必须**在通用 ``heal()`` 之前做：heal 对 ``template_list`` 的兜底
+    是「把非 list 包成单元素 list」，会让 dict 变成 ``[{...}]``——里头的项没有
+    ``__template_key``，反而把配置弄坏。
+
+    Returns:
+        迁移记录，形如 ``["douyin.douyinCookieFields: dict(12 键) -> template_list(3 项)"]``。
+    """
+    try:
+        from .cookie_spec import COOKIE_SPECS
+    except ImportError:  # pragma: no cover - 理论上 cookie_spec 一定在
+        return []
+
+    changes: list[str] = []
+    for spec in COOKIE_SPECS:
+        group = conf.get(spec.group)
+        if not isinstance(group, dict):
+            continue
+        field = spec.fields_name
+        old = group.get(field)
+        if not isinstance(old, dict):
+            # 已经是新格式（list），或者字段还不存在，跳过
+            continue
+
+        new_list: list[dict] = []
+        for key, value in old.items():
+            text = str(value or "").strip()
+            if not text:
+                continue
+            new_list.append({"__template_key": key, "value": text})
+
+        group[field] = new_list
+        changes.append(
+            f"{spec.group}.{field}: dict({len(old)} 键) -> template_list({len(new_list)} 项)"
+        )
+
+    return changes

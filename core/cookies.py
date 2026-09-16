@@ -12,9 +12,9 @@
 
 这个模块把「拼格式」这件事从用户身上拿走：
 
-- **想省事**：在「XXXCookie 逐项填写」里点添加条目 —— **下拉选字段名、输入框填值**，
-  这里按标准格式组装（前端用的是 AstrBot 的 ``type: dict`` + ``template_schema`` 控件，
-  也就是 ``custom_extra_body`` 那种键值编辑器）
+- **想省事**：在「XXXCookie 逐项填写」里点「添加条目」——**下拉选字段名、输入框填值**，
+  一行一个字段，插件按标准格式组装（前端用的是 AstrBot 的
+  ``type: template_list`` 控件，行内列表，比弹窗式的 dict 编辑器好用）
 - **已经有一整段**：直接粘进「整段 Cookie」，优先级最高，原样透传
 
 拆解方案（哪些 key、什么顺序、哪些是必需的）放在 ``cookie_spec.py``，
@@ -68,35 +68,39 @@ def build_cookie(platform: str, conf_get) -> str:
 
     # ---- 逐项拼装 ----
     #
-    # 这项在配置里是 `type: "dict"` + `template_schema`，前端渲染成
-    # 「下拉选字段名 + 输入框填值」的可增删键值对，存下来就是一个 dict。
-    raw_items = conf_get(spec.fields_path, {}) or {}
-    if not isinstance(raw_items, dict):
+    # 这项在配置里是 `type: "template_list"` + `templates`，前端渲染成
+    # 「下拉选字段名 + 输入框填值」的行内表格，存下来是一个 list：
+    #   [{"__template_key": "sessionid", "value": "xxx"}, ...]
+    raw_items = conf_get(spec.fields_path, []) or []
+    if isinstance(raw_items, dict):
+        # 兼容旧版本：曾经是 `type: "dict"`，存的是 {key: value}，就地按新格式理解
+        raw_items = [
+            {"__template_key": k, "value": v}
+            for k, v in raw_items.items()
+        ]
+    if not isinstance(raw_items, list):
         logger.warning(
             f"[R插件][Cookie] {spec.label} 的逐项填写格式不对"
-            f"（期望键值表，实际是 {type(raw_items).__name__}），已忽略"
+            f"（期望列表，实际是 {type(raw_items).__name__}），已忽略"
         )
-        raw_items = {}
+        raw_items = []
 
     parts: list[str] = []
     seen: set[str] = set()
 
-    # 按 spec 定义的顺序拼——服务端有时会认顺序，不能跟着用户的填写顺序走
-    for key in spec.keys:
-        value = str(raw_items.get(key, "") or "").strip()
-        if value:
-            parts.append(f"{key}={value}")
-            seen.add(key)
-
-    # dict 类型是自由映射，用户可能加了 template_schema 之外的字段，
-    # 这些也要带上，别默默丢掉
-    for key, value in raw_items.items():
-        if key in seen:
+    # 按用户排好的顺序拼（表格里一行一个字段）。重复出现的字段只保留第一个。
+    for item in raw_items:
+        if not isinstance(item, dict):
             continue
-        text = str(value or "").strip()
-        if text:
-            parts.append(f"{key}={text}")
-            logger.debug(f"[R插件][Cookie] {spec.label} 带上了非标准字段 {key}")
+        key = str(item.get("__template_key") or item.get("template") or "").strip()
+        value = str(item.get("value") or "").strip()
+        if not key or not value:
+            continue
+        if key in seen:
+            logger.debug(f"[R插件][Cookie] {spec.label} 重复字段 {key}，已忽略后项")
+            continue
+        seen.add(key)
+        parts.append(f"{key}={value}")
 
     if not parts:
         return ""
