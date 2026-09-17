@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import platform as _platform
 import re
 import time
 from pathlib import Path
@@ -94,8 +95,38 @@ from .core.music_sign_proxy import (
     DEFAULT_UPSTREAM as MUSIC_SIGN_UPSTREAM,
     SignProxy,
 )
+from .core.cookie_spec import SPEC_BY_PLATFORM
+from .core import netease_login
+from .core.cookie_status import check_all as check_all_cookies
+from .core.panels import (
+    render_cookie_status,
+    render_menu,
+    render_service_status,
+)
+from .core.service_status import (
+    collect_system,
+    fetch_avatar,
+    fetch_bot_name,
+    self_id_of,
+)
+from .core import render_image
 from .platforms import ResolveResult, call
 from .platforms import names as resolver_names
+
+# 各平台 Cookie 的中文名（cookie_spec 里没登记的在这里补）
+_COOKIE_LABELS: dict[str, str] = {
+    "bili": "哔哩哔哩",
+    "douyin": "抖音",
+    "kuaishou": "快手",
+    "weibo": "微博",
+    "xiaohongshu": "小红书",
+    "miyoushe": "米游社",
+    "weixinChannel": "微信视频号",
+    "xiaoheihe": "小黑盒",
+    "netease": "网易云音乐",
+    "qqmusic": "QQ音乐",
+}
+
 
 # B 站 QQ 小程序的 appid（判断 Json 消息段是不是 B 站小程序卡片用）
 _BILI_MINIAPP_APPID = "1109937557"
@@ -186,6 +217,12 @@ _LOCAL_COMMAND_METHODS: dict[str, str] = {
     "music_search": "cmd_music_search",
     # 序号点播：读会话状态才能判断该不该响应，同样走本地方法。
     "music_pick": "cmd_music_pick",
+    # 网易云扫码：要发二维码图 + 起后台轮询，需要 event。
+    "netease_scan": "cmd_netease_scan",
+    # 三个图片命令：都要 event（拿 Bot QQ 号/平台名）或读配置拼数据。
+    "cookie_status": "cmd_cookie_status",
+    "service_status": "cmd_service_status",
+    "r_menu": "cmd_r_menu",
 }
 
 # 自动识别用的合并正则。必须是模块级常量——装饰器在类定义时求值，
@@ -1465,6 +1502,248 @@ class Main(Star):
         )
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
+
+    # ==================================================================
+    # 网易云扫码登录
+    # ==================================================================
+
+    def _plugin_version(self) -> str:
+        """读 metadata.yaml 里的版本号（读一次缓存住）。"""
+        cached = getattr(self, "_version_cache", "")
+        if cached:
+            return cached
+        try:
+            text = (Path(__file__).parent / "metadata.yaml").read_text(encoding="utf-8")
+            for line in text.splitlines():
+                if line.startswith("version:"):
+                    self._version_cache = line.split(":", 1)[1].strip().strip("\"'")
+                    break
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[R插件] 读版本号失败: {exc}")
+        return getattr(self, "_version_cache", "")
+
+    def _panel_bg_api(self) -> str:
+        """图片命令用的随机背景 API；留空或非 http 视为关闭（退回纯色底）。"""
+        raw = self.conf_get("plugin.panelBgApi", render_image.DEFAULT_BG_API)
+        text = str(raw if raw is not None else render_image.DEFAULT_BG_API).strip()
+        return text if text.startswith("http") else ""
+
+    def _cookie_items(self) -> list[tuple[str, str, str]]:
+        """``[(平台 key, 中文名, Cookie)]``，供 #cookie状态 用。"""
+        out: list[tuple[str, str, str]] = []
+        for platform in _COOKIE_FIELDS:
+            spec = SPEC_BY_PLATFORM.get(platform)
+            label = (spec.label if spec and spec.label else "") or _COOKIE_LABELS.get(
+                platform, platform
+            )
+            out.append((platform, label, self.cookie_for(platform)))
+        return out
+
+    async def cmd_netease_scan(self, event: AstrMessageEvent):
+        """``#RNQ`` —— 网易云扫码登录。
+
+        走官方网页端接口（``api/login/qrcode/*``），**不需要自建
+        NeteaseCloudMusicApi**。扫码成功后把 Cookie 写进 ``music.neteaseCookie``。
+        """
+        unikey, png = await netease_login.create_login()
+        if not unikey or not png:
+            yield event.plain_result(
+                "❌ 申请网易云登录二维码失败，稍后再试。\n"
+                "持续失败的话，可以手动抓 `MUSIC_U` 填进「点歌」分组的**网易云Cookie**。"
+            )
+            return
+
+        logger.info("[R插件][网易云扫码] 已生成登录二维码")
+        yield event.plain_result(
+            "请用 **网易云音乐手机客户端** 扫描下面的二维码登录。\n"
+            "扫完在手机上点一下「确认登录」，Cookie 会自动写进配置。"
+        )
+        try:
+            # 用 fromBytes（base64），不落临时文件 —— 跨容器发送最稳
+            yield event.chain_result([Comp.Image.fromBytes(png)])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[R插件][网易云扫码] 二维码发送失败: {exc}")
+            yield event.plain_result("二维码发送失败，请重试。")
+
+        umo = event.unified_msg_origin
+        timeout = float(self.conf_get("plugin.bili_login_timeout", 180) or 180)
+        task = asyncio.create_task(
+            self._netease_login_worker(unikey, umo, timeout),
+            name="rconsole_netease_login",
+        )
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def _netease_login_worker(self, unikey: str, umo: str, timeout: float) -> None:
+        """后台轮询网易云扫码结果，成功后写配置并回报账号。"""
+        try:
+            result = await netease_login.wait_for_login(unikey, timeout=timeout)
+        except asyncio.CancelledError:
+            logger.info("[R插件][网易云扫码] 轮询任务被取消")
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[R插件][网易云扫码] 轮询异常: {type(exc).__name__}: {exc}")
+            await self._notify(umo, f"❌ 网易云扫码出错：{exc}")
+            return
+
+        if result.get("error"):
+            await self._notify(umo, f"❌ 网易云扫码失败：{result['error']}")
+            return
+
+        cookie = result["cookie"]
+        try:
+            music = self.conf_data.setdefault("music", {})
+            music["neteaseCookie"] = cookie
+            saver = getattr(self.conf_data, "save_config", None)
+            if callable(saver):
+                saver()
+            logger.info(
+                f"[R插件][网易云扫码] Cookie 已写入配置（{len(cookie)} 字符）"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[R插件][网易云扫码] 写配置失败: {exc}")
+            await self._notify(umo, f"❌ 扫码成功但写入配置失败：{exc}")
+            return
+
+        account = await netease_login.fetch_account(cookie)
+        lines = ["✅ **网易云登录成功，Cookie 已写入配置**"]
+        if account.get("ok"):
+            lines.append(f"账号：{account['nickname']}（UID {account['user_id']}）")
+            vip = account.get("vip_label") or ""
+            if account.get("vip_expire"):
+                vip = f"{vip}　到期 {account['vip_expire']}"
+            if vip:
+                lines.append(f"会员：{vip}")
+        else:
+            lines.append(f"⚠️ 但状态校验没通过：{account.get('msg')}")
+        lines.append("现在点歌可以听 VIP 音质了。发 `#cookie状态` 可随时查看。")
+        await self._notify(umo, "\n".join(lines))
+
+    # ==================================================================
+    # 图片命令：#R菜单 / #cookie状态 / #服务状态
+    # ==================================================================
+    #
+    # 三个命令的耗时都在「外网」上：随机背景约 2.5 秒、头像约 3 秒、
+    # Cookie 校验约 1-3 秒。所以统一做法是**先起 task 并行**，最后再一起收，
+    # 而不是顺序 await —— 否则用户要等十几秒。
+
+    async def cmd_r_menu(self, event: AstrMessageEvent):
+        """``#R菜单`` —— 图片版功能菜单（指令 + 使用教程）。"""
+        bg_api = self._panel_bg_api()
+        bg_task = asyncio.create_task(render_image.fetch_background(bg_api))
+        name_task = asyncio.create_task(fetch_bot_name(event))
+        bot_name = await name_task
+        await bg_task
+
+        png = await render_menu(self._plugin_version(), bot_name, bg_api)
+        if png:
+            yield event.chain_result([Comp.Image.fromBytes(png)])
+            return
+        yield event.plain_result(self._menu_text(bot_name))
+
+    def _menu_text(self, bot_name: str = "") -> str:
+        """图片渲染不可用时的文字菜单兜底。"""
+        lines = ["🎵 R插件 · 功能菜单", ""]
+        lines.append("【链接解析】发链接即触发")
+        lines.append("　" + "、".join(r.name for r in AUTO_RULES if r.enabled))
+        lines.append("")
+        lines.append("【点歌】")
+        lines.append("　点歌 <歌名>　　　　　按默认平台搜")
+        lines.append("　网易云点歌 <歌名>　　只搜网易云")
+        lines.append("　QQ点歌 <歌名>　　　　只搜 QQ 音乐")
+        lines.append("　（接着发 1/2/3）　　 60 秒内回序号播放")
+        lines.append("")
+        lines.append("【查询】")
+        lines.append("　#cookie状态　所有 Cookie 是否失效 + 会员等级")
+        lines.append("　#服务状态　　服务器负载与 Bot 信息")
+        lines.append("　#R菜单　　　 本菜单")
+        lines.append("")
+        lines.append("【管理员】")
+        lines.append("　#RNQ　网易云扫码登录")
+        lines.append("　#RBQ　B站扫码登录　#RBS　B站登录状态")
+        if bot_name:
+            lines.append("")
+            lines.append(f"— {bot_name}")
+        return "\n".join(lines)
+
+    async def cmd_cookie_status(self, event: AstrMessageEvent):
+        """``#cookie状态`` —— 查所有 Cookie 是否失效（图片简略展示）。"""
+        bg_api = self._panel_bg_api()
+        bg_task = asyncio.create_task(render_image.fetch_background(bg_api))
+        rows, stamp = await check_all_cookies(self._cookie_items())
+        await bg_task
+
+        png = await render_cookie_status(rows, stamp, bg_api)
+        if png:
+            yield event.chain_result([Comp.Image.fromBytes(png)])
+            return
+        yield event.plain_result(self._cookie_text(rows, stamp))
+
+    def _cookie_text(self, rows: list[dict], stamp: str) -> str:
+        """图片渲染不可用时的文字兜底。"""
+        mark = {"ok": "✅", "bad": "❌", "warn": "⚠️", "off": "➖"}
+        lines = [f"🔑 Cookie 状态（{stamp}）", ""]
+        for r in rows:
+            head = f"{mark.get(r['status'], '·')} {r['label']}"
+            if r.get("nickname"):
+                head += f"　{r['nickname']}"
+            lines.append(head)
+            if r.get("detail"):
+                lines.append(f"　　{r['detail']}")
+        return "\n".join(lines)
+
+    async def cmd_service_status(self, event: AstrMessageEvent):
+        """``#服务状态`` —— 服务器负载 + Bot 信息（图片）。"""
+        bg_api = self._panel_bg_api()
+        self_id = self_id_of(event)
+
+        # 三件事并行：随机背景 / 头像 / Bot 昵称；系统指标是纯本地读取，
+        # 顺手在这段等待里做完
+        bg_task = asyncio.create_task(render_image.fetch_background(bg_api))
+        avatar_task = asyncio.create_task(fetch_avatar(self_id))
+        name_task = asyncio.create_task(fetch_bot_name(event))
+        base = collect_system()
+        avatar = await avatar_task
+        bot_name = await name_task
+        await bg_task
+
+        enabled = self.conf_get("plugin.enabled_platforms", [])
+        if isinstance(enabled, (list, tuple)):
+            enabled_text = f"{len(enabled)} 个"
+        else:
+            enabled_text = "—"
+
+        info = {
+            "host": _platform.node() or "未知主机",
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "bot_qq": self_id or "未知",
+            "bot_name": bot_name,
+            "avatar": avatar,
+            "platform": event.get_platform_name() or "—",
+            "enabled_platforms": enabled_text,
+            "version": self._plugin_version(),
+            "cmd_count": len(COMMAND_RULES),
+            "auto_count": len(AUTO_RULES),
+            "loads": base["loads"],
+            "env_lines": base["env_lines"],
+            "footer": "数据由 psutil 实时采集",
+        }
+        png = await render_service_status(info, bg_api)
+        if png:
+            yield event.chain_result([Comp.Image.fromBytes(png)])
+            return
+        yield event.plain_result(self._service_text(info))
+
+    def _service_text(self, info: dict) -> str:
+        lines = ["🖥️ 服务状态", ""]
+        lines.append(f"Bot　QQ {info['bot_qq']}　{info.get('bot_name') or ''}")
+        lines.append(f"平台　{info.get('platform')}　·　插件 v{info.get('version')}")
+        lines.append("")
+        for item in info.get("loads", []):
+            lines.append(f"{item['label']}：{item['text']}")
+        lines.append("")
+        lines.extend(info.get("env_lines", []))
+        return "\n".join(lines)
 
     # ==================================================================
     # 点歌搜索

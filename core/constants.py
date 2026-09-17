@@ -561,11 +561,41 @@ COMMAND_RULES: tuple[dict, ...] = (
         "handler": "music_pick",
         "admin": False,
     },
-    # 说明：原 Guoba 面板带来的 `#rns`（网易云状态）/`#rnq`（网易云扫码）/
-    # `#rks`（酷狗状态）/`#rkq`（酷狗扫码）四条规则已移除——它们依赖的
-    # NeteaseCloudMusicApi 自建服务与酷狗自建 API 在本移植版里都没实现，
-    # 留着只会让「规则表引用了不存在的 resolver」警告一直刷屏。
-    # 点歌现在只需要在配置里填 Cookie，不需要扫码。
+    # 说明：原 Guoba 面板带来的 `#rns`（网易云状态）/`#rks`（酷狗状态）/
+    # `#rkq`（酷狗扫码）三条规则已移除——它们依赖的 NeteaseCloudMusicApi 自建
+    # 服务与酷狗自建 API 在本移植版里都没实现，留着只会让「规则表引用了不存在
+    # 的 resolver」警告一直刷屏。
+    #
+    # v1.5.0 起 `#RNQ`（网易云扫码）**恢复**：改用网易云官方网页端扫码接口实现，
+    # 不需要任何自建服务。
+    {
+        "key": "neteaseScan",
+        "name": "网易云扫码",
+        "pattern": r"^#(?:RNQ|rnq|网易云扫码)$",
+        "handler": "netease_scan",
+        "admin": True,
+    },
+    {
+        "key": "cookieStatus",
+        "name": "Cookie状态",
+        "pattern": r"^#?(?:cookie状态|Cookie状态|ck状态)$",
+        "handler": "cookie_status",
+        "admin": False,
+    },
+    {
+        "key": "serviceStatus",
+        "name": "服务状态",
+        "pattern": r"^#?(?:服务状态|服务器状态|bot状态)$",
+        "handler": "service_status",
+        "admin": False,
+    },
+    {
+        "key": "rMenu",
+        "name": "R菜单",
+        "pattern": r"^#?(?:R菜单|r菜单|R帮助|r帮助|R功能|菜单)$",
+        "handler": "r_menu",
+        "admin": False,
+    },
 )
 
 
