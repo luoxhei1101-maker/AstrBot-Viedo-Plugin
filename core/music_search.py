@@ -324,6 +324,10 @@ async def search_qqmusic(keyword: str, limit: int = MAX_RESULTS) -> list[Song]:
                     "media_mid": (item.get("file") or {}).get("media_mid"),
                     "file": item.get("file") or {},
                     "pay": item.get("pay") or {},
+                    # QQ 音乐的**数字 songid**。发 QQ 音乐官方卡片
+                    # （OneBot ``music`` 段的 ``type=qq``）需要它，
+                    # 而不是 ``mid``。
+                    "songid": item.get("id"),
                 },
             )
         )

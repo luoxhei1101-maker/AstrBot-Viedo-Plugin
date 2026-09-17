@@ -68,6 +68,7 @@ from .core.config_migrate import (
 from .core.constants import (
     AUTO_RULES,
     COMMAND_RULES,
+    MUSIC_COMMAND_PATTERN,
     PlatformRule,
     build_combined_pattern,
     extract_urls,
@@ -1434,23 +1435,22 @@ class Main(Star):
     # ==================================================================
 
     # 命令里显式写的平台前缀 -> 内部平台 key。
-    # 不写就按配置的 music.platform 走。
+    # **键一律小写**，匹配时把用户输入 `.lower()` 再查（这样 ``Qq``/``QQ``
+    # ``qq`` 都能认）。不写就按配置的 music.platform 走。
     _MUSIC_PREFIX: dict[str, str] = {
         "网易云": "netease",
         "网抑云": "netease",
         "网易": "netease",
         "qq音乐": "qqmusic",
-        "QQ音乐": "qqmusic",
         "qq": "qqmusic",
-        "QQ": "qqmusic",
     }
 
     # 各发送模式一次送出多少首。
     # link 是列表形式（全部列出让人挑）；card / voice / file 每条都是独立
-    # 消息，发太多会刷屏，而且 voice / file 还要先下载音频，所以给个小上限。
+    # 消息，**多发就是刷屏**，所以都只发一首。
     _MUSIC_SEND_LIMIT: dict[str, int] = {
         "link": 0,   # 0 = 不限
-        "card": 3,
+        "card": 1,
         "voice": 1,
         "file": 1,
     }
@@ -1495,58 +1495,111 @@ class Main(Star):
     def _music_card(song) -> Comp.Music | None:
         """把一首歌构造成音乐分享卡。
 
-        ⚠️ **``Music`` 的 ``_type`` 必须用 ``object.__setattr__`` 设置**，
-        这是踩出来的：
+        ⚠️ **两个坑，都是实测踩出来的**
 
-        - 构造时传 ``_type=`` -> 被 pydantic **静默忽略**（参数不在模型字段里）
+        **坑一：``_type`` 只能用 ``object.__setattr__`` 设置**
+
+        - 构造时传 ``_type=`` -> 被 pydantic **静默忽略**（它不在模型字段里）
         - 实例化后赋值 ``comp._type = ...`` -> ``ValueError: "Music" object
           has no field "_type"``（被 pydantic 的 ``__setattr__`` 拦下）
         - 只有 ``object.__setattr__`` 能写进 ``__dict__``
 
-        而 AstrBot 的 respond stage **有专门的校验器读它**：
+        而 AstrBot 的 respond stage **有专门校验器读它**：
 
         - 非 custom：``comp.id and comp._type and comp._type != "custom"``
         - custom：``comp._type == "custom" and comp.url and comp.audio and comp.title``
 
         `_type` 缺失时**访问本身就抛 ``AttributeError``**，整条消息发不出去。
 
+        **坑二：``_type`` 的取值决定 QQ 会不会展示**
+
+        ============  ==========================================
+        ``_type``      实际效果
+        ============  ==========================================
+        ``qq``         QQ 音乐官方卡片 —— **最可靠**
+        ``163``        网易云卡片，QQ 客户端支持不一，常提示
+                       「发送者版本过低不展示」
+        ``custom``     自定义卡片，需要 ark 签名，QQ 基本不认
+        ============  ==========================================
+
+        所以 QQ 音乐优先走 ``qq`` + **数字 songid**（不是 ``mid``！）；
+        拿不到 songid 才退回 ``custom``。
+
         返回 ``None`` 表示这首歌构造不出合法卡片（调用方应跳过）。
         """
-        if song.platform == "netease":
-            sid = song.song_id if song.song_id.isdigit() else "0"
-            comp = Comp.Music(id=int(sid))
-            object.__setattr__(comp, "_type", "163")
+        if song.platform == "qqmusic":
+            songid = song.extra.get("songid")
+            try:
+                sid = int(songid) if songid else 0
+            except (TypeError, ValueError):
+                sid = 0
+            if sid > 0:
+                # 官方卡片：只需要数字 songid，不需要 url/audio
+                comp = Comp.Music(id=sid)
+                object.__setattr__(comp, "_type", "qq")
+                return comp
+
+            # 没有 songid 只能走 custom：url + audio + title 三个必须都有
+            if not (song.play_url and song.page_url and song.name):
+                return None
+            comp = Comp.Music(
+                url=song.page_url,
+                audio=song.play_url,
+                title=song.name,
+                content=song.artist,
+                image=song.cover,
+            )
+            object.__setattr__(comp, "_type", "custom")
             return comp
 
-        # QQ 音乐走 custom 模式：url + audio + title 三个都必须有
-        if not (song.play_url and song.page_url and song.name):
-            return None
-        comp = Comp.Music(
-            url=song.page_url,
-            audio=song.play_url,
-            title=song.name,
-            content=song.artist,
-            image=song.cover,
-        )
-        object.__setattr__(comp, "_type", "custom")
+        # 网易云：用它自己的 songid 走 163 卡片
+        sid = song.song_id if song.song_id.isdigit() else "0"
+        comp = Comp.Music(id=int(sid))
+        object.__setattr__(comp, "_type", "163")
         return comp
 
-    async def cmd_music_search(self, event: AstrMessageEvent):
-        """``#点歌 <关键词>`` —— 搜索歌曲并按配置的发送方式送出。
+    @staticmethod
+    def _music_card_needs_url(song) -> bool:
+        """这张卡片是否**需要先取直链**。
 
-        发送方式由 ``music.sendMode`` 决定：
+        QQ 音乐走官方 ``qq`` 卡片时只需要 songid，直链是完全多余的 ——
+        少一次请求（还顺带躲开 QQ 音乐的随机限流）。只有退回 ``custom``
+        模式才需要 audio 直链。
+        """
+        if song.platform != "qqmusic":
+            return False
+        songid = song.extra.get("songid")
+        try:
+            return not (int(songid) > 0 if songid else False)
+        except (TypeError, ValueError):
+            return True
+
+    async def cmd_music_search(self, event: AstrMessageEvent):
+        """``点歌 <关键词>`` —— 搜索歌曲并按配置的发送方式送出。
+
+        **指令格式**（正则与 ``COMMAND_RULES`` 共用一份，见
+        ``core/constants.py::MUSIC_COMMAND_PATTERN``）：
+
+        ==========================  ==============================
+        输入                         行为
+        ==========================  ==============================
+        ``点歌 晴天``                用配置里的「默认平台」
+        ``网易云点歌 晴天``           强制网易云
+        ``QQ点歌 晴天``              强制 QQ 音乐
+        ``#点歌 网易云 晴天``         平台写在后面也认
+        ==========================  ==============================
+
+        **平台选择**：命令里写了平台（无论前后）就用它，**不会**偷换成别的；
+        没写才用配置的「默认平台」，且**该平台搜不到时自动试另一个**
+        （群里体验优先，不然用户会以为点歌坏了）。
+
+        **发送方式**由 ``music.sendMode`` 决定：
 
         - ``link``：列出「歌名 - 歌手 + 播放页链接」（最稳，零额外请求）
-        - ``card``：发音乐分享卡（网易云走 ``_type=163``，QQ音乐走 ``custom``）
+        - ``card``：发音乐分享卡（QQ 音乐走官方 ``qq`` 卡片，网易云走 ``163``）
         - ``voice``：下载音频后以语音条发出（受 WAV 体积限制，见
           ``_MUSIC_VOICE_MAX_SECONDS``）
-        - ``file``：以群文件形式发音频（``Comp.File`` + URL，协议端自己去拉，
-          不占本地带宽也不受 WAV 限制）
-
-        平台选择：
-        - 命令里写了前缀（``#点歌 网易云 晴天``）→ 只搜那个平台
-        - 没写 → 用配置的 ``music.platform``；**若该平台没结果，
-          自动试另一个**（群里体验优先，不然用户会以为点歌坏了）
+        - ``file``：以群文件形式发音频（``Comp.File`` + URL，协议端自己去拉）
         """
         if not self.conf_get("music.enable", False):
             yield event.plain_result(
@@ -1556,17 +1609,21 @@ class Main(Star):
             return
 
         text = event.get_message_str().strip()
-        m = re.search(
-            r"^(?:#|/)?点歌\s*(网易云|网抑云|网易|QQ音乐|qq音乐|QQ|qq)?\s*(.+)$",
-            text,
-        ) if "点歌" in text else None
+        if "点歌" not in text:
+            return
+        m = re.search(MUSIC_COMMAND_PATTERN, text, re.IGNORECASE | re.MULTILINE)
         if not m:
             return
 
-        platform_key = self._MUSIC_PREFIX.get(m.group(1) or "")
-        keyword = (m.group(2) or "").strip()
+        # 平台写在「点歌」前面或后面都认，**前面优先**
+        platform_raw = (m.group("pre") or m.group("post") or "").strip()
+        platform_key = self._MUSIC_PREFIX.get(platform_raw.lower())
+        keyword = (m.group("kw") or "").strip()
         if not keyword:
-            yield event.plain_result("🎵 用法：`#点歌 歌名`（可加平台，如 `#点歌 QQ音乐 晴天`）")
+            yield event.plain_result(
+                "🎵 用法：`点歌 歌名`\n"
+                "指定平台：`网易云点歌 歌名` / `QQ点歌 歌名`"
+            )
             return
 
         limit = int(self.conf_get("music.maxList", 10) or 10)
@@ -1593,12 +1650,12 @@ class Main(Star):
                     f"🎵 QQ音乐接口忙，没搜到「{keyword}」。\n"
                     "这是接口的随机限流（重试几次通常会好），可以：\n"
                     "· 稍后再试一次\n"
-                    f"· 换网易云：`#点歌 网易云 {keyword}`"
+                    f"· 换网易云：`网易云点歌 {keyword}`"
                 )
             else:
                 yield event.plain_result(
                     f"🎵 没搜到「{keyword}」。\n"
-                    "换个关键词试试，或指定平台：`#点歌 QQ音乐 歌名`"
+                    "换个关键词试试，或指定平台：`QQ点歌 歌名`"
                 )
             return
 
@@ -1611,29 +1668,33 @@ class Main(Star):
                 yield item
             return
 
-        # card / voice / file 都需要先拿到直链
+        # card / voice / file 每条都是独立消息，按上限取前 N 首
         per = self._MUSIC_SEND_LIMIT[mode]
         targets = songs if per == 0 else songs[:per]
 
-        pick = targets[0] if targets else None
-        if mode == "card":
-            yield event.plain_result(f"🎵 {label} · 点歌「{keyword}」")
-        elif pick is not None:
+        # 只有 voice / file 需要「正在准备」提示（它们要下载音频，有等待感）。
+        # card 直接发卡片——卡片本身带歌名歌手，再补一条文字纯属重复刷屏。
+        if mode in ("voice", "file") and targets:
             yield event.plain_result(
-                f"🎵 {label} · 点歌「{keyword}」\n正在准备「{pick.label}」…"
+                f"🎵 {label} · 点歌「{keyword}」\n正在准备「{targets[0].label}」…"
             )
 
         sent = 0
         for song in targets:
-            song.play_url = await self._music_resolve_url(song)
             if mode == "card":
+                # QQ 音乐走官方 qq 卡片时只要 songid，直链是多余的 ——
+                # 少一次请求，顺带躲开 QQ 音乐的随机限流
+                if self._music_card_needs_url(song):
+                    song.play_url = await self._music_resolve_url(song)
                 comp = self._music_card(song)
                 if comp is None:
+                    logger.info(f"[R插件] 点歌「{song.label}」构造不出卡片，跳过")
                     continue
                 yield event.chain_result([comp])
                 sent += 1
                 continue
 
+            song.play_url = await self._music_resolve_url(song)
             if not song.play_url:
                 continue
 

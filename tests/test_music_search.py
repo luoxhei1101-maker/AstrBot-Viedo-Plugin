@@ -204,27 +204,61 @@ def regex_check() -> None:
     if not rule:
         return
 
-    pat = rule["pattern"]
-    should_match = [
-        "#点歌 晴天",
-        "点歌 晴天",
-        "/点歌 晴天",
-        "#点歌 网易云 晴天",
-        "#点歌 QQ音乐 晴天",
-        "#点歌 qq 晴天",
-        "#点歌   稻香",  # 多空格
-    ]
-    should_not = [
-        "#点歌",       # 没有关键词
-        "随便说点什么",
-        "",
-    ]
-    for text in should_match:
-        check(bool(re.search(pat, text, re.I | re.M)), f"命中 {text!r}")
-    for text in should_not:
-        check(not re.search(pat, text, re.I | re.M), f"不命中 {text!r}")
-
     check(rule["admin"] is False, "点歌不需要管理员权限")
+
+    pat = ms_pattern()
+    # (输入, 期望的平台 key 或 None, 期望的关键词)
+    cases: list[tuple[str, str | None, str | None]] = [
+        # 不带平台 -> 用配置默认（platform 为 None）
+        ("点歌 晴天", None, "晴天"),
+        ("点歌晴天", None, "晴天"),
+        ("#点歌 晴天", None, "晴天"),
+        ("/点歌 晴天", None, "晴天"),
+        # 平台写在「点歌」前面（本次新增，主推用法）
+        ("网易云点歌 晴天", "netease", "晴天"),
+        ("网易点歌 稻香", "netease", "稻香"),
+        ("网抑云点歌 稻香", "netease", "稻香"),
+        ("QQ点歌 晴天", "qqmusic", "晴天"),
+        ("qq点歌 晴天", "qqmusic", "晴天"),
+        ("Qq点歌 晴天", "qqmusic", "晴天"),      # 大小写混写
+        ("QQ音乐点歌 稻香", "qqmusic", "稻香"),
+        ("网易云 点歌 晴天", "netease", "晴天"),   # 平台和「点歌」之间有空格
+        # 平台写在后面（向后兼容早期写法）
+        ("#点歌 网易云 晴天", "netease", "晴天"),
+        ("#点歌 QQ音乐 晴天", "qqmusic", "晴天"),
+    ]
+    for text, want_plat, want_kw in cases:
+        m = re.search(pat, text, re.I | re.M)
+        if not m:
+            check(False, f"命中 {text!r}")
+            continue
+        pre = (m.group("pre") or "").strip()
+        post = (m.group("post") or "").strip()
+        raw = (pre or post).lower()
+        got_plat = {"网易云": "netease", "网抑云": "netease", "网易": "netease",
+                    "qq音乐": "qqmusic", "qq": "qqmusic"}.get(raw)
+        got_kw = (m.group("kw") or "").strip()
+        check(
+            got_plat == want_plat and got_kw == want_kw,
+            f"{text!r} -> 平台={got_plat} 关键词={got_kw!r}（期望 {want_plat} / {want_kw!r}）",
+        )
+
+    # 不该命中的
+    for text in ("点歌", "随便说点什么", "", "我今天点歌"):  # 「我今天点歌」不以點歌开头
+        check(
+            not re.search(pat, text, re.I | re.M),
+            f"不命中 {text!r}",
+        )
+
+
+def ms_pattern() -> str:
+    """取点歌命令的正则（与 COMMAND_RULES 共用同一份）。"""
+    from astrbot_plugin_rconsole.core.constants import MUSIC_COMMAND_PATTERN
+
+    rule = next(r for r in COMMAND_RULES if r["handler"] == "music_search")
+    check(rule["pattern"] == MUSIC_COMMAND_PATTERN,
+          "COMMAND_RULES 与 main.py 共用同一份正则（未各写一份）")
+    return MUSIC_COMMAND_PATTERN
 
 
 # ==========================================================================
