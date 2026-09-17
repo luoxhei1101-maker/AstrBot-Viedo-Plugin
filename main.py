@@ -1544,7 +1544,16 @@ class Main(Star):
         )
 
     def _take_music_pick(self, event: AstrMessageEvent):
-        """取该会话的候选列表；没有或已过期返回 None。"""
+        """**只读**该会话的候选列表（不消费）；没有或已过期返回 None。
+
+        真正「用掉」会话要显式调 ``_forget_music_pick()``。分成两步是为了
+        区分两种情况：
+
+        - **序号越界**：什么都没播，会话要留着让用户重试
+        - **点播成功**：立刻清掉，否则同一个序号可以无限重发（真正踩过的 bug）
+
+        过期会话顺手清掉，避免长期堆积（会话量 = 活跃群数，很小）。
+        """
         item = self._music_sessions.get(event.unified_msg_origin)
         if not item:
             return None
@@ -1552,6 +1561,15 @@ class Main(Star):
             self._music_sessions.pop(event.unified_msg_origin, None)
             return None
         return item
+
+    def _forget_music_pick(self, event: AstrMessageEvent) -> None:
+        """清掉该会话的候选列表。
+
+        ⚠️ 必须在**决定要播出之后、任何 ``await`` 之前**同步调用。
+        asyncio 是单线程事件循环，这段没有让出点，所以「连点两次序号」
+        产生的两个事件里，第二个拿到的必然已是空会话 —— 不会重复发歌。
+        """
+        self._music_sessions.pop(event.unified_msg_origin, None)
 
     def _music_send_mode(self) -> str:
         """配置里选的发送方式。认不出的一律回退到最稳的 link。"""
@@ -1811,6 +1829,9 @@ class Main(Star):
 
         **只在存在有效会话时响应**：没有会话直接返回，不干扰群里的普通数字
         消息（也不会 stop_event，其他处理器照常工作）。
+
+        **序号是一次性的**：点播成功后立刻清掉会话，再发同一个序号就静默
+        无响应（要再点播得重新搜一次）。序号越界**不**清会话，方便重试。
         """
         if not self.conf_get("music.enable", False):
             return
@@ -1833,6 +1854,10 @@ class Main(Star):
             return
 
         song = songs[index - 1]
+        # 立刻消费掉会话：序号是**一次性**的，再发一次就静默无响应。
+        # 必须在这里（任何 await 之前）同步清 —— 否则同一个序号能无限重发，
+        # 而且连点两次会各播一遍。
+        self._forget_music_pick(event)
         logger.info(f"[R插件] 序号点播「{keyword}」#{index} -> {song.label}")
 
         mode = self._music_send_mode()
