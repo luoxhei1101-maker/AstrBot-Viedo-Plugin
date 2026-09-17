@@ -142,6 +142,61 @@ def static_checks() -> None:
 
 
 # ======================================================================
+# 1b. 静态检查：视频必须走 base64，不能 fromFileSystem（跨容器问题）
+# ======================================================================
+def cross_container_checks() -> None:
+    """AstrBot 的 aiocqhttp 适配器对 Video **不转 base64**，原样传 file:// 路径。
+
+    当 AstrBot 和协议端（NapCat 等）跑在两个容器、无共享挂载时，协议端
+    ``realpath`` 那个路径必然 ENOENT，整条消息链发送失败 —— 现象就是「视频
+    发不出来」。实测本项目的 astrbot / snowluma 容器无任何共享挂载。
+
+    所以**发视频必须用 base64**（和 Image/Record 的处理方式对齐）。
+    """
+    main_py = _ROOT / "main.py"
+
+    # 用 AST 剥掉所有注释与文档字符串，只看真实代码里还有没有该调用
+    tree = ast.parse(main_py.read_text(encoding="utf-8"))
+    code_calls = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            # 形如 Comp.Video.fromFileSystem
+            if node.attr == "fromFileSystem":
+                chain = []
+                cur = node
+                while isinstance(cur, ast.Attribute):
+                    chain.append(cur.attr)
+                    cur = cur.value
+                if isinstance(cur, ast.Name):
+                    chain.append(cur.id)
+                dotted = ".".join(reversed(chain))
+                if dotted == "Comp.Video.fromFileSystem":
+                    code_calls.append(f"line {node.lineno}")
+    check("真实代码里不存在 Comp.Video.fromFileSystem 调用", code_calls, [])
+
+    # 必须有 _video_component 且内部用 fromBase64
+    vc = _method_source(main_py, "_video_component")
+    check_true("_video_component 方法存在", vc)
+    check_true(
+        "_video_component 用 fromBase64（跨容器安全）",
+        "fromBase64" in vc,
+    )
+    check_true(
+        "_video_component 会先检查文件是否存在（避免 ENOENT）",
+        "is_file()" in vc or "exists()" in vc,
+    )
+
+    # 所有发视频的地方都要经过 _video_component
+    for method in ("_render", "_send_album"):
+        body = _method_source(main_py, method)
+        check(
+            f"{method} 不含裸 Comp.Video.fromFileSystem",
+            "Comp.Video.fromFileSystem" in body,
+            False,
+        )
+
+
+# ======================================================================
 # 2. 下载器行为：候选回退（第一个 403 时自动换下一个）
 # ======================================================================
 def downloader_checks() -> None:
@@ -231,6 +286,10 @@ def send_path_checks() -> None:
         @classmethod
         def fromFileSystem(cls, path):
             return cls(path=path)
+
+        @classmethod
+        def fromBase64(cls, data):
+            return cls(file=f"base64://{data}")
 
         def __repr__(self):
             return f"{type(self).__name__}({self.kw})"
@@ -461,6 +520,8 @@ async def _collect(fn, *args):
 def main() -> int:
     print("--- 1. 静态检查（发送路径不得远程直发）---")
     static_checks()
+    print("\n--- 1b. 跨容器：视频必须走 base64 ---")
+    cross_container_checks()
     print("\n--- 2. 下载器候选回退 ---")
     downloader_checks()
     print("\n--- 3. 图集发送路径（只发本地文件）---")

@@ -1,5 +1,59 @@
 # 更新日志
 
+## v1.1.6（2026-09-17）
+
+### 修复
+
+- **B 站（及其它走 DASH 合并的）视频发不出来**，日志报
+  `Failed to send the message chain ... ENOENT: no such file or directory,
+  realpath '/tmp/astrbot_plugin_rconsole/merge/xxx.mp4'`。
+
+  **根因：AstrBot 与协议端是两个容器、没有任何共享挂载。** 实测本项目的部署
+  环境：
+
+  - `astrbot` 容器只挂了 `/www/server/astrbot/data -> /AstrBot/data`
+  - `snowluma`(NapCat) 容器挂的是自己的三个 volume
+  - 两边**没有任何共享目录**（在 astrbot 里写 `/AstrBot/data/temp/x`，
+    NapCat 里读不到）
+
+  而 AstrBot 的 aiocqhttp 适配器对不同组件的处理**不一样**：
+
+  | 组件 | 适配器行为 | 跨容器 |
+  |---|---|---|
+  | `Image` / `Record` | 转 `base64://` 再发 | ✅ |
+  | `Video` | **原样传 `file:///path`** | ❌ |
+
+  所以图片一直能发（走 base64），而视频把 `file:///tmp/.../xxx.mp4` 原样交给
+  NapCat，NapCat 去 `realpath` 这个路径必然 ENOENT，**整条消息链失败**。
+
+  **修复**：新增 `main._video_component()`，视频统一用
+  `Comp.Video.fromBase64()` 构造（和图片的处理方式对齐），并先检查文件是否
+  存在。所有发视频的地方（B 站合并产物、`local_videos`、`send_mode=download`、
+  抖音图集动图的直发/限流/合并转发三档）全部改走它。
+
+  代价是消息体膨胀约 33%（base64 编码开销），但这是**唯一能跨容器送达的
+  方式**。`tests/test_album_send_path.py` 用 AST 断言锁死「真实代码里不得出现
+  `Comp.Video.fromFileSystem`」。
+
+- **快手链接完全不触发**（日志里连"跳过"都没有）。原因不是识别正则 —— 实测
+  `v.kuaishou.com/xxx` 能正常命中 `kuaishou` 规则 —— 而是服务器配置的
+  `plugin.enabled_platforms` 里**没有 `kuaishou`**。`_dispatch` 里
+  `candidate.key not in enabled` 会直接 `continue`，而**日志打点在这个判断
+  之后**，所以排查时日志里没有任何痕迹。
+
+  **修复**：把这类静默跳过改成显式日志：
+
+  - 未命中任何平台规则 → `[R插件] 链接未命中任何平台规则，跳过: ...`
+  - 命中但平台未启用 → `[R插件] xxx 未在 plugin.enabled_platforms 里启用，跳过（可在 WebUI 插件配置里勾选）: ...`
+  - 命中但在黑名单 → `[R插件] xxx 在全局黑名单里，跳过: ...`
+
+  （服务器配置已同步加上 `kuaishou`。）
+
+### 新增
+
+- `tests/test_album_send_path.py` 新增「跨容器：视频必须走 base64」一节
+  （6 项断言），锁定视频发送方式，防止回退。
+
 ## v1.1.5（2026-09-17）
 
 ### 修复

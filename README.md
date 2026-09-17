@@ -165,11 +165,39 @@ aiocqhttp（QQ OneBot）、Telegram、Discord、飞书 / Lark、企业微信、Q
 | 配置 | 默认 | 说明 |
 |---|---|---|
 | `plugin.enable` | 开 | 总开关 |
-| `plugin.enabled_platforms` | 抖音/B站/通用/微博… | 只对勾选的平台生效 |
+| `plugin.enabled_platforms` | 抖音/B站/通用/微博… | 只对勾选的平台生效。**没勾的平台链接会被静默跳过**（日志里会明确写「未在 plugin.enabled_platforms 里启用」），比如快手默认不在列表里，要用记得勾上 |
 | `plugin.send_mode` | 直发链接 | `url`=直接发地址（快）；`download`=先下本地再发（稳） |
 | `plugin.max_images` | 9 | 图集超过这个数就合并成「聊天记录」完整发送 |
 | `plugin.download_concurrency` | 8 | 媒体并发下载数 |
 | `plugin.album_forward_when_exceed` | 开 | 图集超限是否用合并转发 |
+
+---
+
+## 部署形态：AstrBot 与协议端是否同容器
+
+**这决定了视频能不能发出来。**
+
+插件发出的视频会先落到 AstrBot 自己的临时目录，再交给协议端（NapCat /
+Lagrange / go-cqhttp 等）上传。AstrBot 的 aiocqhttp 适配器对组件处理不同：
+
+| 组件 | 适配器行为 | 跨容器 |
+|---|---|---|
+| 图片 / 语音 | 转 `base64://` 再发（自带数据） | ✅ |
+| 视频 | 早期版本**原样传 `file://` 路径**，协议端得自己去读 | ❌ |
+
+所以：
+
+- **AstrBot 和协议端在同一个容器**（或共享了挂载）→ 一切正常。
+- **两个独立容器且没有共享目录**（本项目实测的部署形态）→ 旧版视频必然报
+  `ENOENT: no such file or directory, realpath '/tmp/.../xxx.mp4'`，
+  整条消息链失败，用户看到「视频没发出来」。
+
+**v1.1.6 已改成视频也走 base64**，不再依赖协议端能读到文件路径，两种部署
+形态都能发。代价是消息体膨胀约 33%（base64 开销）。
+
+> 如果你的部署里视频体积很大、又恰好是**同容器/共享挂载**，并且希望省掉
+> base64 开销，可以在 `plugin.send_mode=url` 下让它直接发直链 —— 但抖音等
+> 平台有防盗链，直链大概率 403，不推荐。
 
 ---
 

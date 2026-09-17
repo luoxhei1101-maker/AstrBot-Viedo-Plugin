@@ -550,10 +550,24 @@ class Main(Star):
 
             if forced_resolver is None:
                 candidate: PlatformRule | None = match_rule(url, AUTO_RULES)
-                if not candidate or candidate.key not in enabled:
+                if not candidate:
+                    logger.info(
+                        f"[R插件] 链接未命中任何平台规则，跳过: {url[:100]}"
+                    )
+                    continue
+                if candidate.key not in enabled:
+                    # 这条日志很重要：用户反馈「某平台没触发」时，绝大多数情况
+                    # 是这里被 enabled_platforms 过滤掉了。以前不打日志，排查时
+                    # 日志里完全没有痕迹，只能去翻配置。
+                    logger.info(
+                        f"[R插件] {candidate.name} 未在 plugin.enabled_platforms "
+                        f"里启用，跳过（可在 WebUI 插件配置里勾选）: {url[:80]}"
+                    )
                     continue
                 if candidate.name in blacklist:
-                    logger.debug(f"[R插件] {candidate.name} 在全局黑名单里，跳过")
+                    logger.info(
+                        f"[R插件] {candidate.name} 在全局黑名单里，跳过: {url[:80]}"
+                    )
                     continue
                 resolver = candidate.resolver
                 platform_name = candidate.name
@@ -649,7 +663,10 @@ class Main(Star):
                     tag=f"bili_{result.extra.get('bvid', 'x')}",
                 )
                 event.track_temporary_local_file(str(merged))
-                yield event.chain_result([Comp.Video.fromFileSystem(str(merged))])
+                comp = self._video_component(merged)
+                if comp is None:
+                    raise MergeError(f"合并产物不可读: {merged}")
+                yield event.chain_result([comp])
                 sent_media = True
                 skip_images = True  # 视频已发，封面图不再单独发
             except MergeError as exc:
@@ -670,7 +687,10 @@ class Main(Star):
             # 登记给 AstrBot，事件结束后自动回收
             event.track_temporary_local_file(path)
             try:
-                yield event.chain_result([Comp.Video.fromFileSystem(path)])
+                comp = self._video_component(path)
+                if comp is None:
+                    raise RuntimeError(f"视频文件不可读: {path}")
+                yield event.chain_result([comp])
                 sent_media = True
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[R插件] 发送本地视频失败: {exc}")
@@ -700,9 +720,10 @@ class Main(Star):
             if local_path:
                 event.track_temporary_local_file(local_path)
                 try:
-                    yield event.chain_result(
-                        [Comp.Video.fromFileSystem(local_path)]
-                    )
+                    comp = self._video_component(local_path)
+                    if comp is None:
+                        raise RuntimeError(f"视频文件不可读: {local_path}")
+                    yield event.chain_result([comp])
                     sent_media = True
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(f"[R插件] 发送下载后的视频失败: {exc}")
@@ -877,6 +898,47 @@ class Main(Star):
             return "音频"
         return ""
 
+    def _video_component(self, path: str | Path):
+        """把一个本地视频文件变成可跨容器发送的 ``Comp.Video``。
+
+        **为什么不能直接用 ``Comp.Video.fromFileSystem``？**
+
+        AstrBot 的 aiocqhttp 适配器（``aiocqhttp_message_event.py``）对不同
+        组件处理方式不一样::
+
+            Image / Record  ->  转 base64 再发（跨容器安全）
+            Video           ->  原样传 file:///path（依赖协议端能读到该路径）
+
+        也就是说 **``fromFileSystem`` 生成的 ``file:///tmp/xxx.mp4`` 会被原样
+        交给协议端**。当 AstrBot 和协议端（NapCat / Lagrange 等）跑在**两个
+        容器**里、又没有共享挂载时，协议端 `realpath` 这个路径必然
+        ``ENOENT``，整个消息链发送失败 —— 用户看到的现象是「视频没发出来」，
+        日志里是 ``Failed to send the message chain: ENOENT realpath ...``。
+
+        实测本项目的部署环境就是这种：``astrbot`` 容器只挂了
+        ``/AstrBot/data``，``snowluma``(NapCat) 容器挂的是自己的三个 volume，
+        两边**没有任何共享目录**。图片一直能发正是因为走了 base64。
+
+        所以视频也走 ``fromBase64``：把文件读成 base64 内嵌进消息，协议端直接
+        解码，不依赖文件路径。代价是消息体膨胀约 33%（base64 编码开销），
+        但这是**唯一能跨容器送达的方式**。
+
+        Returns:
+            可发送的 ``Comp.Video``；文件不存在时返回 ``None``。
+        """
+        import base64
+
+        p = Path(path)
+        try:
+            if not p.is_file():
+                logger.warning(f"[R插件] 视频文件不存在，无法发送: {p}")
+                return None
+            data = base64.b64encode(p.read_bytes()).decode("ascii")
+            return Comp.Video.fromBase64(data)
+        except OSError as exc:
+            logger.warning(f"[R插件] 读取视频失败 {p}: {exc}")
+            return None
+
     async def _download_album_stills(
         self, result: ResolveResult, still_images: list[str]
     ) -> list[Path | None]:
@@ -1012,10 +1074,11 @@ class Main(Star):
                     if vi < len(anim_paths):
                         path = anim_paths[vi]
                         if path is not None:
-                            try:
-                                chain.append(Comp.Video.fromFileSystem(str(path)))
-                            except Exception as exc:  # noqa: BLE001
-                                logger.warning(f"[R插件] 本地动图构造失败: {exc}")
+                            comp = self._video_component(path)
+                            if comp is not None:
+                                chain.append(comp)
+                            else:
+                                logger.warning(f"[R插件] 本地动图不可读: {path}")
                         vi += 1
                 else:
                     if ii < len(still_paths):
@@ -1053,11 +1116,12 @@ class Main(Star):
                     path = anim_paths[vi]
                     vi += 1
                     if path is not None:
-                        try:
-                            chain.append(Comp.Video.fromFileSystem(str(path)))
+                        comp = self._video_component(path)
+                        if comp is not None:
+                            chain.append(comp)
                             sent += 1
-                        except Exception as exc:  # noqa: BLE001
-                            logger.warning(f"[R插件] 本地动图构造失败: {exc}")
+                        else:
+                            logger.warning(f"[R插件] 本地动图不可读: {path}")
                 elif kind == "still" and ii < len(still_paths):
                     path = still_paths[ii]
                     ii += 1
@@ -1089,17 +1153,13 @@ class Main(Star):
                 if path is None:
                     skipped += 1
                     continue
-                try:
-                    nodes.append(
-                        Comp.Node(
-                            [Comp.Video.fromFileSystem(str(path))],
-                            name=node_name,
-                            uin=node_uin,
-                        )
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(f"[R插件] 转发节点动图构造失败: {exc}")
+                comp = self._video_component(path)
+                if comp is None:
                     skipped += 1
+                else:
+                    nodes.append(
+                        Comp.Node([comp], name=node_name, uin=node_uin)
+                    )
             else:
                 if ii >= len(still_paths):
                     continue
