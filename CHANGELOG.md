@@ -1,5 +1,96 @@
 # 更新日志
 
+## v1.2.0（2026-09-17）
+
+新增 **点歌搜索**：`#点歌 歌名` 搜歌并列出候选（歌名 + 歌手 + 播放页链接）。
+支持网易云 / QQ音乐，两者**取直链都经过真实会员账号实测**。
+
+### 新增
+
+- **`#点歌 <关键词>`** —— 搜索并列出候选（默认取配置里的平台）。
+  命令里可指定平台：`#点歌 网易云 晴天` / `#点歌 QQ音乐 晴天`。
+  列表长度由「点歌列表长度」配置控制（默认 10，上限 20）。
+
+  输出只发文字 + 网页链接，**不发音频本体**——不占带宽、不用转码，
+  QQ 音乐配了会员 Cookie 后链接点开就是完整版。
+
+  平台选择逻辑：命令里写了前缀就只搜那个平台（尊重用户选择，不 fallback）；
+  没写则用配置的 `songRequestPlatform`，**该平台无结果时自动试另一个**。
+
+- **`core/music_search.py`** —— 新模块。移植自 TRSS-Yunzai 的
+  `xiaofei-plugin`（`apps/点歌.js`）的多平台抽象思路，但修正了它几处
+  **已经失效**的取数路径（详见下）。
+
+### 关键实测结论（这些决定了实现方式）
+
+- **QQ 音乐搜索的取数路径已过期**。接口返回的歌曲现在装在
+  `search.data.body.item_song`（数组）里，而 `search.data.body.song.list`
+  恒为空数组。`xiaofei-plugin` 取的是后者（`apps/点歌.js:2250`），
+  所以**它的 QQ 音乐搜索现在永远返回空**——不是接口失效，是字段变了。
+  本插件两个字段都试，优先 `item_song`。
+
+- **QQ 音乐取直链必须登录态 Cookie，且必须传 `filename` 才能拿到高音质**。
+  匿名调 `CgiGetVkey` 恒返回 `result=104003`（= 需要登录/VIP）；实测带会员
+  Cookie 后周杰伦《晴天》可拿到 320kbps mp3。而**不传 `filename` 会静默降级
+  到 96kbps m4a**，所以本插件按「320mp3 → 192ogg → 128mp3 → 96aac」
+  从高到低挑第一个该曲目有资源的档位。
+
+- **不能给 `u.y.qq.com` 发 `Accept-Language` 头**。逐项隔离实测：带上它接口
+  固定返回 `search.code=2001` + 空 body；其余头（UA / Content-Type /
+  Referer / Origin / Accept）都无影响。本插件用独立的「干净头集合」，
+  避免 `core/http.py` 的 `BROWSER_HEADERS` 混进来。
+
+- **QQ 音乐的 2001 拒绝有随机性，重试才有效**。对照实验（同请求连发多次）：
+
+  | 条件 | 结果 |
+  |---|---|
+  | urllib 连发 3 次 | ✅ / ❌ / ❌ |
+  | aiohttp 每次新建 session 连发 3 次 | ❌ / ❌ / ❌ |
+  | aiohttp 复用 session 连发 3 次 | ❌ / ✅ / ✅ |
+
+  与连接方式、header、Cookie 均无关，判断是服务端多节点、部分节点限流。
+  所以**不是靠降频，而是靠重试**：默认重试 3 次、退避 1.5s 起。
+  实测 6 个关键词成功率 **5/6（83%）**、平均耗时 2.2s。
+
+- **搜索缓存是对抗限流最有效的一招**：成功一次缓存 10 分钟，期间同关键词
+  直接返回（实测 0.0ms），既不打扰接口也不会让用户看到限流失败。
+
+- **网易云完全匿名可用**。搜索和取直链都不需要 Cookie；配 `MUSIC_U` 后才能
+  解锁 VIP 歌曲的高音质直链（实测会员账号 `vipType=11` 生效）。
+
+### 配置
+
+用的是原 Guoba 面板就有的字段，**无需新增配置项**：
+
+- `netease.useNeteaseSongRequest` —— 点歌总开关（默认 false，需手动打开）
+- `netease.songRequestPlatform` —— 默认平台（`netease` / `qq`）
+- `netease.songRequestMaxList` —— 列表长度（默认 10）
+- `netease.neteaseCookie` —— 网易云 Cookie，格式 `MUSIC_U=xxx`
+- `other.qqMusicCookie` —— QQ 音乐 Cookie，**整串粘贴即可**
+
+QQ 音乐 Cookie 的字段别名会自动映射（实测确认的对应关系）：
+
+| 浏览器里常见名 | 接口要求名 |
+|---|---|
+| `uid` | `uin` |
+| `qqopenid` | `psrf_qqopenid` |
+| `qqyunionid` | `psrf_qqunionid` |
+| `qqaccess_token` | `psrf_qqaccess_token` |
+| `qm_keyst` | `qqmusic_key` |
+
+> ⚠️ `qqmusic_key` 有效期约 **12 小时**，过期后取直链会重新失败。
+> 届时重新抓一次 Cookie 即可，这是 QQ 音乐的机制。
+
+### 未实现
+
+- **酷狗**：搜索匿名可用，但老取直链接口（`wwwapi.kugou.com/play/songinfo`）
+  现在恒返 `err_code=30020`，可用替代返回的是音频流本体、没有可分享的
+  播放页链接，不适合「发链接」这种交付方式。
+- **语音发送**：`xiaofei-plugin` 发语音走 NTQQ 私有协议
+  （`e.bot.sendUni("PttStore.GroupPttUp")` + 自建 IP:port 上传），
+  AstrBot / aiocqhttp 没有这套接口，无法移植。音乐分享卡同理
+  （`OidbSvc.0xb77_9`）。
+
 ## v1.1.7（2026-09-17）
 
 性能优化版。核心目标：**缩短从「发出链接」到「看到媒体」的等待时间**。

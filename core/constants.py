@@ -172,6 +172,59 @@ NETEASE_TEMP_API = "https://www.hhlqilongzhu.cn/api/dg_wyymusic.php?gm={}&n=1&ty
 QQ_MUSIC_TEMP_API = "https://www.hhlqilongzhu.cn/api/dg_QQmusicflac.php?msg={}&n=1&type=json"
 QISHUI_MUSIC_TEMP_API = "https://api.cenguigui.cn/api/qishui/?msg={}&limit=1&type=json&n=1"
 
+# ---- 点歌搜索（网易云 / QQ音乐）----
+#
+# 接口来源：参考 TRSS-Yunzai 的 xiaofei-plugin（https://github.com/xfdown/xiaofei-plugin）
+# 的 ``apps/点歌.js``，并修正了它已经过期的取数路径（见 core/music_search.py 注释）。
+#
+# 两个平台的登录态要求不同：
+# - **网易云**：搜索 + 取直链完全匿名可用；配 ``MUSIC_U`` 才能拿 VIP 歌（fee=1）的
+#   高音质直链。
+# - **QQ音乐**：搜索匿名可用；**取直链必须有登录态 Cookie**，匿名调 ``CgiGetVkey``
+#   恒返回 ``result=104003``（= 需要登录/VIP）。Cookie 必需字段见 music_search.py
+#   的模块 docstring。musickey 只有 12 小时有效期。
+#
+# 有意**不实现**酷狗：它的搜索匿名可用，但老取直链接口
+# （``wwwapi.kugou.com/play/songinfo``）现在恒返 ``err_code=30020``，
+# 而可用替代（``m.kugou.com/api/v1/wechat/index``）返回的是音频流本体、
+# 没有可分享的 CDN 直链，不适合「发链接」这种交付方式。
+NETEASE_SEARCH_API = "http://music.163.com/api/cloudsearch/pc"
+NETEASE_SONG_URL_API = "https://interface3.music.163.com/api/song/enhance/player/url/v1"
+NETEASE_SONG_OUTER_URL = "http://music.163.com/song/media/outer/url?id={id}"
+NETEASE_SONG_PAGE = "http://music.163.com/#/song?id={id}"
+
+QQ_MUSIC_SEARCH_API = "https://u.y.qq.com/cgi-bin/musicu.fcg"
+QQ_MUSIC_VKEY_API = "https://u.y.qq.com/cgi-bin/musicu.fcg"
+QQ_MUSIC_SONG_PAGE = "https://y.qq.com/n/ryqq/songDetail/{mid}"
+
+# 网易云搜索接口要求带「PC 客户端」伪装 Cookie 才稳定返回结果
+NETEASE_SEARCH_COOKIE = "os=pc; appver=2.9.7;"
+# 网易云取直链接口要求 Android 客户端伪装（原插件也是这么带的）
+NETEASE_URL_COOKIE = "versioncode=8008070; os=android; channel=xiaomi; appver=8.8.70;"
+
+# QQ 音乐接口的 comm 块模板，照搬 xiaofei-plugin 的
+# ``music_cookies.qqmusic.body``。取直链时把登录凭据合并进 ``comm``。
+# ``guid`` 在运行时按 uin 重算，这里给个占位。
+QQ_MUSIC_BODY_TEMPLATE: dict = {
+    "comm": {
+        "_channelid": "19",
+        "_os_version": "6.2.9200-2",
+        "authst": "",
+        "ct": "19",
+        "cv": "1891",
+        "guid": "00000000000000000000000000000000",
+        "patch": "118",
+        "psrf_access_token_expiresAt": 0,
+        "psrf_qqaccess_token": "",
+        "psrf_qqopenid": "",
+        "psrf_qqunionid": "",
+        "tmeAppID": "qqmusic",
+        "tmeLoginType": 2,
+        "uin": "0",
+        "wid": "0",
+    }
+}
+
 # ---- 微信视频号 / 元宝 ----
 WXCHANNEL_YUANBAO_PARSE = "https://yuanbao.tencent.com/api/weixin/get_parse_result"
 WXCHANNEL_FEED_INFO = "https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info"
@@ -466,6 +519,16 @@ COMMAND_RULES: tuple[dict, ...] = (
     {"key": "neteaseScan", "name": "网易云扫码", "pattern": r"^#(?:rnq|RNQ|rncq|RNCQ)$", "handler": "netease_scan", "admin": True},
     {"key": "kugouStatus", "name": "酷狗状态", "pattern": r"^#(?:酷狗状态|rks|RKS)$", "handler": "kugou_status", "admin": True},
     {"key": "kugouScan", "name": "酷狗扫码", "pattern": r"^#(?:rkq|RKQ)$", "handler": "kugou_scan", "admin": True},
+    # 点歌搜索。注意 pattern 里 `点歌` 后面必须跟内容（`(.+)`），否则单独一个
+    # 「点歌」会命中并回一条空搜索；`(?:网易云|QQ|qq)?` 是可选平台前缀，
+    # 不写就默认按「网易云 → QQ音乐」依次尝试。
+    {
+        "key": "musicSearch",
+        "name": "点歌搜索",
+        "pattern": r"^(?:#|/)?点歌\s*(?:网易云|网抑云|网易|QQ音乐|qq音乐|QQ|qq)?\s*(.+)$",
+        "handler": "music_search",
+        "admin": False,
+    },
 )
 
 

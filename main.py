@@ -82,6 +82,10 @@ from .core.downloader import (
 from .core.external import describe_environment, find_tool
 from .core.http import HttpError, close_session as close_http_session
 from .core.media import MergeError, merge_dash
+from .core.music_search import (
+    PLATFORM_LABELS,
+    search as music_search,
+)
 from .platforms import ResolveResult, call
 from .platforms import names as resolver_names
 
@@ -169,6 +173,9 @@ class BiliMiniappFilter(CustomFilter):
 _LOCAL_COMMAND_METHODS: dict[str, str] = {
     "bili_scan": "cmd_bili_scan",
     "bili_state": "cmd_bili_state",
+    # 点歌搜索：要读配置里的 Cookie + 按平台搜索，不适合走「链接 -> 媒体」
+    # 那套 resolver 接口（resolver 的入参是 URL，而这里是关键词）。
+    "music_search": "cmd_music_search",
 }
 
 # 自动识别用的合并正则。必须是模块级常量——装饰器在类定义时求值，
@@ -192,6 +199,10 @@ _COOKIE_FIELDS: dict[str, str] = {
     "miyoushe": "other.miyousheCookie",
     "weixinChannel": "other.weixinChannelYuanbaoCookie",
     "xiaoheihe": "xiaoheihe.xiaoheiheCookie",
+    # 点歌用。网易云只要 MUSIC_U；QQ音乐要一整串（含 qqmusic_key），
+    # 详见 core/music_search.py 的模块 docstring。
+    "netease": "netease.neteaseCookie",
+    "qqmusic": "other.qqMusicCookie",
 }
 
 
@@ -1409,6 +1420,113 @@ class Main(Star):
         )
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
+
+    # ==================================================================
+    # 点歌搜索
+    # ==================================================================
+
+    # 命令里显式写的平台前缀 -> 内部平台 key。
+    # 不写就按配置的 songRequestPlatform 走。
+    _MUSIC_PREFIX: dict[str, str] = {
+        "网易云": "netease",
+        "网抑云": "netease",
+        "网易": "netease",
+        "qq音乐": "qqmusic",
+        "QQ音乐": "qqmusic",
+        "qq": "qqmusic",
+        "QQ": "qqmusic",
+    }
+
+    def _music_target_platform(self) -> str:
+        """配置里选的默认点歌平台。"""
+        raw = str(self.conf_get("netease.songRequestPlatform", "netease") or "netease")
+        # 配置里的选项是 netease / kugou / qq，映射到内部 key
+        return {"netease": "netease", "qq": "qqmusic", "qqmusic": "qqmusic"}.get(
+            raw, "netease"
+        )
+
+    async def cmd_music_search(self, event: AstrMessageEvent):
+        """``#点歌 <关键词>`` —— 搜索歌曲并列出候选。
+
+        输出「歌名 - 歌手 + 播放页链接」，**不发音频本体**（不占带宽、
+        不用转码）。QQ 音乐配了 Cookie 后，链接点开就是完整版。
+
+        平台选择：
+        - 命令里写了前缀（``#点歌 网易云 晴天``）→ 只搜那个平台
+        - 没写 → 用配置的 ``songRequestPlatform``；**若该平台没结果，
+          自动试另一个**（群里体验优先，不然用户会以为点歌坏了）
+        """
+        if not self.conf_get("netease.useNeteaseSongRequest", False):
+            yield event.plain_result(
+                "🎵 点歌功能未启用。\n"
+                "请在插件配置的「网易云音乐」分组里打开 **开启点歌功能**。"
+            )
+            return
+
+        text = event.get_message_str().strip()
+        m = re.search(
+            r"^(?:#|/)?点歌\s*(网易云|网抑云|网易|QQ音乐|qq音乐|QQ|qq)?\s*(.+)$",
+            text,
+        ) if "点歌" in text else None
+        if not m:
+            return
+
+        platform_key = self._MUSIC_PREFIX.get(m.group(1) or "")
+        keyword = (m.group(2) or "").strip()
+        if not keyword:
+            yield event.plain_result("🎵 用法：`#点歌 歌名`（可加平台，如 `#点歌 QQ音乐 晴天`）")
+            return
+
+        limit = int(self.conf_get("netease.songRequestMaxList", 10) or 10)
+        limit = max(1, min(limit, 20))
+
+        # 搜索。用户在命令里明确指定平台时不 fallback——尊重用户的选择，
+        # 也避免"我要网易云却给我 QQ音乐"的意外。
+        songs, used = await music_search(keyword, platform=platform_key, limit=limit)
+
+        if not songs and platform_key is None:
+            # 没指定平台且默认平台无结果 -> 试另一个
+            fallback = "qqmusic" if self._music_target_platform() == "netease" else "netease"
+            logger.info(
+                f"[R插件] 点歌「{keyword}」在默认平台无结果，回退到 {fallback}"
+            )
+            songs, used = await music_search(keyword, platform=fallback, limit=limit)
+
+        if not songs:
+            # QQ 音乐接口有随机限流（见 core/music_search.py 的说明），
+            # 重试仍失败是正常现象，提示用户重试而不是说"搜不到"。
+            if platform_key == "qqmusic" or (
+                platform_key is None and self._music_target_platform() == "qqmusic"
+            ):
+                yield event.plain_result(
+                    f"🎵 QQ音乐接口忙，没搜到「{keyword}」。\n"
+                    "这是接口的随机限流（重试几次通常会好），可以：\n"
+                    "· 稍后再试一次\n"
+                    f"· 换网易云：`#点歌 网易云 {keyword}`"
+                )
+            else:
+                yield event.plain_result(
+                    f"🎵 没搜到「{keyword}」。\n"
+                    "换个关键词试试，或指定平台：`#点歌 QQ音乐 歌名`"
+                )
+            return
+
+        label = PLATFORM_LABELS.get(used, used)
+        logger.info(f"[R插件] 点歌「{keyword}」-> {label} {len(songs)} 首")
+
+        lines = [f"🎵 {label} · 点歌「{keyword}」", ""]
+        for i, song in enumerate(songs, 1):
+            lines.append(f"{i}. {song.label}")
+            if song.page_url:
+                lines.append(f"   {song.page_url}")
+
+        # QQ 音乐没配 Cookie 时提醒一句——否则用户会奇怪"链接点开怎么只有试听"
+        if used == "qqmusic" and not self.cookie_for("qqmusic"):
+            lines.append("")
+            lines.append("💡 未配置 QQ音乐 Cookie，链接点开可能只能试听")
+
+        yield event.plain_result("\n".join(lines))
+        event.stop_event()
 
     async def cmd_bili_state(self, event: AstrMessageEvent):
         """``#RBS`` —— 查当前 B 站 Cookie 的登录状态。"""
