@@ -1,0 +1,32 @@
+# 统一用 LF 行尾 —— **不要删这个文件**
+#
+# 为什么要显式锁：
+#
+# 本仓库的核心配置 `core.autocrlf` 是 **false**，也就是 git 不做任何行尾转换、
+# 存什么就是什么。后果是只要有一个工具把文件写成 CRLF，整个文件都会被判定成
+# 「全部改动」，diff 里冒出几千行假改动，真实改动完全被淹没。
+#
+# 这不是假设——已经踩过两次：用 Python 的 `Path.write_text()` 改文件时，
+# Windows 上默认按 `\r\n` 落盘，结果 `main.py` / `README.md` /
+# `core/constants.py` / `_conf_schema.json` 全被整体重写了一遍，
+# 一次本来只有几十行的改动在 diff 里显示成 1000+ 行。
+#
+# 加了这个之后，git 在入库时统一成 LF，不再受编辑工具影响。
+#
+# 写脚本改文件时的配套做法（否则工作区里仍是 CRLF）：
+#     path.write_text(text, encoding="utf-8", newline="\n")
+#     path.write_bytes(data.replace(b"\r\n", b"\n"))
+* text=auto eol=lf
+
+# 二进制文件不要做行尾/编码转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.zip binary
+*.tar.gz binary
+*.mp3 binary
+*.mp4 binary
+*.pyc binary
