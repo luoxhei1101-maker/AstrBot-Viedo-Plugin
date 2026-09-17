@@ -11,6 +11,14 @@
 
 **当前版本：v1.5.0** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
 
+<p align="center">
+  <img src="https://q1.qlogo.cn/g?b=qq&nk=2593504303&s=640" width="104" height="104" alt="NaiLuo" />
+  <br />
+  <b>NaiLuo</b>　·　QQ 2593504303
+  <br />
+  <sub><i>「AI Agent！」</i></sub>
+</p>
+
 ---
 
 ## 亮点速览
@@ -19,7 +27,7 @@
 - **点歌**：`点歌 晴天` → 出一张列表图 → 回序号播放；网易云匿名即可用，QQ音乐配 Cookie 后 320kbps
 - **扫码登录**：`#RNQ` 网易云、`#RBQ` B站，扫码后 Cookie 自动写进配置
 - **三个状态图**：`#R菜单` 功能菜单、`#cookie状态` 一眼看清哪些 Cookie 失效、`#服务状态` 服务器负载
-- **能修的坑都修了**：跨容器发视频、抖音动图识别、音乐卡片不显示、图集 403…（详见[架构与实现](#架构与实现)）
+- **部署形态不受限**：AstrBot 与协议端是否同容器都能发视频（详见[推荐部署环境](#推荐部署环境)）
 
 ---
 
@@ -38,7 +46,7 @@
 - [Cookie 怎么填](#cookie-怎么填)
 - [支持的平台](#支持的平台)
 - [常见问题](#常见问题)
-- [架构与实现](#架构与实现)
+- [与原版的差异](#与原版的差异)
 - [开发与测试](#开发与测试)
 - [许可与致谢](#许可与致谢)
 
@@ -119,21 +127,16 @@ QQ 官方、Slack、钉钉。
 
 ### 部署形态：AstrBot 与协议端是否同容器
 
-**这决定了视频能不能发出来。**
+**两种形态都支持。**
 
-插件发出的视频先落 AstrBot 临时目录，再交给协议端（NapCat / SnowLuma / Lagrange 等）
-上传。而 aiocqhttp 适配器对各组件的处理**不一致**：
+插件发出的媒体**自带数据**交给协议端，不需要协议端去读 AstrBot 容器里的临时文件：
 
-| 组件 | 适配器行为 | 跨容器 |
-|---|---|---|
-| 图片 / 语音 | 转 `base64://`（自带数据） | ✅ |
-| 视频 | 早期版本**原样传 `file://` 路径**，协议端自己去读 | ❌ |
+| 形态 | 支持 |
+|---|---|
+| AstrBot 与协议端在**同一容器** | ✅ |
+| **两个独立容器、无共享挂载**（本项目实际的部署形态） | ✅ |
 
-所以两个**独立容器且无共享挂载**时（本项目实测的部署形态），旧版视频必然报
-`ENOENT: no such file or directory, realpath '/tmp/.../xxx.mp4'`，整条消息链失败。
-
-**v1.1.6 起视频也走 base64**，不再依赖协议端读文件路径，两种部署形态都能发。
-代价是消息体膨胀约 33%。
+代价是消息体比原始文件大约三分之一，属可接受范围。
 
 ---
 
@@ -150,8 +153,7 @@ QQ 官方、Slack、钉钉。
 | B站小程序卡片 | 从 B站 App 分享到 QQ 的小程序卡片 |
 | 快手 / 微博 / 小红书 / AcFun / 贴吧… | 对应的分享链接 |
 
-> 之所以能免 @，是因为 AstrBot 的正则过滤器**不受 `wake_prefix` 约束**
-> （见 `astrbot/core/star/filter/regex.py`），与原版 Yunzai 的 rule 行为一致。
+> 之所以能免 @，是因为 AstrBot 的正则过滤器**不受 `wake_prefix` 约束**，与原版 Yunzai 的 rule 行为一致。
 
 ### 命令式指令
 
@@ -196,10 +198,9 @@ QQ 官方、Slack、钉钉。
   哔哩哔哩 · 快手 · 微博 · 小红书 · 米游社 · 视频号 · 小黑盒
 ```
 
-> **两个细节**：
-> ① QQ 昵称里常见的花体字母（`𝓝𝓪𝓲𝓛𝓾𝓸`）会自动折回普通字母显示，不会出现豆腐块；
-> ② 背景接口约 2.5 秒、头像约 2 秒，三个命令都把这些请求**并行发出**，所以整体
-> 1–3 秒出图。想更快可把「图片命令的随机背景 API」留空，改用纯色底。
+> QQ 昵称里的花体字母（`𝓝𝓪𝓲𝓛𝓾𝓸`）会自动折回普通字母显示，不会出现豆腐块。
+> 三个命令都把外部请求**并行发出**，通常 1–3 秒出图；把「图片命令的随机背景 API」
+> 留空则改用纯色底，会更快。
 
 ### 点歌
 
@@ -237,37 +238,20 @@ QQ点歌 晴天          → 强制走 QQ 音乐
 | **语音条** | 下载后发语音条 | ⚠️ 只适合短音频，见下 |
 | **音频文件** | 以群文件形式发音频 | 想听整首 |
 
-#### 音乐卡片为什么需要一个小代理
+#### 音乐卡片需要配一次签名代理
 
-**卡片最初发出去只显示「发送者版本过低，无法展示内容」** —— 这不是版本问题，
-而是 token 校验失败的通用提示。链路是这样的：
-
-1. 协议端收到 OneBot 的 `music` 段后**不自己生成卡片**，而是把参数 POST 给一个外部
-   「音卡签名服务」，再把返回的 JSON 当 lightApp 发出去；
-2. 上游返回的是**双重编码**响应（外层多一层引号），而 SnowLuma 用 `resp.text()`
-   直接拿原文，于是解析出字符串而不是对象、校验失败，降级成字段残缺的本地卡片；
-3. QQ 校验 `config.token` 失败 → 提示「版本过低」。
-
-插件内置了一个**签名代理**（默认监听 `18888`）处理两件事，**都在签名之前**：
-
-- **展开双重编码响应**；
-- **按歌曲来源指定 `type`** —— 卡片品牌由这个参数决定：`type=163` → 「网易云音乐」
-  + appid `100495085`；`type=custom` → 「QQ音乐」+ appid `100497308`。
-
-> ⚠️ 关键在于**签名之后绝不能改卡片内容**。`config.token` 是**卡片内容的摘要**
-> （实测：同一内容连发 5 次 token 完全相同、连跨秒都一致；只改一个字符就立刻不同）。
-> 早期版本用「签名后改写 tag」纠正平台，结果让网易云卡片彻底发不出来 ——
-> 而且**连错误日志都没有**，只是静默不显示。
-
-**部署要点**：把协议端的 `musicSignUrl` 指向本插件：
+音乐卡片的 `token` 由协议端**外部的签名服务**签发（协议端不自己生成卡片）。
+插件内置了一个签名代理用来对接它，**部署时把协议端的 `musicSignUrl` 指过来即可**：
 
 ```jsonc
 // 协议端 config/onebot_<uin>.json 或全局 config/snowluma.json
 { "musicSignUrl": "http://astrbot:18888/" }
 ```
 
-改完重启协议端容器。端口可在「点歌」分组里改（改了两边要同步）。
-只有「发送方式 = 音乐卡片」依赖它，其他方式不受影响。
+改完**重启协议端容器**。代理端口可在「点歌」分组里改（改了两边要同步）。
+
+- 代理会自动对齐卡片品牌：网易云的歌显示「网易云音乐」，QQ 音乐的显示「QQ音乐」
+- 只有「发送方式 = 音乐卡片」依赖它，其他方式不受影响
 
 #### 两个音乐平台的差别
 
@@ -278,20 +262,15 @@ QQ点歌 晴天          → 强制走 QQ 音乐
 | Cookie 门槛 | 只要 `MUSIC_U=xxx`，**可扫码获取** | 一整串，**必须有 `qqmusic_key`** |
 | 接口稳定性 | 很稳 | **有随机限流，偶尔要重试** |
 
-> QQ 音乐接口有随机限流（实测同一请求连发结果随机，属服务端多节点负载均衡）。
-> 插件已内置 3 次重试 + 10 分钟搜索缓存，整体成功率约 83%。
+> QQ 音乐接口偶有限流，插件已内置重试与 10 分钟搜索缓存；
 > 连续失败时换 `网易云点歌 歌名` 更省事。
 
 #### 关于「语音条」的限制（重要）
 
-语音条走 AstrBot 的 `Record` 组件，而它内部**强制把音频转成未压缩 WAV**
-（44100Hz / 16bit / 单声道，约 88KB/秒），base64 之后还要再涨三分之一。
+语音条会被转成**未压缩音频**再传输，体积很大，一首正常长度的歌协议端收不下。
+所以语音条只适合**短音频**（插件内置 90 秒上限，超了会提示并改用链接）。
 
-也就是说 **1 分钟音频 ≈ 7MB 要在一条消息里传过去**，一首 4 分钟的歌接近 28MB，
-协议端基本收不下。所以：
-
-- 语音条实际只适合**短音频**（插件内置 90 秒上限，超了会提示并改用链接）
-- **想发整首请选「音频文件」或「音乐卡片」** —— 这两个不受此限制
+**想发整首请选「音频文件」或「音乐卡片」** —— 这两个不受此限制。
 
 ### 扫码登录
 
@@ -304,9 +283,6 @@ QQ点歌 晴天          → 强制走 QQ 音乐
 → Cookie **自动写进配置**，并回一条账号信息（昵称 / UID / 会员状态）确认。
 
 二维码约 3 分钟过期，超时可在配置里调（`plugin` → 「B站扫码等待超时」，默认 180 秒）。
-
-> 网易云扫码的**凭据可能出现在响应体的 `cookie` 字段，也可能在 `Set-Cookie` 头**里，
-> 两种都做了兼容。
 
 ---
 
@@ -447,7 +423,7 @@ QQ点歌 晴天          → 强制走 QQ 音乐
 —— 未命中规则 / 平台未启用 / 全局黑名单**三种跳过都会打日志**，直接看日志即可定位。
 
 **Q：第三方解析接口挂了？**
-这类接口生命周期很短，默认的通用接口里实测只有部分还活着。全挂了就去
+这类接口生命周期很短，默认的通用接口里只有部分还可用。全挂了就去
 `plugin.parse_endpoints` 换新的，不用改代码。代码对 DNS 失败做了快速失败，
 不会在死域名上白等重试。
 
@@ -455,9 +431,9 @@ QQ点歌 晴天          → 强制走 QQ 音乐
 不会。有**作品缓存**（2 小时），命中直接重发，跳过网络解析。
 
 **Q：音乐卡片显示「发送者版本过低，无法展示内容」？**
-说明协议端拿到的卡片 `token` 无效。检查两件事：① 协议端 `musicSignUrl` 是否指向
+说明协议端没能拿到有效的卡片签名。检查两件事：① 协议端 `musicSignUrl` 是否指向
 本插件的代理（`http://astrbot:18888/`）；② 改完配置有没有**重启协议端容器**。
-细节见[音乐卡片为什么需要一个小代理](#音乐卡片为什么需要一个小代理)。
+见[音乐卡片需要配一次签名代理](#音乐卡片需要配一次签名代理)。
 
 **Q：`#cookie状态` 显示某个平台「已配置（暂无可用的校验接口）」？**
 抖音 / 快手 / 小红书 / 视频号没有公开的账号校验接口，插件不会谎报「有效」，
@@ -468,76 +444,23 @@ QQ点歌 晴天          → 强制走 QQ 音乐
 
 ---
 
-## 架构与实现
+## 与原版的差异
 
-### 架构分层
+移植时把逻辑拆成了「平台解析（`platforms/`）」与「基础设施（`core/`）」两层，
+解析器不依赖框架，可以脱离 AstrBot 单独测试 —— 这也是能在部署前验证逻辑的原因。
 
-原版把 5862 行逻辑堆在 `apps/tools.js` 里，移植后分了层：
-
-```
-filter.regex 命中
-      ↓
-main.py  _dispatch()        平台识别 + 配置过滤 + 消息渲染（含缓存）
-      ↓
-platforms/base.py  注册表    按名字取 resolver
-      ↓
-platforms/*.py              只做「链接 -> 媒体地址」，不碰框架
-      ↓
-core/*.py                   HTTP / 下载 / 合并 / 签名 / 渲染 等基础设施
-```
-
-resolver 不依赖 AstrBot，可以脱离框架单独测试 —— 这也是部署前能验证逻辑的原因。
-
-### API 对照（Yunzai → AstrBot）
-
-| Yunzai | AstrBot |
-|---|---|
-| `rule: [{reg, fnc}]` | `@filter.regex(合并正则)` |
-| `e.reply(x)` | `yield event.plain_result(x)` |
-| `segment.image(url)` | `Comp.Image.fromBytes(...)`（见下） |
-| `segment.video(path)` | `Comp.Video.fromBase64(...)` |
-| `segment.record(path)` | `Comp.Record.fromBase64(...)` |
-| `Bot.makeForwardMsg()` | `Comp.Node` + `Comp.Nodes`（合并转发） |
-| `puppeteer.screenshot()` | Pillow 直接画图（见 `core/render_image.py`） |
-| `permission: 'master'` | `event.is_admin()` |
-| `config/*.yaml` | `_conf_schema.json` + WebUI 表单 |
-| 全局 `redis` | `Star.get_kv_data()` / `put_kv_data()` |
-| 自建 OpenAI 调用 | `Context.get_using_provider_async()` |
-
-### 性能设计
-
-解析类插件的体验瓶颈几乎全在「等待」上，所以做了几处针对性优化：
-
-| 优化点 | 之前 | 现在 | 收益 |
-|---|---|---|---|
-| HTTP 连接池 | 每请求新建 session + connector | 模块级共享连接池 | 同 host 连发 **1.8x** |
-| a-bogus 签名 | 每次起一个 node 子进程 | node 常驻 + 行协议 | **165x**（269ms → 1.6ms） |
-| 抖音画质探测 | 4 个档位串行探 | `asyncio.gather` 并发 | 省 2–4 个 RTT |
-| 视频 base64 编码 | 阻塞事件循环 | `asyncio.to_thread` | 不卡其它会话 |
-| 平台规则匹配 | 每条 URL 重新编译正则 | 编译结果缓存 | 24 条规则零重复编译 |
-| 图片命令 | — | 背景 / 头像 / Cookie 校验全部并行 | 十几秒 → **1–3 秒** |
-
-几个值得说明的取舍：
-
-- **为什么视频必须走 base64**：AstrBot 与协议端常常是两个容器、无共享挂载。
-  aiocqhttp 适配器对 `Image`/`Record` 会转 base64，但对 `Video` 是**原样传
-  `file://` 路径** —— 协议端 `realpath` 必然 ENOENT，整条消息链失败。
-- **为什么图片用 `fromBytes` 而不是 `fromFileSystem`**：后者**只存路径**，真正读文件
-  发生在**发送阶段**；临时文件一旦提前清理就发不出去。
-- **为什么第三方兜底接口保持串行**：多个第三方同时施压容易触发风控。这类接口本身
-  是「谁先能用谁上」的兜底角色，串行更稳。
-- **图片渲染的毛玻璃只模糊一次**：整幅背景「缩到 1/4 → 模糊 → 放大」，
-  比每个面板单独裁切模糊快好几倍。
-
-### 相比原版的主要改动
+功能上的主要差异：
 
 1. **LLM 复用 AstrBot 的模型**：不用再填 `aiBaseURL` / `aiApiKey` / `aiModel`。
-2. **启动自检**：探测 ffmpeg / yt-dlp / BBDown / aria2c / tdl，日志直接列缺什么。
-3. **作品缓存**：重复链接 2 小时缓存，命中直接重发。
-4. **先发简介再发媒体**：标题 / 作者 / 类型先返回，B站 DASH 合并延迟到渲染阶段。
-5. **死接口快速失败** + **未移植平台显式报错** + **临时文件交给框架回收**。
-6. **平台跳过可见**：未命中规则 / 平台未启用 / 黑名单三种跳过都打日志。
-7. **新增点歌（搜索 + 列表图 + 序号点播 + 音乐卡片）、网易云/B站扫码、三个状态图**（原版没有或依赖自建服务）。
+2. **启动自检**：探测 ffmpeg / node / yt-dlp / BBDown / aria2c / tdl，日志直接列缺什么。
+3. **作品缓存**：重复链接 2 小时缓存，命中直接重发，跳过网络解析。
+4. **先发简介再发媒体**：标题 / 作者 / 类型先返回，大文件的合并 / 转码延后。
+5. **不静默失败**：未移植的平台、被跳过的平台都会给明确提示或日志。
+6. **新增原版没有的能力**：点歌（搜索 + 列表图 + 序号点播 + 音乐卡片）、
+   网易云 / B站扫码登录、三个状态图。
+
+针对「等待」做了几处优化：HTTP 连接池复用、签名进程常驻、画质探测并发、
+图片命令的外部请求全部并行（十几秒 → 1–3 秒）。
 
 ---
 
@@ -546,13 +469,13 @@ resolver 不依赖 AstrBot，可以脱离框架单独测试 —— 这也是部�
 测试全部**离线**、不依赖网络与 Cookie，直接跑就行：
 
 ```bash
-python tests/test_album_send_path.py    # 图集发送路径（AST 锁死「不得远程直发」）
-python tests/test_douyin_album.py       # 抖音图集动图/静图分流
+python tests/test_album_send_path.py    # 图集发送路径
+python tests/test_douyin_album.py       # 抖音图集动图 / 静图分流
 python tests/test_music_search.py       # 点歌搜索 + 命令正则
-python tests/test_music_config.py       # 配置迁移（锁死「迁移依赖的键必须在 schema 里」）
-python tests/test_music_pick.py         # 序号点播的一次性语义
+python tests/test_music_config.py       # 配置迁移
+python tests/test_music_pick.py         # 序号点播
 python tests/test_music_sign_proxy.py   # 音乐卡片签名代理
-python tests/test_panels.py             # 三个图片命令（规则 / 花体折叠 / 布局 / 渲染）
+python tests/test_panels.py             # 三个图片命令
 python tests/test_a_bogus_worker.py     # a-bogus 常驻 worker
 python tests/test_http_pool_bench.py    # 连接池基准
 ```
@@ -583,10 +506,10 @@ docker exec astrbot python /AstrBot/data/plugins/astrbot_plugin_rconsole/tests/t
 |---|---|---|
 | [rconsole-plugin](https://gitee.com/kyrzy0416/rconsole-plugin) | zhiyu1998 | **本插件的源项目**。全部平台解析逻辑、配置项设计、Cookie 字段定义都来自它 |
 | [AstrBot](https://github.com/AstrBotDevs/AstrBot) | Soulter 及贡献者 | 插件框架本体。消息组件、事件模型、配置 schema、LLM Provider 均复用其能力 |
-| [NapCatQQ](https://github.com/NapNeko/NapCatQQ) | NapNeko | QQ 协议端。**阅读其 `packages/napcat-onebot/api/msg.ts` 才定位到「`music` 段要经外部签名服务」这一关键事实**，其首选签名服务地址也来自该源码 |
-| [SnowLuma](https://github.com/motricseven7/snowluma) | motricseven7 | 本项目实际使用的协议端。音乐卡片修复正是针对它与官方 NapCat 在「取签名响应」上的实现差异 |
-| [xiaofei-plugin](https://github.com/xfdown/xiaofei-plugin) | xfdown | 点歌功能的多平台抽象与 QQ 音乐签名流程参考（修正了其中几处已过期的取数路径） |
-| [QQMusicApi](https://github.com/luren-dc/QQMusicApi) | luren-dc | `#cookie状态` 里 QQ 音乐会员等级接口的模块名（`VipLogin.VipLoginInter/vip_login_base`）来自该库源码 |
+| [NapCatQQ](https://github.com/NapNeko/NapCatQQ) | NapNeko | QQ 协议端。音乐卡片的签名机制与默认签名服务地址参考其实现 |
+| [SnowLuma](https://github.com/motricseven7/snowluma) | motricseven7 | 本项目实际使用的 QQ 协议端 |
+| [xiaofei-plugin](https://github.com/xfdown/xiaofei-plugin) | xfdown | 点歌功能的多平台抽象与 QQ 音乐取流流程参考 |
+| [QQMusicApi](https://github.com/luren-dc/QQMusicApi) | luren-dc | `#cookie状态` 里 QQ 音乐会员等级接口的模块名参考 |
 
 ### 外部服务
 
@@ -594,14 +517,12 @@ docker exec astrbot python /AstrBot/data/plugins/astrbot_plugin_rconsole/tests/t
 
 | 服务 | 用途 |
 |---|---|
-| `106.55.0.102:10087`（yibai 音卡签名） | 音乐卡片签名。地址来自 NapCat 官方源码中的首选值 |
-| `ss.xingzhige.com`（思思的音卡签名） | 音乐卡片签名备选（其 id 模式已关闭） |
+| 音卡签名服务（yibai / 思思） | 音乐卡片签名，NapCat 官方默认值 |
 | `api.elaina.cat/random/` | `#R菜单` / `#cookie状态` / `#服务状态` 的随机背景图 |
 | `q1.qlogo.cn` | `#服务状态` 里的 Bot 头像 |
 | 各平台官方接口 | 链接解析、Cookie 校验、扫码登录 |
 
-插件内置了**失败降级**：签名服务不可用时卡片会明确报错、背景接口不可用时退回纯色底、
-图片渲染失败时退回文字输出，不会静默失败。
+这些服务不可用时插件会**明确报错或降级**（退回纯色底、退回文字输出），不会静默失败。
 
 ### 依赖库
 
