@@ -997,6 +997,30 @@
           "语音条"
         ]
       },
+      "searchMode": {
+        "type": "string",
+        "description": "点歌方式：搜索列表（发列表图，60 秒内回序号点播）或直接送（按上面的发送方式直接发出第一首）",
+        "default": "list",
+        "options": [
+          "list",
+          "direct"
+        ]
+      },
+      "enableSignProxy": {
+        "type": "bool",
+        "description": "启用音乐卡片签名代理（必需）。协议端发音乐卡片时要外部签名服务，而它的响应是双重编码的，SnowLuma 会解析失败导致卡片不显示；本代理转发并修正响应。只有「发送方式=音乐卡片」才依赖它",
+        "default": true
+      },
+      "signProxyPort": {
+        "type": "int",
+        "description": "签名代理监听端口（需与协议端 musicSignUrl 里的端口一致）",
+        "default": 18888
+      },
+      "signProxyUpstream": {
+        "type": "string",
+        "description": "上游签名服务地址（留空用内置默认）",
+        "default": ""
+      },
       "neteaseCookie": {
         "description": "网易云Cookie",
         "type": "string",

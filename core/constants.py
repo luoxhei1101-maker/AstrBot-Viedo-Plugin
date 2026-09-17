@@ -549,6 +549,18 @@ COMMAND_RULES: tuple[dict, ...] = (
         "handler": "music_search",
         "admin": False,
     },
+    # 序号点播：列表图发出后 60 秒内回数字即播放对应歌。
+    #
+    # ⚠️ 这条会匹配**任何** 1-2 位纯数字消息，所以 handler 里必须严格自检：
+    # 只有「该会话在 60 秒内搜索过」时才响应，否则立刻返回、不发消息也不
+    # 阻断事件，避免干扰群里的普通数字消息。
+    {
+        "key": "musicPick",
+        "name": "点歌选曲",
+        "pattern": r"^\s*(\d{1,2})\s*$",
+        "handler": "music_pick",
+        "admin": False,
+    },
     # 说明：原 Guoba 面板带来的 `#rns`（网易云状态）/`#rnq`（网易云扫码）/
     # `#rks`（酷狗状态）/`#rkq`（酷狗扫码）四条规则已移除——它们依赖的
     # NeteaseCloudMusicApi 自建服务与酷狗自建 API 在本移植版里都没实现，

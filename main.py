@@ -84,10 +84,15 @@ from .core.downloader import (
 from .core.external import describe_environment, find_tool
 from .core.http import HttpError, close_session as close_http_session
 from .core.media import MergeError, merge_dash
+from .core.music_card_image import render_song_list
 from .core.music_search import (
     PLATFORM_LABELS,
     get_play_url as music_get_play_url,
     search as music_search,
+)
+from .core.music_sign_proxy import (
+    DEFAULT_UPSTREAM as MUSIC_SIGN_UPSTREAM,
+    SignProxy,
 )
 from .platforms import ResolveResult, call
 from .platforms import names as resolver_names
@@ -179,6 +184,8 @@ _LOCAL_COMMAND_METHODS: dict[str, str] = {
     # 点歌搜索：要读配置里的 Cookie + 按平台搜索，不适合走「链接 -> 媒体」
     # 那套 resolver 接口（resolver 的入参是 URL，而这里是关键词）。
     "music_search": "cmd_music_search",
+    # 序号点播：读会话状态才能判断该不该响应，同样走本地方法。
+    "music_pick": "cmd_music_pick",
 }
 
 # 自动识别用的合并正则。必须是模块级常量——装饰器在类定义时求值，
@@ -247,6 +254,18 @@ class Main(Star):
         # 插件卸载时统一取消，不留野任务。
         self._bg_tasks: set[asyncio.Task] = set()
 
+        # 音乐卡片签名代理。SnowLuma 的 music 段不自建卡片，而是 POST 给外部
+        # 签名服务；而它的响应是双重编码的（外层多一层引号），SnowLuma 用
+        # resp.text() 直接拿原文会导致校验失败 → 降级成残缺卡片 → QQ 回
+        # 「发送者版本过低」。这里起个本地代理把响应展开一层，顺便按来源
+        # 平台改写 tag/tagIcon（上游固定写「QQ音乐」）。详见
+        # core/music_sign_proxy.py。
+        self._sign_proxy: SignProxy | None = None
+
+        # 序号点播会话：umo -> (写入时间戳, 关键词, 平台标签, 平台 key, 歌曲列表)
+        # 用户搜索后 60 秒内回数字即播放对应歌（见 _MUSIC_PICK_TTL）。
+        self._music_sessions: dict[str, tuple[float, str, str, str, list]] = {}
+
         # 作品解析结果缓存：key 是链接，value 是 (写入时间戳, 结果)。
         # 重复发同一个链接时命中缓存直接重发，跳过网络解析，2 小时过期。
         self._result_cache: dict[str, tuple[float, ResolveResult]] = {}
@@ -275,12 +294,29 @@ class Main(Star):
         self._heal_config_types()
 
     async def initialize(self) -> None:
-        """插件启动后调用。起一个缓存定时清理任务。"""
+        """插件启动后调用。起缓存清理任务 + 音乐签名代理。"""
         task = asyncio.create_task(
             self._cache_cleanup_loop(), name="rconsole_cache_cleanup"
         )
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
+
+        await self._start_sign_proxy()
+
+    async def _start_sign_proxy(self) -> None:
+        """按配置启动音乐卡片签名代理。
+
+        关掉它只影响「音乐卡片」这一种发送方式（voice/file/link 都不依赖
+        签名服务，因为那些不走 lightApp 卡片）。
+        """
+        if not self.conf_get("music.enableSignProxy", True):
+            logger.info("[R插件] 音乐卡片签名代理已在配置里关闭")
+            return
+        port = int(self.conf_get("music.signProxyPort", 18888) or 18888)
+        upstream = str(self.conf_get("music.signProxyUpstream", "") or "").strip()
+        proxy = SignProxy(upstream or MUSIC_SIGN_UPSTREAM, port)
+        if await proxy.start():
+            self._sign_proxy = proxy
 
     # ==================================================================
     # 作品缓存
@@ -1455,6 +1491,12 @@ class Main(Star):
         "file": 1,
     }
 
+    # 搜索点播会话有效期（秒）。搜索后在这段时间内回复序号即播放对应歌曲。
+    _MUSIC_PICK_TTL = 60.0
+
+    # 列表图里最多列几首（配置上限 20，但图上 10 首已经很满）
+    _MUSIC_LIST_IMAGE_MAX = 10
+
     # 语音模式的安全上限（秒）。
     #
     # ⚠️ ``Comp.Record`` 的 ``convert_to_base64()`` 把 ``target_format="wav"``
@@ -1472,6 +1514,44 @@ class Main(Star):
         return {"netease": "netease", "qq": "qqmusic", "qqmusic": "qqmusic"}.get(
             raw, "netease"
         )
+
+    def _music_search_mode(self) -> str:
+        """搜索后的呈现方式。
+
+        - ``list``（默认）：发列表图，60 秒内回序号点播 —— 「搜索点歌」
+        - ``direct``：直接按 ``sendMode`` 送出第一首 —— 保留原来的「指定点歌」
+        """
+        raw = str(self.conf_get("music.searchMode", "list") or "list").strip().lower()
+        return raw if raw in ("list", "direct") else "list"
+
+    # ------------------------------------------------------------------
+    # 序号点播会话
+    # ------------------------------------------------------------------
+
+    def _remember_music_pick(
+        self, event: AstrMessageEvent, keyword: str, used: str, label: str, songs: list
+    ) -> None:
+        """记下这次的候选列表，供 60 秒内按序号点播。"""
+        now = time.time()
+        # 顺手清掉过期会话，避免长期堆积（会话量 = 活跃群数，很小）
+        for key in [
+            k for k, v in self._music_sessions.items()
+            if now - v[0] > self._MUSIC_PICK_TTL
+        ]:
+            self._music_sessions.pop(key, None)
+        self._music_sessions[event.unified_msg_origin] = (
+            now, keyword, label, used, list(songs),
+        )
+
+    def _take_music_pick(self, event: AstrMessageEvent):
+        """取该会话的候选列表；没有或已过期返回 None。"""
+        item = self._music_sessions.get(event.unified_msg_origin)
+        if not item:
+            return None
+        if time.time() - item[0] > self._MUSIC_PICK_TTL:
+            self._music_sessions.pop(event.unified_msg_origin, None)
+            return None
+        return item
 
     def _music_send_mode(self) -> str:
         """配置里选的发送方式。认不出的一律回退到最稳的 link。"""
@@ -1493,86 +1573,48 @@ class Main(Star):
 
     @staticmethod
     def _music_card(song) -> Comp.Music | None:
-        """把一首歌构造成音乐分享卡。
+        """把一首歌构造成音乐分享卡。**统一走 ``custom``**。
 
-        ⚠️ **两个坑，都是实测踩出来的**
+        ⚠️ **为什么只能是 custom（都是实测结论，别再改回去）**
 
-        **坑一：``_type`` 只能用 ``object.__setattr__`` 设置**
+        OneBot 的 ``music`` 段在 NapCat/SnowLuma 里**不自己生成卡片**：它把请求
+        POST 给外部「音卡签名服务」，再把返回的 JSON 原样当 lightApp 发出去。
+        而 QQ 对 lightApp 有强校验 —— ``config.token`` 无效就回
+        「发送者版本过低，无法展示内容」（这是**通用的验证失败提示**，
+        不是字面意义的版本问题，见 Lagrange.Core 的相关分析）。
 
-        - 构造时传 ``_type=`` -> 被 pydantic **静默忽略**（它不在模型字段里）
-        - 实例化后赋值 ``comp._type = ...`` -> ``ValueError: "Music" object
-          has no field "_type"``（被 pydantic 的 ``__setattr__`` 拦下）
-        - 只有 ``object.__setattr__`` 能写进 ``__dict__``
+        实测两个关键事实：
 
-        而 AstrBot 的 respond stage **有专门校验器读它**：
+        1. **id 模式（``type=163`` / ``type=qq`` + ``id``）已被签名服务弃用**：
+           官方 NapCat 首选签名服务 ``http://106.55.0.102:10087/`` 对 id 模式
+           直接返 HTTP 400「缺少 title」；旧的 ``ss.xingzhige.com`` 则返回纯文本
+           「关闭id解析功能」（不是 JSON）。
+        2. **官方 NapCat 的校验要求 ``url`` / ``audio`` / ``title`` / ``image``
+           全部非空**（``packages/napcat-onebot/api/msg.ts`` 逐个校验，
+           缺一个就 ``return undefined`` —— 整条消息静默丢弃）。
 
-        - 非 custom：``comp.id and comp._type and comp._type != "custom"``
-        - custom：``comp._type == "custom" and comp.url and comp.audio and comp.title``
-
-        `_type` 缺失时**访问本身就抛 ``AttributeError``**，整条消息发不出去。
-
-        **坑二：``_type`` 的取值决定 QQ 会不会展示**
-
-        ============  ==========================================
-        ``_type``      实际效果
-        ============  ==========================================
-        ``qq``         QQ 音乐官方卡片 —— **最可靠**
-        ``163``        网易云卡片，QQ 客户端支持不一，常提示
-                       「发送者版本过低不展示」
-        ``custom``     自定义卡片，需要 ark 签名，QQ 基本不认
-        ============  ==========================================
-
-        所以 QQ 音乐优先走 ``qq`` + **数字 songid**（不是 ``mid``！）；
-        拿不到 songid 才退回 ``custom``。
+        ``_type`` 必须用 ``object.__setattr__`` 写入：它不在 pydantic 模型字段里，
+        构造时传会被**静默忽略**、实例化后直接赋值会被 ``__setattr__`` 拦下报
+        ``ValueError``；而 AstrBot 的 respond stage 有校验器读它，
+        缺了会抛 ``AttributeError`` 导致整条消息发不出去。
 
         返回 ``None`` 表示这首歌构造不出合法卡片（调用方应跳过）。
         """
-        if song.platform == "qqmusic":
-            songid = song.extra.get("songid")
-            try:
-                sid = int(songid) if songid else 0
-            except (TypeError, ValueError):
-                sid = 0
-            if sid > 0:
-                # 官方卡片：只需要数字 songid，不需要 url/audio
-                comp = Comp.Music(id=sid)
-                object.__setattr__(comp, "_type", "qq")
-                return comp
-
-            # 没有 songid 只能走 custom：url + audio + title 三个必须都有
-            if not (song.play_url and song.page_url and song.name):
-                return None
-            comp = Comp.Music(
-                url=song.page_url,
-                audio=song.play_url,
-                title=song.name,
-                content=song.artist,
-                image=song.cover,
-            )
-            object.__setattr__(comp, "_type", "custom")
-            return comp
-
-        # 网易云：用它自己的 songid 走 163 卡片
-        sid = song.song_id if song.song_id.isdigit() else "0"
-        comp = Comp.Music(id=int(sid))
-        object.__setattr__(comp, "_type", "163")
+        if not (song.name and song.page_url):
+            return None
+        # image 是官方强校验项，缺了整条消息会被丢弃 —— 没有封面就退占位图
+        # （QQ 互联的音乐图标，稳定可达）
+        image = song.cover or "https://p.qpic.cn/qqconnect/0/app_100497308_1626060999/100"
+        comp = Comp.Music(
+            url=song.page_url,
+            # audio 官方必填；直链取不到时退化成页面地址，至少让卡片能发出去
+            audio=song.play_url or song.page_url,
+            title=song.name,
+            content=song.artist,
+            image=image,
+        )
+        object.__setattr__(comp, "_type", "custom")
         return comp
-
-    @staticmethod
-    def _music_card_needs_url(song) -> bool:
-        """这张卡片是否**需要先取直链**。
-
-        QQ 音乐走官方 ``qq`` 卡片时只需要 songid，直链是完全多余的 ——
-        少一次请求（还顺带躲开 QQ 音乐的随机限流）。只有退回 ``custom``
-        模式才需要 audio 直链。
-        """
-        if song.platform != "qqmusic":
-            return False
-        songid = song.extra.get("songid")
-        try:
-            return not (int(songid) > 0 if songid else False)
-        except (TypeError, ValueError):
-            return True
 
     async def cmd_music_search(self, event: AstrMessageEvent):
         """``点歌 <关键词>`` —— 搜索歌曲并按配置的发送方式送出。
@@ -1663,6 +1705,16 @@ class Main(Star):
         mode = self._music_send_mode()
         logger.info(f"[R插件] 点歌「{keyword}」-> {label} {len(songs)} 首，发送方式={mode}")
 
+        # 「搜索点歌」（默认）：发一张列表图，并记下候选列表，
+        # 用户 60 秒内回序号即点播 —— 与「指定点歌」（searchMode=direct，直接送）
+        # 并存，由配置切换。
+        if self._music_search_mode() == "list":
+            async for item in self._music_render_list_image(
+                event, songs, used, label, keyword
+            ):
+                yield item
+            return
+
         if mode == "link":
             async for item in self._music_render_link(event, songs, used, label, keyword):
                 yield item
@@ -1682,10 +1734,9 @@ class Main(Star):
         sent = 0
         for song in targets:
             if mode == "card":
-                # QQ 音乐走官方 qq 卡片时只要 songid，直链是多余的 ——
-                # 少一次请求，顺带躲开 QQ 音乐的随机限流
-                if self._music_card_needs_url(song):
-                    song.play_url = await self._music_resolve_url(song)
+                # custom 卡片的 audio 是官方强校验项（缺了整个消息段会被丢弃），
+                # 所以必须取直链
+                song.play_url = await self._music_resolve_url(song)
                 comp = self._music_card(song)
                 if comp is None:
                     logger.info(f"[R插件] 点歌「{song.label}」构造不出卡片，跳过")
@@ -1713,6 +1764,95 @@ class Main(Star):
             yield event.plain_result(
                 "🎵 音频准备失败（可能是没配 Cookie 或接口限流），先给链接：\n"
                 + "\n".join(f"· {s.label}\n  {s.page_url}" for s in songs[:3])
+            )
+
+    async def _music_render_list_image(
+        self, event, songs, used: str, label: str, keyword: str
+    ):
+        """``searchMode=list``：发一张点歌列表图，并记下候选列表供序号点播。
+
+        图是 Pillow 现画的（无二维码，见 ``core/music_card_image.py``）。
+        画图不可用（缺 Pillow / 字体）时退回文字列表，不影响功能。
+
+        ⚠️ 用 ``Comp.Image.fromBytes`` 而不是 ``fromFileSystem``：
+        后者只存路径，真正读文件发生在**发送阶段**的 ``convert_to_base64()``，
+        那样临时文件一旦提前清理就会发不出去。
+        """
+        shown = songs[: self._MUSIC_LIST_IMAGE_MAX]
+        self._remember_music_pick(event, keyword, used, label, shown)
+        hint = f"回复 1-{len(shown)} 播放（{int(self._MUSIC_PICK_TTL)} 秒内有效）"
+
+        png = await render_song_list(shown, keyword, label, used, hint)
+        if png:
+            try:
+                yield event.chain_result([Comp.Image.fromBytes(png)])
+                return
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[R插件] 列表图发送失败，退回文字列表: {exc}")
+
+        async for item in self._music_render_link(event, songs, used, label, keyword):
+            yield item
+
+    async def cmd_music_pick(self, event: AstrMessageEvent):
+        """``<序号>`` —— 点歌列表发出后 60 秒内回数字即播放对应歌曲。
+
+        **只在存在有效会话时响应**：没有会话直接返回，不干扰群里的普通数字
+        消息（也不会 stop_event，其他处理器照常工作）。
+        """
+        if not self.conf_get("music.enable", False):
+            return
+        if self._music_search_mode() != "list":
+            return
+
+        text = event.get_message_str().strip()
+        if not text.isdigit():
+            return
+        index = int(text)
+        session = self._take_music_pick(event)
+        if session is None:
+            return
+
+        _ts, keyword, label, used, songs = session
+        if not 1 <= index <= len(songs):
+            yield event.plain_result(
+                f"🎵 序号要在 1-{len(songs)} 之间哦（本次点歌「{keyword}」）"
+            )
+            return
+
+        song = songs[index - 1]
+        logger.info(f"[R插件] 序号点播「{keyword}」#{index} -> {song.label}")
+
+        mode = self._music_send_mode()
+        if mode == "link":
+            async for item in self._music_render_link(event, [song], used, label, keyword):
+                yield item
+            return
+
+        if mode == "card":
+            song.play_url = await self._music_resolve_url(song)
+            comp = self._music_card(song)
+            if comp is not None:
+                yield event.chain_result([comp])
+                return
+            yield event.plain_result(
+                f"🎵 卡片构造失败，先给链接：\n{song.page_url}"
+            )
+            return
+
+        song.play_url = await self._music_resolve_url(song)
+        if not song.play_url:
+            yield event.plain_result(
+                f"🎵 取音频失败（可能是没配 Cookie 或接口限流），先给链接：\n"
+                f"{song.page_url}"
+            )
+            return
+
+        if mode == "voice":
+            async for item in self._music_render_voice(event, song, label):
+                yield item
+        else:  # file
+            yield event.chain_result(
+                [Comp.File(name=f"{song.label}.mp3", url=song.play_url)]
             )
 
     async def _music_render_link(self, event, songs, used: str, label: str, keyword: str):
@@ -1897,6 +2037,11 @@ class Main(Star):
         if self._bg_tasks:
             await asyncio.gather(*self._bg_tasks, return_exceptions=True)
             self._bg_tasks.clear()
+
+        # 关停音乐签名代理（释放监听端口）
+        if self._sign_proxy is not None:
+            await self._sign_proxy.stop()
+            self._sign_proxy = None
 
         # 关停常驻的 node 签名进程（不留僵尸进程）
         await close_a_bogus_worker()

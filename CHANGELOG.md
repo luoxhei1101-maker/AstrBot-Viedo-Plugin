@@ -1,5 +1,67 @@
 # 更新日志
 
+## v1.4.0（2026-09-17）
+
+**音乐卡片真正可用了**（修的是协议端的一处实现差异），并新增「搜索点歌 +
+序号点播」，点歌列表改用图片呈现。
+
+### 修复：音乐卡片发出去显示「发送者版本过低，无法展示内容」
+
+根因**不在插件**，而在协议端处理 OneBot music 段的方式：
+
+1. 协议端不自己生成卡片，而是把参数 POST 给一个外部「音卡签名服务」，
+   再把返回的 JSON 当 lightApp 发出。QQ 会校验 config.token，
+   不合法就统一回「发送者版本过低，无法展示内容」（这是**通用验证失败提示**，
+   不是字面意义的版本问题）。
+2. 官方 NapCat 的首选签名服务是 http://106.55.0.102:10087/
+   （见其源码 packages/napcat-onebot/api/msg.ts），ss.xingzhige.com
+   只是备选，且它的 id 模式已被关闭。
+3. 该服务返回的是**双重编码**响应（形如 "{...}"，外层多一层引号）。
+   官方 NapCat 用 HttpGetJson<string>() 会先解析一次，所以正常；
+   **SnowLuma 直接用 resp.text()**，于是 JSON.parse 得到 string
+   而不是 object，触发 field "text" must contain a JSON object
+   校验失败 —— 然后它**降级成字段残缺的本地卡片**，被 QQ 判为版本过低。
+
+**修法**：插件内置一个极小的签名代理（core/music_sign_proxy.py，
+默认监听 18888），把响应展开一层再交回协议端。上游失败会自动换备选地址。
+配置里可改端口与上游地址。
+
+> 部署后需要把协议端的 musicSignUrl 指向 http://astrbot:18888/
+> （写在 config/onebot_<uin>.json 或全局 config/snowluma.json），
+> 并重启协议端容器。
+
+### 修复：卡片平台标识张冠李戴
+
+签名服务固定写 meta.music.tag = "QQ音乐"，于是点网易云的歌也会显示
+「QQ音乐」标签（但点击跳转是对的，显得自相矛盾）。代理现在按 jumpUrl
+域名判断真实来源平台，改写 tag / tagIcon。
+
+### 修复：卡片改回 custom 模式
+
+id 模式（type=163/type=qq + id）已被签名服务弃用（上游对 id
+模式直接返 HTTP 400「缺少 title」，旧服务返回纯文本「关闭id解析功能」）。
+现在统一走 custom，且 url/audio/title/image 四项齐全
+（官方源码会逐个校验，缺一即丢弃整条消息）。
+
+### 新增：搜索点歌 + 序号点播
+
+- 点歌 歌名 → 搜到后发一张**列表图**（默认 10 首），60 秒内回复序号
+  即播放对应歌曲
+- 列表图用 Pillow 现画（core/music_card_image.py）：平台色条 + 封面 +
+  序号 + 歌名/歌手/专辑，无二维码
+- 与原来的「直接送」并存：配置 music.searchMode 可在 list /
+  direct 之间切换
+- 序号点播只在「该会话 60 秒内搜索过」时才响应，不会干扰群里的普通数字消息
+
+### 新增配置项（点歌分组）
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| searchMode | list | 列表图+序号 或 直接送 |
+| enableSignProxy | true | 音乐卡片签名代理开关 |
+| signProxyPort | 18888 | 代理端口 |
+| signProxyUpstream | 空 | 上游签名服务（留空用内置默认） |
+
 ## v1.3.2（2026-09-17）
 
 修卡片 + 优化指令格式。
