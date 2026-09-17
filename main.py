@@ -1598,6 +1598,19 @@ class Main(Star):
         ``ValueError``；而 AstrBot 的 respond stage 有校验器读它，
         缺了会抛 ``AttributeError`` 导致整条消息发不出去。
 
+        为什么这里所有平台都塞 ``custom``
+        ---------------------------------
+
+        AstrBot 的 Music 校验器是::
+
+            (comp.id and comp._type and comp._type != "custom")
+            or (comp._type == "custom" and comp.url and comp.audio and comp.title)
+
+        非 custom 分支**要求 ``id`` 存在**，而 id 模式已被签名服务停用，
+        所以我们只能走 custom 分支。**卡片最终显示哪个平台，由我们的签名代理
+        （``core/music_sign_proxy.py``）在请求侧按歌曲页域名改 ``type`` 决定** ——
+        那一步发生在签名**之前**，所以 token 依然匹配。
+
         返回 ``None`` 表示这首歌构造不出合法卡片（调用方应跳过）。
         """
         if not (song.name and song.page_url):

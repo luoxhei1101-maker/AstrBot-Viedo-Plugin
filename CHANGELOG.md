@@ -1,5 +1,74 @@
 # 更新日志
 
+## v1.4.1（2026-09-17）
+
+**修掉 v1.4.0 引入的一个真 bug**：在「签名之后」改写卡片，会破坏签名，
+导致网易云卡片发出去看不见。正解是**在请求侧指定平台**。
+
+### 根因：`config.token` 是卡片内容的摘要，签名后不能改内容
+
+实测对照（对 `ss.xingzhige.com` 同一 payload 连发）：
+
+| 实验 | 结果 |
+|---|---|
+| 同一内容连发 5 次 | token **完全相同**（连跨秒都一致） |
+| 只把 `title` 改一个字 | token 立刻不同，且两组 token **无交集** |
+
+所以 v1.4.0 里「签名后按 jumpUrl 改写 `meta.music.tag`」的做法会让 token
+与内容失配 —— QQ 直接不渲染这张卡。这也正好解释了当时的现象：
+**QQ音乐的卡片正常，网易云的看不见**（QQ音乐那次的 tag 本就是「QQ音乐」，
+没有触发改写，所以幸存）。
+
+### 正解：平台品牌由**请求侧**的 `type` 决定
+
+先确认官方 NapCat 对平台**零特殊处理** —— 它只是把参数原样转发给签名服务
+（`packages/napcat-onebot/api/msg.ts:825`，完整函数已核对）：
+
+    [OB11MessageDataType.music]: async ({ data }) => {
+      const supportedPlatforms = ['qq', '163', 'kugou', 'kuwo', 'migu'];
+      ...
+      musicUrl = await RequestUtil.HttpGetJson<string>(signUrl, 'POST', postData);
+      return ...json({ data: { data: musicJson } });
+    }
+
+而**卡片品牌（tag / appid / tagIcon）完全由请求里的 `type` 决定**
+（实测，两个上游行为一致）：
+
+| 请求 `type` | 返回 tag | appid | tagIcon |
+|---|---|---|---|
+| `custom` | `QQ音乐` | 100497308 | `p.qpic.cn/qqconnect/0/app_100497308_...` |
+| `163` | **`网易云音乐`** | **100495085** | `i.gtimg.cn/open/app_icon/00/49/50/85/100495085_100_m.png` |
+
+所以 `core/music_sign_proxy.py` 改成**在转发前**按歌曲页域名把 `type`
+设成 `163`（网易云）/ `custom`（QQ音乐），并把 OneBot 的 `content`
+映射成上游认的 `singer`。这些都是**签名之前**的参数，token 天然匹配。
+
+服务器实测回读（`get_msg`）：
+
+    网易云   tag='网易云音乐'  appid=100495085  token=a278b043...  ✅
+    QQ音乐   tag='QQ音乐'      appid=100497308  token=b906dc3c...  ✅
+
+### 附带澄清：id 模式已被上游彻底停用
+
+用户以前用 NapCat 发网易云卡片会显示「网易云音乐」，那是签名服务支持
+`{type:"163", id:<歌曲id>}` 的时代。现在两个上游都关了：
+
+| 上游 | `163` + id |
+|---|---|
+| `ss.xingzhige.com` | HTTP 500「无法准确获取歌曲信息」 |
+| `106.55.0.102:10087` | HTTP 400「缺少 title」 |
+
+QQ 音乐的 id 模式同样（`ss.xingzhige.com` 返回纯文本「关闭id解析功能」、
+yibai 返回 400）。也就是说 NapCat WebUI 里「主流平台 → 网易云音乐 → 音乐ID」
+那条路径**现在也是坏的**，与本插件无关。本插件走 custom + 请求侧 `type`，
+不依赖 id 模式。
+
+### 测试
+
+`tests/test_music_sign_proxy.py` 重写第 2 节，改为断言
+`normalize_sign_request()` 的行为（域名 → type、content → singer、幂等、健壮性），
+并**明确不再包含任何「改写已签名内容」的断言**。
+
 ## v1.4.0（2026-09-17）
 
 **音乐卡片真正可用了**（修的是协议端的一处实现差异），并新增「搜索点歌 +
@@ -30,11 +99,12 @@
 > （写在 config/onebot_<uin>.json 或全局 config/snowluma.json），
 > 并重启协议端容器。
 
-### 修复：卡片平台标识张冠李戴
+### ~~修复：卡片平台标识张冠李戴~~（做法有误，v1.4.1 已重做）
 
-签名服务固定写 meta.music.tag = "QQ音乐"，于是点网易云的歌也会显示
-「QQ音乐」标签（但点击跳转是对的，显得自相矛盾）。代理现在按 jumpUrl
-域名判断真实来源平台，改写 tag / tagIcon。
+> ⚠️ **本节描述的做法是错的，请看 v1.4.1。**
+> 当时用「改写响应里的 tag / tagIcon」来纠正平台，但 `config.token` 是
+> **卡片内容的摘要**，签名后改内容会让 token 失配、QQ 直接不渲染 ——
+> 这反而弄坏了网易云卡片。正解是在**请求侧**指定 `type`。
 
 ### 修复：卡片改回 custom 模式
 

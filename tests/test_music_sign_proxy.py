@@ -1,9 +1,15 @@
 """点歌签名代理与列表图的离线断言（不联网、不依赖 AstrBot 运行时）。
 
-覆盖三件容易回归的事：
+覆盖四件容易回归的事：
+
 1. 上游「双重编码」响应必须被展开一层（否则协议端校验失败、卡片不显示）
-2. 卡片的平台标识要按 jumpUrl 域名改写（否则点网易云却显示「QQ音乐」）
-3. 列表图能画出来且尺寸合理（缺 Pillow/字体时返回 None 而不是抛异常）
+2. 请求里的 ``type`` 必须按歌曲页域名改成平台对应值（这是卡片品牌
+   「网易云音乐 / QQ音乐」的**唯一**来源，必须在签名前设定）
+3. ``content`` 要映射成 ``singer``（上游只认后者）
+4. 列表图能画出来且尺寸合理（缺 Pillow/字体时返回 None 而不是抛异常）
+
+⚠️ 测试里**故意不包含**任何「改写已签名卡片内容」的断言 —— token 是内容摘要，
+改了就让签名失效。相关教训见 core/music_sign_proxy.py 的模块 docstring。
 """
 
 from __future__ import annotations
@@ -33,8 +39,9 @@ sys.modules.setdefault("astrbot.api", api)
 
 from astrbot_plugin_rconsole.core.music_sign_proxy import (  # noqa: E402
     DEFAULT_UPSTREAM,
+    PLATFORM_TYPES,
     SignProxy,
-    fix_platform_tag,
+    normalize_sign_request,
     unwrap_sign_response,
 )
 
@@ -80,26 +87,57 @@ check(unwrap_sign_response("") == "", "空串原样返回")
 
 print()
 print("=" * 66)
-print("2) fix_platform_tag —— 按 jumpUrl 改写平台标识")
+print("2) normalize_sign_request —— 按域名指定平台 type（卡片品牌的来源）")
 print("=" * 66)
-c = json.loads(fix_platform_tag(card("https://music.163.com/#/song?id=1")))
-check(c["meta"]["music"]["tag"] == "网易云音乐", "网易云链接 -> tag 改为「网易云音乐」")
-check("music.126.net" in c["meta"]["music"]["tagIcon"], "网易云图标已替换")
 
-c = json.loads(fix_platform_tag(card("https://y.qq.com/n/ryqq/songDetail/x")))
-check(c["meta"]["music"]["tag"] == "QQ音乐", "QQ音乐链接保持「QQ音乐」")
 
-c = json.loads(fix_platform_tag(card("https://www.kugou.com/song/#hash=x")))
-check(c["meta"]["music"]["tag"] == "酷狗音乐", "酷狗链接 -> 「酷狗音乐」")
+def norm(payload: dict) -> dict:
+    return json.loads(normalize_sign_request(json.dumps(payload).encode()))
 
-out = fix_platform_tag(card("https://unknown.example/x"))
-c = json.loads(out)
-check(c["meta"]["music"]["tag"] == "QQ音乐", "未知域名时保持上游原值不动")
 
-check(fix_platform_tag("not json") == "not json", "非 JSON 原样返回")
-check(fix_platform_tag('{"app":"x"}') == '{"app":"x"}', "缺 meta 时原样返回")
-check(fix_platform_tag(json.dumps({"meta": {"music": "bad"}}))
-      == json.dumps({"meta": {"music": "bad"}}), "meta.music 非对象时原样返回")
+base = {
+    "type": "custom",
+    "url": "https://music.163.com/#/song?id=186016",
+    "audio": "https://m801.music.126.net/a/1.mp3",
+    "title": "晴天",
+    "image": "https://p1.music.126.net/a/1.jpg",
+    "content": "周杰伦",
+}
+
+r = norm(base)
+check(r["type"] == "163", "网易云链接 -> type 改为 163（上游据此签出「网易云音乐」）")
+check(r["singer"] == "周杰伦", "content 映射成 singer")
+check(r["url"] == base["url"] and r["audio"] == base["audio"], "其余字段原样保留")
+
+r = norm({**base, "url": "https://y.qq.com/n/ryqq/songDetail/003Qui1q2u1Zho"})
+check(r["type"] == "custom", "QQ音乐链接 -> 保持 custom（上游给「QQ音乐」品牌）")
+
+r = norm({**base, "url": "https://www.kugou.com/song/#hash=x"})
+check(r["type"] == "kugou", "酷狗链接 -> type=kugou")
+
+r = norm({**base, "url": "https://unknown.example/song/1"})
+check(r["type"] == "custom", "未知域名 -> type 不变")
+
+# 已有 singer 时不覆盖
+r = norm({**base, "singer": "原唱"})
+check(r["singer"] == "原唱", "已有 singer 时不覆盖")
+
+# id 模式原样转发（上游已停用，交给它自己报错）
+r = norm({"type": "163", "id": 186016})
+check(r["type"] == "163" and r["id"] == 186016, "id 模式原样转发")
+
+# 健壮性：非 JSON / 非对象 / 空 都不该抛异常
+check(normalize_sign_request(b"not json") == b"not json", "非 JSON 原样返回")
+check(normalize_sign_request(b"[1,2]") == b"[1,2]", "非对象原样返回")
+check(normalize_sign_request(b"") == b"", "空 body 原样返回")
+
+# 幂等：跑两次结果一致
+once = normalize_sign_request(json.dumps(base).encode())
+twice = normalize_sign_request(once)
+check(json.loads(once) == json.loads(twice), "重复归一化结果一致（幂等）")
+
+check(all(isinstance(d, str) and isinstance(t, str) for d, t in PLATFORM_TYPES),
+      "PLATFORM_TYPES 结构正确")
 
 print()
 print("=" * 66)
