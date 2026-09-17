@@ -1,10 +1,62 @@
 # 更新日志
 
+## v1.3.1（2026-09-17）
+
+**修复 v1.3.0 会导致 Cookie 丢失的严重问题。**
+
+### 问题
+
+v1.3.0 声称「已有配置会自动迁移，Cookie 不会丢」，**实际是错的** ——
+实测升级后 `music.neteaseCookie` 和 `music.qqMusicCookie` 都变成了空值。
+
+### 根因
+
+**AstrBot 会在插件代码能读到配置之前，按 schema 把配置里 schema 不存在的键全部删掉**
+（顶层分组和分组内的键都删）。
+
+在服务器上插探针键验证过：
+
+```
+插入 probe_zzz_not_in_schema（顶层 + music 分组内各一个）
+重启
+-> 顶层探针 ❌ 被删除
+-> music 里探针 ❌ 被删除
+```
+
+所以 v1.3.0 的做法（从 schema 里删掉旧键，然后靠 `migrate_music_config()`
+读旧值搬到新位置）**根本行不通**：迁移代码跑的时候，旧值已经被框架清掉了，
+`conf.get("netease")` 拿到的是 `None`，于是什么都没搬。
+
+### 修复
+
+**在 schema 里保留承载用户数据的旧键**，这样框架就不会清理它们，
+迁移代码才能读到并搬走：
+
+- `netease` 分组保留 4 项：`useNeteaseSongRequest` / `songRequestPlatform` /
+  `songRequestMaxList` / `neteaseCookie`（都标注为「已废弃」）
+- `other.qqMusicCookie` 保留
+
+分组描述里写明了「这一组是旧位置，插件会自动搬运并清空，可以忽略」，
+**下个版本会移除**。
+
+真正没人用的垃圾项仍然删掉了：`isSendVocal`（未移植的发语音开关）/
+`useLocalNeteaseAPI` / `neteaseCloudAPIServer`（自建 API）/
+`neteaseCloudCookie` / `neteaseCloudAudioQuality`（云盘）/
+全部 `kugou*` / `qqMusicAudioQuality`。
+
+### 已经升到 v1.3.0 的用户
+
+Cookie 需要**重新填一次**（在「点歌」分组里）。之后从 v1.2.0 直接升到 v1.3.1
+的路径是完好的，不会再丢。
+
 ## v1.3.0（2026-09-17）
 
 **配置重组 + 点歌发送方式可切换**。点歌配置从「网易云音乐」分组里独立出来
 成为单独的「点歌」分组，顺手清掉了随原 Guoba 面板带过来、本移植版从未使用
-（或已失效）的一堆配置项。**已有配置会自动迁移，Cookie 不会丢。**
+（或已失效）的一堆配置项。
+
+> ⚠️ **这个版本的自动迁移是失效的，会把 Cookie 清空**，
+> 请直接使用 v1.3.1（原因与修复见上）。
 
 ### 新增：点歌发送方式可切换
 
@@ -77,10 +129,10 @@
 点歌平台选项里的**酷狗已移除**（老取直链接口恒返 `err_code=30020`，
 可用替代拿不到可分享的直链）。
 
-### 迁移
+### 迁移（⚠️ 此机制在本版本失效，v1.3.1 才修好）
 
 `core/config_migrate.py` 新增 `migrate_music_config()`，在插件加载时
-**自动**把旧路径的值搬到 `music.*`：
+把旧路径的值搬到 `music.*`：
 
 ```
 netease.useNeteaseSongRequest  ->  music.enable

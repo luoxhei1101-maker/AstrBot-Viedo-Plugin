@@ -231,7 +231,8 @@ aiocqhttp（QQ OneBot）、Telegram、Discord、飞书 / Lark、企业微信、Q
 
 > v1.3.0 起点歌从 `netease` 分组里独立出来成为 `music` 分组，同时删掉了
 > 一堆从未生效的遗留项（网易云自建 API / 云盘 / 发语音开关 / 全部酷狗配置）。
-> **已有配置会自动迁移，Cookie 不会丢**，详见 CHANGELOG。
+> 旧的 `netease` 分组会保留一小段时间用于**自动搬运 Cookie**（描述里标了
+> 「已废弃，可忽略」），下个版本移除。
 
 ### 关键配置项速览
 

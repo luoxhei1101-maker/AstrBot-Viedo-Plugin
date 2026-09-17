@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 from pathlib import Path
@@ -186,6 +187,49 @@ def test_idempotent() -> None:
     check(conf == snapshot, "第二次运行配置未被改动")
 
 
+def test_schema_keeps_migration_keys() -> None:
+    """**最关键的不变量**：迁移依赖的旧键必须留在 schema 里。
+
+    为什么：AstrBot 会在插件代码能读到配置**之前**，按 schema 把配置里
+    schema 不存在的键全部删掉（实测确认：插探针键 -> 重启 -> 被删除）。
+
+    所以如果为了「配置干净」把旧键从 schema 里删掉，迁移代码读到的就是
+    `None`，用户的 Cookie 会被静默清空 —— v1.3.0 就是这么翻车的。
+
+    这个测试确保 `_MUSIC_MOVES` 里引用的每个旧位置都在 schema 里存在。
+    """
+    print("\n--- 迁移依赖的键必须保留在 schema 里 ---")
+    schema_path = Path(__file__).resolve().parent.parent / "_conf_schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+
+    from astrbot_plugin_rconsole.core.config_migrate import _MUSIC_MOVES
+
+    for old_group, old_key, new_key in _MUSIC_MOVES:
+        group = schema.get(old_group) or {}
+        items = group.get("items") or {}
+        check(
+            old_key in items,
+            f"schema 保留了 {old_group}.{old_key}（迁移到 music.{new_key} 需要它）",
+        )
+
+
+def test_schema_drops_garbage() -> None:
+    """纯粹没用过的遗留项确实要清掉（这才是「清理」的意义）。"""
+    print("\n--- 无用的遗留项确实已从 schema 移除 ---")
+    schema_path = Path(__file__).resolve().parent.parent / "_conf_schema.json"
+    flat = json.dumps(json.loads(schema_path.read_text(encoding="utf-8")),
+                      ensure_ascii=False)
+    gone = [
+        "isSendVocal", "useLocalNeteaseAPI", "neteaseCloudAPIServer",
+        "neteaseCloudCookie", "neteaseCloudAudioQuality",
+        "kugouApiServer", "kugouAudioQuality", "kugouCookie",
+        "kugouCookieFields", "qqMusicAudioQuality",
+    ]
+    for k in gone:
+        check(f'"{k}"' not in flat, f"schema 不再包含 {k}")
+    check("music" in flat and '"sendMode"' in flat, "新增的 music 分组与 sendMode 在")
+
+
 def main() -> int:
     test_full_migration()
     test_no_overwrite()
@@ -194,6 +238,8 @@ def main() -> int:
     test_new_install()
     test_empty_values()
     test_idempotent()
+    test_schema_keeps_migration_keys()
+    test_schema_drops_garbage()
     print(f"\n{'=' * 60}")
     print(f"通过 {PASS} 项，失败 {FAIL} 项")
     if FAIL:

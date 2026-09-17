@@ -950,6 +950,106 @@
       }
     }
   },
+  "music": {
+    "description": "点歌（网易云 / QQ音乐）",
+    "type": "object",
+    "hint": "「#点歌 歌名」搜索并列出候选。网易云匿名就能用；QQ音乐需要 Cookie，否则只能试听",
+    "items": {
+      "enable": {
+        "description": "开启点歌",
+        "type": "bool",
+        "hint": "开启后可用 #点歌 歌名；也能指定平台：#点歌 网易云 歌名 / #点歌 QQ音乐 歌名",
+        "default": false
+      },
+      "platform": {
+        "description": "默认平台",
+        "type": "string",
+        "hint": "不写平台时搜哪个。网易云更稳（匿名即可取直链）；QQ音乐音质好但有随机限流，偶尔需要重试",
+        "default": "netease",
+        "options": [
+          "netease",
+          "qq"
+        ],
+        "labels": [
+          "网易云音乐",
+          "QQ音乐"
+        ]
+      },
+      "maxList": {
+        "description": "列表长度",
+        "type": "int",
+        "hint": "一次列出多少首候选，1–20",
+        "default": 10
+      },
+      "sendMode": {
+        "description": "发送方式",
+        "type": "string",
+        "hint": "link=歌名+网页链接（最稳、不占带宽）；card=音乐卡片（群里可直接点播放）；voice=语音条（下载后发送，体积较大、部分平台有大小限制）",
+        "default": "link",
+        "options": [
+          "link",
+          "card",
+          "voice"
+        ],
+        "labels": [
+          "文字 + 链接",
+          "音乐卡片",
+          "语音条"
+        ]
+      },
+      "neteaseCookie": {
+        "description": "网易云Cookie",
+        "type": "string",
+        "hint": "在网易云官网登录后 F12 取，格式：MUSIC_U=xxx。不填也能用，填了才能播放 VIP 歌曲",
+        "default": ""
+      },
+      "qqMusicCookie": {
+        "description": "QQ音乐Cookie",
+        "type": "string",
+        "hint": "浏览器登录 https://y.qq.com 后 F12→Network→任意请求→Request Headers→Cookie 整串复制。必须含 qqmusic_key（约 12 小时过期）",
+        "default": ""
+      }
+    }
+  },
+  "netease": {
+    "description": "网易云音乐（旧版位置，已废弃）",
+    "type": "object",
+    "hint": "⚠️ 这一组是 v1.3.0 之前的旧位置，已废弃。插件启动时会自动把这里的值搬进「点歌」分组并清空，所以你可以忽略它、不用手动改。保留它只是为了让你升级时不必重填 Cookie。下个版本会移除。",
+    "items": {
+      "useNeteaseSongRequest": {
+        "description": "（已废弃）开启点歌",
+        "type": "bool",
+        "hint": "已移到「点歌」分组的「开启点歌」",
+        "default": false
+      },
+      "songRequestPlatform": {
+        "description": "（已废弃）点歌平台",
+        "type": "string",
+        "hint": "已移到「点歌」分组的「默认平台」",
+        "default": "netease",
+        "options": [
+          "netease",
+          "qq"
+        ],
+        "labels": [
+          "网易云音乐",
+          "QQ音乐"
+        ]
+      },
+      "songRequestMaxList": {
+        "description": "（已废弃）点歌列表长度",
+        "type": "int",
+        "hint": "已移到「点歌」分组的「列表长度」",
+        "default": 10
+      },
+      "neteaseCookie": {
+        "description": "（已废弃）网易云Cookie",
+        "type": "string",
+        "hint": "已移到「点歌」分组。留在这里是为了升级时不丢 Cookie，插件会自动搬走并清空",
+        "default": ""
+      }
+    }
+  },
   "other": {
     "description": "其他平台（微博、小红书、视频号、链接总结）",
     "type": "object",
@@ -1133,6 +1233,12 @@
             }
           }
         }
+      },
+      "qqMusicCookie": {
+        "description": "（已废弃）QQ音乐Cookie",
+        "type": "string",
+        "hint": "已移到「点歌」分组。留在这里是为了升级时不丢 Cookie，插件会自动搬走并清空",
+        "default": ""
       }
     }
   },
@@ -1215,67 +1321,6 @@
         "type": "int",
         "hint": "【涉及哔哩哔哩、抖音、YouTuBe、tiktok】下载并发个数：与【允许多用户下载个数】不同，这个功能影响下载速度。默认是1表示不使用，使用根据服务器性能进行选择，如果不确定是否可以用1即可，高性能服务器随意4~12都可以，看CPU的实力",
         "default": 1
-      }
-    }
-  },
-  "music": {
-    "description": "点歌（网易云 / QQ音乐）",
-    "type": "object",
-    "hint": "「#点歌 歌名」搜索并列出候选。网易云匿名就能用；QQ音乐需要 Cookie，否则只能试听",
-    "items": {
-      "enable": {
-        "description": "开启点歌",
-        "type": "bool",
-        "hint": "开启后可用 #点歌 歌名；也能指定平台：#点歌 网易云 歌名 / #点歌 QQ音乐 歌名",
-        "default": false
-      },
-      "platform": {
-        "description": "默认平台",
-        "type": "string",
-        "hint": "不写平台时搜哪个。网易云更稳（匿名即可取直链）；QQ音乐音质好但有随机限流，偶尔需要重试",
-        "default": "netease",
-        "options": [
-          "netease",
-          "qq"
-        ],
-        "labels": [
-          "网易云音乐",
-          "QQ音乐"
-        ]
-      },
-      "maxList": {
-        "description": "列表长度",
-        "type": "int",
-        "hint": "一次列出多少首候选，1–20",
-        "default": 10
-      },
-      "sendMode": {
-        "description": "发送方式",
-        "type": "string",
-        "hint": "link=歌名+网页链接（最稳、不占带宽）；card=音乐卡片（群里可直接点播放）；voice=语音条（下载后发送，体积较大、部分平台有大小限制）",
-        "default": "link",
-        "options": [
-          "link",
-          "card",
-          "voice"
-        ],
-        "labels": [
-          "文字 + 链接",
-          "音乐卡片",
-          "语音条"
-        ]
-      },
-      "neteaseCookie": {
-        "description": "网易云Cookie",
-        "type": "string",
-        "hint": "在网易云官网登录后 F12 取，格式：MUSIC_U=xxx。不填也能用，填了才能播放 VIP 歌曲",
-        "default": ""
-      },
-      "qqMusicCookie": {
-        "description": "QQ音乐Cookie",
-        "type": "string",
-        "hint": "浏览器登录 https://y.qq.com 后 F12→Network→任意请求→Request Headers→Cookie 整串复制。必须含 qqmusic_key（约 12 小时过期）",
-        "default": ""
       }
     }
   }
