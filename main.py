@@ -90,6 +90,7 @@ from .core.music_search import (
     PLATFORM_LABELS,
     get_play_url as music_get_play_url,
     search as music_search,
+    verify_audio_url as music_verify_audio,
 )
 from .core.music_sign_proxy import (
     DEFAULT_UPSTREAM as MUSIC_SIGN_UPSTREAM,
@@ -2045,8 +2046,11 @@ class Main(Star):
         for song in targets:
             if mode == "card":
                 # custom 卡片的 audio 是官方强校验项（缺了整个消息段会被丢弃），
-                # 所以必须取直链
+                # 所以必须取直链；而且必须是**能播的**直链，否则卡片点不开
                 song.play_url = await self._music_resolve_url(song)
+                if song.play_url and not await music_verify_audio(song.play_url):
+                    logger.info(f"[R插件] 「{song.label}」直链不可用，不构造卡片")
+                    song.play_url = ""
                 comp = self._music_card(song)
                 if comp is None:
                     logger.info(f"[R插件] 点歌「{song.label}」构造不出卡片，跳过")
@@ -2057,6 +2061,10 @@ class Main(Star):
 
             song.play_url = await self._music_resolve_url(song)
             if not song.play_url:
+                continue
+            # 发送前确认链接真是音频 —— 防止把「404 网页」当 mp3 发出去
+            if not await music_verify_audio(song.play_url):
+                logger.info(f"[R插件] 「{song.label}」直链不可用，跳过（改发链接）")
                 continue
 
             if mode == "voice":

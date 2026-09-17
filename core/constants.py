@@ -190,7 +190,9 @@ QISHUI_MUSIC_TEMP_API = "https://api.cenguigui.cn/api/qishui/?msg={}&limit=1&typ
 # 没有可分享的 CDN 直链，不适合「发链接」这种交付方式。
 NETEASE_SEARCH_API = "http://music.163.com/api/cloudsearch/pc"
 NETEASE_SONG_URL_API = "https://interface3.music.163.com/api/song/enhance/player/url/v1"
-NETEASE_SONG_OUTER_URL = "http://music.163.com/song/media/outer/url?id={id}"
+# ⚠️ 已废弃，不要再使用：``song/media/outer/url`` 现在恒 302 到
+# ``music.163.com/404``（返回 HTML），对所有歌都一样。留着仅作记录。
+# NETEASE_SONG_OUTER_URL = "http://music.163.com/song/media/outer/url?id={id}"
 NETEASE_SONG_PAGE = "http://music.163.com/#/song?id={id}"
 
 QQ_MUSIC_SEARCH_API = "https://u.y.qq.com/cgi-bin/musicu.fcg"

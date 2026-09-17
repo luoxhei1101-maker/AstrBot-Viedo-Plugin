@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -51,7 +52,6 @@ from .constants import (
     COMMON_USER_AGENT,
     NETEASE_SEARCH_API,
     NETEASE_SEARCH_COOKIE,
-    NETEASE_SONG_OUTER_URL,
     NETEASE_SONG_PAGE,
     NETEASE_SONG_URL_API,
     NETEASE_URL_COOKIE,
@@ -203,14 +203,15 @@ async def search_netease(keyword: str, limit: int = MAX_RESULTS) -> list[Song]:
 async def netease_play_url(
     song: Song, cookie: str = "", level: str = DEFAULT_LEVEL
 ) -> str:
-    """取网易云音频直链。
+    """取网易云音频直链。取不到返回空串（调用方落回 ``page_url``）。
 
-    优先调 ``player/url/v1``（能拿到真实可下载地址）；失败则回落到
-    ``song/media/outer/url``——那个 URL 会对可用歌曲 302 到 CDN，
-    对不可用歌曲 302 回 ``music.163.com``。
+    只用 ``player/url/v1``。``cookie`` 传 ``MUSIC_U=...`` 能解锁 VIP 歌；
+    匿名时 VIP 歌（``fee=1``）与需购买（``fee=4``）都会拿到空 url。
 
-    ``cookie`` 传 ``MUSIC_U=...`` 时能解锁 VIP 歌；传空串则匿名，
-    VIP 歌（``fee=1``）会拿到空 url。
+    ⚠️ **不要再回落到 ``song/media/outer/url``。** 那个接口已废弃：实测
+    无论什么歌（VIP / 免费 / 不存在的 id）都恒 302 到 ``music.163.com/404``，
+    最终返回 ``text/html``。回落过去只会让用户收到一个内容是 404 网页的
+    「xxx.mp3」—— 表现就是「文件收到了但播不了」。
     """
     lv = level if level in NETEASE_LEVELS else DEFAULT_LEVEL
     body = (
@@ -241,7 +242,9 @@ async def netease_play_url(
     except HttpError as exc:
         logger.warning(f"[R插件] 网易云取直链失败: {exc}")
 
-    return NETEASE_SONG_OUTER_URL.format(id=song.song_id)
+    # 拿不到就是拿不到 —— 返回空串让上层退回「歌名 + 播放页链接」。
+    # 详见本函数 docstring 上关于 outer/url 已废弃的说明。
+    return ""
 
 
 # ==========================================================================
@@ -579,6 +582,60 @@ async def get_play_url(
     if song.platform == "qqmusic":
         return await qqmusic_play_url(song, qq_cookie, high)
     return ""
+
+
+# ==========================================================================
+# 直链可用性校验
+# ==========================================================================
+
+# ``url -> (校验时间, 是否可用)``。同一 URL 不重复校验。
+_AUDIO_OK_CACHE: dict[str, tuple[float, bool]] = {}
+_AUDIO_OK_TTL = 600.0
+
+
+async def verify_audio_url(url: str, timeout: float = 8.0) -> bool:
+    """发送前确认这个 URL 真能下到音频。
+
+    只发 ``Range: bytes=0-0``（一个字节），足够拿到状态码与 ``Content-Type``，
+    不浪费带宽。用来拦掉「接口给的链接其实已经是 404 网页」——否则用户会收到
+    一个叫 ``xxx.mp3``、内容却是 HTML 的坏文件（实测踩过）。
+
+    校验本身因网络问题失败时返回 ``True``：宁可放过，也不误杀能用的链接。
+    """
+    if not url:
+        return False
+
+    now = time.time()
+    hit = _AUDIO_OK_CACHE.get(url)
+    if hit and now - hit[0] < _AUDIO_OK_TTL:
+        return hit[1]
+
+    from .http import get_session
+
+    ok = True
+    try:
+        session = get_session()
+        async with session.get(
+            url,
+            headers={"Range": "bytes=0-0", "User-Agent": COMMON_USER_AGENT},
+            timeout=timeout,
+        ) as resp:
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            final = str(resp.url)
+            if resp.status >= 400:
+                ok = False
+                logger.info(f"[R插件] 直链不可用（HTTP {resp.status}）: {url[:90]}")
+            elif any(k in ctype for k in ("html", "json", "text/")):
+                ok = False
+                logger.info(f"[R插件] 直链返回的不是音频（{ctype}）: {url[:90]}")
+            elif "/404" in final or "/error" in final:
+                ok = False
+                logger.info(f"[R插件] 直链被重定向到错误页: {final[:90]}")
+    except Exception as exc:  # noqa: BLE001 - 网络抖动不算「链接坏了」
+        logger.debug(f"[R插件] 直链校验跳过（{type(exc).__name__}: {exc}）")
+
+    _AUDIO_OK_CACHE[url] = (now, ok)
+    return ok
 
 
 # ==========================================================================
