@@ -46,6 +46,7 @@ SSR 页面**会把动图降级成静态图**：``aweme_type`` 从 68 改写成 2
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -482,7 +483,10 @@ async def probe_quality(video_uri: str, ratio: str) -> dict[str, Any] | None:
             range_bytes="bytes=0-1",
             timeout=15.0,
         )
-    except HttpError as exc:
+    except Exception as exc:  # noqa: BLE001
+        # 这里必须兜住所有异常，不能只兜 HttpError：`probe_qualities` 用
+        # asyncio.gather 并发调用本函数，任何一个协程抛出未捕获异常都会让
+        # 整批探测一起失败。单档探测失败只是「这个档位不可用」，返回 None 即可。
         logger.debug(f"[R插件][抖音] 画质探测失败 {ratio}: {exc}")
         return None
 
@@ -503,13 +507,27 @@ async def probe_qualities(
 
     去重是必须的：某档位不存在时服务端不会报错，而是退回默认档，
     于是四个 ratio 探出来是同一个文件。不去重就会把同一个档位当成四个。
+
+    **并发探测（性能）**：各档位之间完全独立，以前 ``for ... await`` 串行发
+    最多 4 个请求，每个 15s 超时——抖音每次解析都白等 2-4 个 RTT。现在用
+    ``asyncio.gather`` 一起发，再**按原顺序**遍历去重。
+
+    顺序语义保持不变：仍然是从高画质往低画质走，遇到 ``size`` 重复的
+    （说明服务端退回了同一个文件）就跳过，所以选出来的 ``qualities[0]``
+    和串行版本完全一致。
     """
     ordered = DY_COMPRESSED_PLAY_RATIOS if prefer_compressed else DY_PLAY_RATIOS
+
+    # 并发探测所有档位；单档失败返回 None，不影响其它档
+    probed = await asyncio.gather(
+        *(probe_quality(video_uri, ratio) for ratio in ordered),
+        return_exceptions=False,
+    )
+
     available: list[dict[str, Any]] = []
     seen_sizes: set[int] = set()
 
-    for ratio in ordered:
-        result = await probe_quality(video_uri, ratio)
+    for result in probed:
         if not result:
             continue
         if result["size"] in seen_sizes:

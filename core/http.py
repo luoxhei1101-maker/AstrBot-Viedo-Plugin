@@ -5,6 +5,26 @@
 
 AstrBot 官方规范要求插件不要用 `requests`，这里统一用 aiohttp —— 它是
 AstrBot 本体的核心依赖，插件里不用再单独装。
+
+**连接复用（性能关键）**
+=======================
+
+早期实现每个请求都 ``TCPConnector(ssl=False)`` + ``ClientSession(...)``，
+而且写在 retry 循环**里面**——一次重试就再建一套。代价是：
+
+- 每次请求都重做 TCP 三次握手 + TLS 协商（境外接口 100–300ms）
+- 连接池 ``limit`` 形同虚设，keep-alive 完全用不上
+- 抖音一次解析要发 1(签名) + 1(主接口) + 4(画质探测) 个请求，
+  B 站一次解析要发 3–4 个，全部各建一套
+
+现在改为**模块级 lazy 单例 session**：所有请求共用连接池，
+retry 只重试请求本身，不再重建 session。冷启动只付一次建连成本。
+
+**为什么要 lazy 而不是在模块导入时建？**
+
+``ClientSession`` 必须在事件循环里创建。模块导入发生在 AstrBot 启动阶段，
+那时未必有运行中的 loop（而且不同事件循环里创建的 session 不能跨用），
+所以用 ``get_session()`` 在首次真正发请求时按当前 loop 建。
 """
 
 from __future__ import annotations
@@ -41,6 +61,80 @@ class HttpError(RuntimeError):
     """网络层错误，方便上层统一兜底。"""
 
 
+# ==========================================================================
+# 共享连接池
+# ==========================================================================
+
+# 连接池上限。解析是「突发少量并发」的场景（图集下载另走 downloader.py
+# 自己的池），这里给一个够用又不至于泄漏太多 socket 的值。
+_POOL_LIMIT = 32
+_DEFAULT_TIMEOUT = 30.0
+
+_session: aiohttp.ClientSession | None = None
+_session_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _build_session(loop: asyncio.AbstractEventLoop) -> aiohttp.ClientSession:
+    """按给定事件循环建一个带连接池的 session。"""
+    connector = aiohttp.TCPConnector(
+        ssl=False,
+        limit=_POOL_LIMIT,
+        limit_per_host=_POOL_LIMIT,
+        # keep-alive 复用：B 站/抖音都是同一 host 连发多个请求，
+        # 复用能省掉重复的 TCP + TLS 握手
+        ttl_dns_cache=300,
+    )
+    return aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=_DEFAULT_TIMEOUT),
+        connector=connector,
+        # 插件自己管 Cookie（显式塞进 header），不要 session 级别的 jar，
+        # 避免跨请求串味（比如抖音的 ttwid 污染 B 站的请求）
+        cookie_jar=aiohttp.DummyCookieJar(),
+    )
+
+
+def get_session() -> aiohttp.ClientSession:
+    """取共享 session；没有或事件循环换了就重建。
+
+    aiohttp 的 session 绑定创建它的那个事件循环，不能跨 loop 复用。
+    插件重载 / 测试里多次 ``asyncio.run`` 都会产生新 loop，所以这里
+    检测到 loop 变了就丢弃旧 session 重建，避免 ``RuntimeError: Event loop
+    is closed``。
+    """
+    global _session, _session_loop
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:  # 没有运行中的 loop，调用方本就不该在同步上下文发请求
+        loop = None
+
+    if (
+        _session is not None
+        and not _session.closed
+        and _session_loop is loop
+    ):
+        return _session
+
+    # loop 变了（或首次）：旧 session 所属的 loop 多半已经关了，
+    # 直接丢弃即可，不要在旧 loop 上 await close()
+    _session = _build_session(loop)  # type: ignore[arg-type]
+    _session_loop = loop
+    logger.debug("[R插件][HTTP] 已建立共享连接池")
+    return _session
+
+
+async def close_session() -> None:
+    """关闭共享 session。插件卸载时调用，释放连接。"""
+    global _session, _session_loop
+    if _session is not None and not _session.closed:
+        try:
+            await _session.close()
+        except Exception as exc:  # noqa: BLE001 - 关闭失败不该影响卸载
+            logger.debug(f"[R插件][HTTP] 关闭共享连接池出错: {exc}")
+    _session = None
+    _session_loop = None
+
+
 async def fetch(
     url: str,
     *,
@@ -58,17 +152,20 @@ async def fetch(
     if headers:
         merged.update(headers)
 
+    session = get_session()
     last_err: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            connector = aiohttp.TCPConnector(ssl=False)
-            async with aiohttp.ClientSession(
+            # 每个请求单独设 timeout，而不是靠 session 的全局值——
+            # 短链展开要快（10s）、媒体下载要慢（120s），共用池也得各自控制
+            async with session.get(
+                url,
+                headers=merged,
+                allow_redirects=True,
                 timeout=aiohttp.ClientTimeout(total=timeout),
-                connector=connector,
-            ) as session:
-                async with session.get(url, headers=merged, allow_redirects=True) as resp:
-                    body = await resp.read()
-                    return body, str(resp.url)
+            ) as resp:
+                body = await resp.read()
+                return body, str(resp.url)
         except Exception as exc:  # noqa: BLE001 - 网络错误种类多，统一重试
             last_err = exc
 
@@ -112,20 +209,19 @@ async def fetch_head_info(
         merged["Range"] = range_bytes
 
     last_err: Exception | None = None
+    session = get_session()
     for attempt in range(retries + 1):
         try:
-            connector = aiohttp.TCPConnector(ssl=False)
-            async with aiohttp.ClientSession(
+            async with session.get(
+                url,
+                headers=merged,
+                allow_redirects=True,
                 timeout=aiohttp.ClientTimeout(total=timeout),
-                connector=connector,
-            ) as session:
-                async with session.get(
-                    url, headers=merged, allow_redirects=True
-                ) as resp:
-                    # 头拿到了就够了，响应体直接丢弃——aiohttp 会在退出上下文时释放
-                    hdrs = {k.lower(): v for k, v in resp.headers.items()}
-                    set_cookie = "\n".join(resp.headers.getall("Set-Cookie", []))
-                    return resp.status, hdrs, set_cookie, str(resp.url)
+            ) as resp:
+                # 头拿到了就够了，响应体直接丢弃——aiohttp 会在退出上下文时释放
+                hdrs = {k.lower(): v for k, v in resp.headers.items()}
+                set_cookie = "\n".join(resp.headers.getall("Set-Cookie", []))
+                return resp.status, hdrs, set_cookie, str(resp.url)
         except Exception as exc:  # noqa: BLE001
             last_err = exc
             if _is_dns_error(exc):
@@ -156,20 +252,21 @@ async def post_json(
         merged.update(headers)
 
     last_err: Exception | None = None
+    session = get_session()
     for attempt in range(retries + 1):
         try:
-            connector = aiohttp.TCPConnector(ssl=False)
-            async with aiohttp.ClientSession(
+            async with session.post(
+                url,
+                json=payload,
+                headers=merged,
                 timeout=aiohttp.ClientTimeout(total=timeout),
-                connector=connector,
-            ) as session:
-                async with session.post(url, json=payload, headers=merged) as resp:
-                    set_cookie = "\n".join(resp.headers.getall("Set-Cookie", []))
-                    text = await resp.text()
-                    try:
-                        return json.loads(text), set_cookie
-                    except json.JSONDecodeError:
-                        return {"_raw": text[:500]}, set_cookie
+            ) as resp:
+                set_cookie = "\n".join(resp.headers.getall("Set-Cookie", []))
+                text = await resp.text()
+                try:
+                    return json.loads(text), set_cookie
+                except json.JSONDecodeError:
+                    return {"_raw": text[:500]}, set_cookie
         except Exception as exc:  # noqa: BLE001
             last_err = exc
             if _is_dns_error(exc):
@@ -250,17 +347,25 @@ async def fetch_with_cookies(
     if headers:
         merged.update(headers)
 
+    # 这个函数**不能**用共享 session：它要靠 session 级 CookieJar 收集整条
+    # 重定向链上的 Set-Cookie（B 站扫码的 SESSDATA 就在这里下发），而共享
+    # session 用的是 DummyCookieJar（故意不存 cookie，避免跨请求串味）。
+    #
+    # 但连接器可以复用共享池——这样仍然享受 keep-alive，只是多一个轻量的
+    # session 外壳（session 本身只是个上下文对象，开销远小于建连接）。
+    shared = get_session()
+    jar = aiohttp.CookieJar(unsafe=True)
+    temp_session = aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=timeout),
+        connector=shared.connector,
+        cookie_jar=jar,
+    )
+
     last_err: Exception | None = None
-    for attempt in range(retries + 1):
-        try:
-            jar = aiohttp.CookieJar(unsafe=True)
-            connector = aiohttp.TCPConnector(ssl=False)
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=timeout),
-                connector=connector,
-                cookie_jar=jar,
-            ) as session:
-                async with session.get(
+    try:
+        for attempt in range(retries + 1):
+            try:
+                async with temp_session.get(
                     url, headers=merged, allow_redirects=True
                 ) as resp:
                     body = await resp.read()
@@ -273,13 +378,16 @@ async def fetch_with_cookies(
                         except AttributeError:  # pragma: no cover - 旧版 aiohttp 兜底
                             cookies[key] = morsel.value
                     return body, final_url, cookies
-        except Exception as exc:  # noqa: BLE001
-            last_err = exc
-            if _is_dns_error(exc):
-                raise HttpError(f"域名解析失败（接口可能已失效）: {url}") from exc
-            if attempt < retries:
-                await asyncio.sleep(0.8 * (attempt + 1))
-                continue
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+                if _is_dns_error(exc):
+                    raise HttpError(f"域名解析失败（接口可能已失效）: {url}") from exc
+                if attempt < retries:
+                    await asyncio.sleep(0.8 * (attempt + 1))
+                    continue
+    finally:
+        # 只关外壳，不关 connector（它是共享的，关了会连累所有请求）
+        await temp_session.close()
 
     raise HttpError(f"请求失败: {url} -> {last_err}") from last_err
 

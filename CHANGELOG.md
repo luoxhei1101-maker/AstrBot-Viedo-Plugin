@@ -1,5 +1,72 @@
 # 更新日志
 
+## v1.1.7（2026-09-17）
+
+性能优化版。核心目标：**缩短从「发出链接」到「看到媒体」的等待时间**。
+三项优化实测合计省下约 **0.5–1.5 秒/次解析**，且不改变任何功能行为。
+
+### 优化
+
+- **HTTP 连接池复用（提速约 1.8x）**。此前每个 HTTP 请求都新建
+  `TCPConnector` + `ClientSession`，而且建在 **retry 循环内部**——一次重试就
+  再建一套。代价是每次都重做 TCP 三次握手 + TLS 协商，连接池形同虚设。
+  B 站一次解析要发 3–4 个请求、抖音要发 6 个（签名 + 主接口 + 4 档画质探测），
+  全部各建一套。
+
+  现在改为模块级 lazy 单例 session（`core/http.py::get_session()`），所有请求
+  共用连接池，retry 只重试请求本身。**实测：8 次同 host 请求 785ms → 433ms**
+  （1.81x）；8 个并发请求仅 86ms。
+
+  两个细节：
+
+  - 用 `DummyCookieJar` 且 **不** 在 session 级存 Cookie——插件自己把 Cookie
+    塞进 header，避免跨请求串味（比如抖音的 ttwid 污染 B 站请求）。
+  - 检测到事件循环变化会自动重建 session（插件重载 / 测试里的新 `asyncio.run`
+    都会产生新 loop，直接复用会报 `Event loop is closed`）。
+  - `fetch_with_cookies` 例外：它必须收 `Set-Cookie`（B 站扫码的 SESSDATA 靠
+    这个下发），所以用独立 CookieJar；但连接器复用共享池，仍然享受 keep-alive。
+
+- **a-bogus 签名改常驻 node 进程（提速 165x）**。此前每次生成签名都起一个
+  node 子进程：node 冷启动 40–80ms + `require` 460 行混淆 JS 再 40–120ms，
+  **而签名本身不到 5ms**——95% 以上的时间花在「把引擎热起来」上，而且签一次
+  热一次，永远热不起来。
+
+  新增 `core/a_bogus_worker.cjs`：node 常驻，脚本只加载一次，之后走
+  stdin/stdout 行协议复用同一个 V8 实例。**实测：269.3ms → 1.6ms/次（165x）**。
+
+  worker 起不来时（node 缺失、容器限制、脚本损坏）**自动降级**回一次性子进程，
+  功能不受影响，只是慢一点。
+
+- **抖音画质探测改并发**。`probe_qualities` 以前 `for ratio: await probe(...)`
+  串行探 4 个画质档，每个 15s 超时——每次解析白等 2–4 个 RTT。现在用
+  `asyncio.gather` 一起发，**再按原顺序去重**，所以选出的最优档位与串行版本
+  完全一致。
+
+- **base64 编码移出事件循环**。视频发 base64 是跨容器的硬性要求，但
+  「读文件 + 编码」是同步阻塞的，一个 70MB 视频峰值内存约 100MB、耗时数百
+  毫秒，期间 AstrBot 所有协程都被卡住（包括其它会话）。现在丢到
+  `asyncio.to_thread` 执行，`_video_component` 相应改为 `async`。
+
+- **正则预编译缓存**。`match_rule` 每条 URL 都要顺序试最多 24 条规则，原来
+  每次调 `re.search(pattern_str, ...)`。现在按 pattern 串缓存编译结果
+  （`core/constants.py::_compiled`），命中后直接调 `Pattern.search`。
+
+### 说明
+
+- `core/general_adapter.py` 的「第三方接口按优先级逐个轮换」**保持串行**：
+  这是有意的设计取舍。并发会同时对多个第三方接口施压，容易触发风控，
+  而这类接口本身就是「谁先能用谁上」的兜底角色。
+- 插件卸载（`terminate`）时会关停常驻 node 进程并关闭共享连接池，
+  不留僵尸进程和悬挂 socket。
+
+### 新增
+
+- `tests/test_a_bogus_worker.py`——常驻 worker 的正确性 + 耗时对比测试。
+- `tests/test_http_pool_bench.py`——连接池复用的真实网络耗时对比。
+- `tests/test_album_send_path.py` 新增 3 项断言：`_video_component` 必须是
+  `async`，且**每个调用点都必须带 `await`**（漏了会静默拿到 coroutine 对象，
+  表现为「视频发不出去但不报错」，极难排查）。
+
 ## v1.1.6（2026-09-17）
 
 ### 修复

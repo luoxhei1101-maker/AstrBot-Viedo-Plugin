@@ -56,6 +56,7 @@ from astrbot.api.event.filter import CustomFilter
 from astrbot.api.star import Context, Star
 
 from .core import bili_login
+from .core.a_bogus import close_worker as close_a_bogus_worker
 from .core.bili_login import QRCodeUnavailable
 from .core.bili_comment import fetch_bili_comments
 from .core.douyin_comment import fetch_douyin_comments
@@ -79,13 +80,25 @@ from .core.downloader import (
     download_many_candidates,
 )
 from .core.external import describe_environment, find_tool
-from .core.http import HttpError
+from .core.http import HttpError, close_session as close_http_session
 from .core.media import MergeError, merge_dash
 from .platforms import ResolveResult, call
 from .platforms import names as resolver_names
 
 # B 站 QQ 小程序的 appid（判断 Json 消息段是不是 B 站小程序卡片用）
 _BILI_MINIAPP_APPID = "1109937557"
+
+
+def _read_video_base64(path: Path) -> str:
+    """读文件并编码成 base64 字符串。
+
+    抽成模块级函数是为了能用 ``asyncio.to_thread`` 丢进线程池跑——
+    读 + 编码是同步阻塞的，视频大的时候会卡住事件循环（见
+    ``Main._video_component`` 的说明）。
+    """
+    import base64
+
+    return base64.b64encode(path.read_bytes()).decode("ascii")
 
 
 def _find_bili_link_in_messages(messages: list) -> str | None:
@@ -663,7 +676,7 @@ class Main(Star):
                     tag=f"bili_{result.extra.get('bvid', 'x')}",
                 )
                 event.track_temporary_local_file(str(merged))
-                comp = self._video_component(merged)
+                comp = await self._video_component(merged)
                 if comp is None:
                     raise MergeError(f"合并产物不可读: {merged}")
                 yield event.chain_result([comp])
@@ -687,7 +700,7 @@ class Main(Star):
             # 登记给 AstrBot，事件结束后自动回收
             event.track_temporary_local_file(path)
             try:
-                comp = self._video_component(path)
+                comp = await self._video_component(path)
                 if comp is None:
                     raise RuntimeError(f"视频文件不可读: {path}")
                 yield event.chain_result([comp])
@@ -720,7 +733,7 @@ class Main(Star):
             if local_path:
                 event.track_temporary_local_file(local_path)
                 try:
-                    comp = self._video_component(local_path)
+                    comp = await self._video_component(local_path)
                     if comp is None:
                         raise RuntimeError(f"视频文件不可读: {local_path}")
                     yield event.chain_result([comp])
@@ -898,7 +911,7 @@ class Main(Star):
             return "音频"
         return ""
 
-    def _video_component(self, path: str | Path):
+    async def _video_component(self, path: str | Path):
         """把一个本地视频文件变成可跨容器发送的 ``Comp.Video``。
 
         **为什么不能直接用 ``Comp.Video.fromFileSystem``？**
@@ -923,21 +936,28 @@ class Main(Star):
         解码，不依赖文件路径。代价是消息体膨胀约 33%（base64 编码开销），
         但这是**唯一能跨容器送达的方式**。
 
-        Returns:
-            可发送的 ``Comp.Video``；文件不存在时返回 ``None``。
-        """
-        import base64
+        **为什么是 async**：读文件 + base64 编码都是**同步阻塞**的。一个
+        70MB 的视频要先整个读进内存再编码，峰值内存约 100MB、耗时数百毫秒。
+        直接在事件循环里做，这期间 AstrBot 所有协程都被卡住（包括其它会话的
+        消息处理），所以丢到线程池执行。
 
+        Returns:
+            可发送的 ``Comp.Video``；文件不存在或读取失败时返回 ``None``。
+        """
         p = Path(path)
+        if not p.is_file():
+            logger.warning(f"[R插件] 视频文件不存在，无法发送: {p}")
+            return None
+
         try:
-            if not p.is_file():
-                logger.warning(f"[R插件] 视频文件不存在，无法发送: {p}")
-                return None
-            data = base64.b64encode(p.read_bytes()).decode("ascii")
-            return Comp.Video.fromBase64(data)
+            data = await asyncio.to_thread(_read_video_base64, p)
         except OSError as exc:
             logger.warning(f"[R插件] 读取视频失败 {p}: {exc}")
             return None
+
+        if not data:
+            return None
+        return Comp.Video.fromBase64(data)
 
     async def _download_album_stills(
         self, result: ResolveResult, still_images: list[str]
@@ -1074,7 +1094,7 @@ class Main(Star):
                     if vi < len(anim_paths):
                         path = anim_paths[vi]
                         if path is not None:
-                            comp = self._video_component(path)
+                            comp = await self._video_component(path)
                             if comp is not None:
                                 chain.append(comp)
                             else:
@@ -1116,7 +1136,7 @@ class Main(Star):
                     path = anim_paths[vi]
                     vi += 1
                     if path is not None:
-                        comp = self._video_component(path)
+                        comp = await self._video_component(path)
                         if comp is not None:
                             chain.append(comp)
                             sent += 1
@@ -1153,7 +1173,7 @@ class Main(Star):
                 if path is None:
                     skipped += 1
                     continue
-                comp = self._video_component(path)
+                comp = await self._video_component(path)
                 if comp is None:
                     skipped += 1
                 else:
@@ -1513,5 +1533,11 @@ class Main(Star):
         if self._bg_tasks:
             await asyncio.gather(*self._bg_tasks, return_exceptions=True)
             self._bg_tasks.clear()
+
+        # 关停常驻的 node 签名进程（不留僵尸进程）
+        await close_a_bogus_worker()
+
+        # 关闭共享 HTTP 连接池，释放 socket
+        await close_http_session()
 
         logger.info("[R插件] 已卸载")

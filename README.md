@@ -318,7 +318,7 @@ resolver 不依赖 AstrBot，可以脱离框架单独测试。
 | `rule: [{reg, fnc}]` | `@filter.regex(合并正则)` |
 | `e.reply(x)` | `yield event.plain_result(x)` |
 | `segment.image(url)` | `Comp.Image.fromURL(url)` |
-| `segment.video(path)` | `Comp.Video.fromFileSystem(path)` |
+| `segment.video(path)` | `Comp.Video.fromBase64(...)`（见下方「性能设计」） |
 | `segment.record(path)` | `Comp.Record.fromURL(url)` |
 | `Bot.makeForwardMsg()` | `Comp.Node` + `Comp.Nodes`（合并转发） |
 | `puppeteer.screenshot()` | `Star.html_render()` |
@@ -327,6 +327,31 @@ resolver 不依赖 AstrBot，可以脱离框架单独测试。
 | 全局 `redis` | `Star.get_kv_data()` / `put_kv_data()` |
 | 自建 OpenAI 调用 | `Context.get_using_provider_async()` |
 
+### 性能设计
+
+解析类插件的体验瓶颈几乎全在「等待」上，所以做了几处针对性优化：
+
+| 优化点 | 之前 | 现在 | 收益 |
+|---|---|---|---|
+| HTTP 连接池 | 每请求新建 session + connector | 模块级共享连接池 | 同 host 连发 **1.8x** |
+| a-bogus 签名 | 每次起一个 node 子进程 | node 常驻 + 行协议 | **165x**（269ms→1.6ms） |
+| 抖音画质探测 | 4 个档位串行探 | `asyncio.gather` 并发 | 省 2–4 个 RTT |
+| 视频 base64 编码 | 阻塞事件循环 | `asyncio.to_thread` | 不卡其它会话 |
+| 平台规则匹配 | 每条 URL 重新编译正则 | 编译结果缓存 | 24 条规则零重复编译 |
+
+几个值得说明的取舍：
+
+- **为什么视频必须走 base64**：AstrBot 与协议端常常是两个容器、无共享挂载。
+  aiocqhttp 适配器对 `Image`/`Record` 会转 base64，但对 `Video` 是**原样传
+  `file://` 路径**——协议端 `realpath` 必然 ENOENT，整条消息链发送失败。
+  代价是消息体膨胀约 33%，但这是唯一能跨容器送达的方式。
+- **为什么第三方兜底接口保持串行**：`core/general_adapter.py` 按优先级逐个
+  轮换，并发会同时对多个第三方接口施压、易触发风控。这类接口本身就是
+  「谁先能用谁上」的兜底角色，串行更稳。
+- **`_video_component` 是 async**：base64 编码是同步阻塞的，70MB 视频峰值内存
+  约 100MB、耗时数百毫秒，必须丢线程池。所以**每个调用点都要 `await`**
+  （`tests/test_album_send_path.py` 有断言锁死，漏写会静默拿到 coroutine 对象）。
+
 ### 相比原版的主要改动
 
 1. **LLM 复用 AstrBot 的模型**：不用再填 `aiBaseURL` / `aiApiKey` / `aiModel`。
@@ -334,6 +359,8 @@ resolver 不依赖 AstrBot，可以脱离框架单独测试。
 3. **作品缓存**：重复链接 2 小时缓存，命中直接重发。
 4. **先发简介再发媒体**：标题 / 作者 / 类型先返回，B站 DASH 合并延迟到渲染阶段，简介不被下载阻塞。
 5. **死接口快速失败** + **未移植平台显式报错** + **临时文件交给框架回收**。
+6. **平台跳过可见**：未命中规则 / 平台未启用 / 黑名单三种跳过都打日志，
+   「某平台链接没反应」能直接从日志定位。
 
 ---
 

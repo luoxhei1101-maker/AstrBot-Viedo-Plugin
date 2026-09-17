@@ -195,6 +195,36 @@ def cross_container_checks() -> None:
             False,
         )
 
+    # _video_component 现在是 async（base64 编码要丢线程池，避免卡事件循环），
+    # 所以**每个调用点都必须 await**——漏了会静默拿到 coroutine 对象，
+    # 表现为「视频发不出来但也不报错」，非常难查。这里用 AST + 源码行精确锁死。
+    src_lines = main_py.read_text(encoding="utf-8").splitlines()
+    call_lines = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        # 匹配 self._video_component(...)
+        if (
+            isinstance(f, ast.Attribute)
+            and f.attr == "_video_component"
+            and isinstance(f.value, ast.Name)
+            and f.value.id == "self"
+        ):
+            call_lines.append(node.lineno)
+
+    bad = []
+    for lineno in call_lines:
+        line = src_lines[lineno - 1]
+        if "await self._video_component" not in line:
+            bad.append(f"line {lineno}: {line.strip()[:70]}")
+    check("所有 self._video_component 调用点都带 await", bad, [])
+    check_true("_video_component 调用点数量 > 0", len(call_lines) > 0)
+    check_true(
+        "_video_component 是 async（base64 不阻塞事件循环）",
+        "async def _video_component" in _method_source(main_py, "_video_component"),
+    )
+
 
 # ======================================================================
 # 2. 下载器行为：候选回退（第一个 403 时自动换下一个）

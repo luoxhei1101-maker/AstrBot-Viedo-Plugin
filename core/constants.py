@@ -476,6 +476,22 @@ COMMAND_RULES: tuple[dict, ...] = (
 # 抽链接的正则
 URL_PATTERN = r"https?://[^\s\u4e00-\u9fff\"'<>]+"
 
+# 预编译缓存：pattern 串 -> re.Pattern
+# `match_rule` 每条 URL 都要按顺序试最多 24 条规则，`re.search(pattern_str, ...)`
+# 虽然走 Python 内部的 `re._cache`，但每次仍要做一次「拼 key + 查字典 + 判断是否
+# 需要编译」的开销，而且那个缓存上限只有 512 条、可能被别的插件挤掉。
+# 这里自己按 pattern 串缓存编译结果，命中后直接调 `Pattern.search`，最省。
+_COMPILED: dict[str, re.Pattern[str]] = {}
+
+
+def _compiled(pattern: str) -> re.Pattern[str]:
+    """按 pattern 串取编译好的正则，只编译一次。"""
+    got = _COMPILED.get(pattern)
+    if got is None:
+        got = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
+        _COMPILED[pattern] = got
+    return got
+
 
 def build_combined_pattern(rules: tuple[PlatformRule, ...] | list[PlatformRule]) -> str:
     """把所有规则拼成一条大正则，交给 AstrBot 的 filter.regex 做粗筛。"""
@@ -484,7 +500,7 @@ def build_combined_pattern(rules: tuple[PlatformRule, ...] | list[PlatformRule])
 
 def extract_urls(text: str) -> list[str]:
     """从文本里抽出所有 http(s) 链接。"""
-    return re.findall(URL_PATTERN, text, re.IGNORECASE)
+    return _compiled(URL_PATTERN).findall(text)
 
 
 def match_rule(
@@ -492,7 +508,7 @@ def match_rule(
 ) -> PlatformRule | None:
     """反查命中的平台规则。"""
     for rule in rules:
-        if re.search(rule.pattern, text, re.IGNORECASE | re.MULTILINE):
+        if _compiled(rule.pattern).search(text):
             return rule
     return None
 
