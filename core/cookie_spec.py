@@ -144,19 +144,6 @@ COOKIE_SPECS: tuple[CookieSpec, ...] = (
         },
     ),
     CookieSpec(
-        platform="kugou",
-        group="other",
-        raw_field="kugouCookie",
-        label="酷狗",
-        keys=["token", "userid", "dfid"],
-        notes={
-            "token": "登录令牌",
-            "userid": "用户 ID",
-            "dfid": "设备指纹",
-            "__required__": "token|userid",
-        },
-    ),
-    CookieSpec(
         platform="xiaoheihe",
         group="xiaoheihe",
         raw_field="xiaoheiheCookie",

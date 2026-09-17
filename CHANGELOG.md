@@ -1,5 +1,108 @@
 # 更新日志
 
+## v1.3.0（2026-09-17）
+
+**配置重组 + 点歌发送方式可切换**。点歌配置从「网易云音乐」分组里独立出来
+成为单独的「点歌」分组，顺手清掉了随原 Guoba 面板带过来、本移植版从未使用
+（或已失效）的一堆配置项。**已有配置会自动迁移，Cookie 不会丢。**
+
+### 新增：点歌发送方式可切换
+
+新增配置项「发送方式」，四个选项：
+
+| 模式 | 效果 | 适合 |
+|---|---|---|
+| `link`（默认） | 列出「歌名 - 歌手 + 播放页链接」 | 想自己挑，最稳、零额外请求 |
+| `card` | 发**音乐分享卡**（最多 3 首） | 群里直接点播放 |
+| `voice` | 下载后发**语音条** | 短音频（见下方限制） |
+| `file` | 以群文件形式发音频 | 想听整首 |
+
+### 关键技术发现（都经服务器实测）
+
+- **`Comp.Music` 的 `_type` 只能用 `object.__setattr__` 设置**。这个字段是
+  pydantic v1 的「非字段」属性：
+
+  - 构造时传 `_type="163"` → 被**静默忽略**（不在模型字段里）
+  - 实例化后 `comp._type = "163"` → `ValueError: "Music" object has no field "_type"`
+  - 只有 `object.__setattr__(comp, "_type", "163")` 能写进 `__dict__`
+
+  而且 AstrBot 的 `respond/stage.py` **有专门校验器读它**：
+
+  ```python
+  Comp.Music: lambda comp: (
+      (comp.id and comp._type and comp._type != "custom")
+      or (comp._type == "custom" and comp.url and comp.audio and comp.title)
+  )
+  ```
+
+  `_type` 缺失时**读取本身就抛 `AttributeError`**，整条消息链发不出去。
+  本插件用 `_music_card()` 统一封装：网易云走 `_type="163"` + `id`，
+  QQ音乐走 `_type="custom"` + `url/audio/title`。
+
+- **`Comp.Record` 会把音频转成未压缩 WAV，且无法绕过**。
+  `convert_to_base64()` 里 `target_format="wav"` 是**写死**的：
+
+  ```python
+  return await MediaResolver(file_source, media_type="audio",
+                             default_suffix=".wav").to_base64(target_format="wav")
+  ```
+
+  也就是 44100Hz / 16bit / 单声道 ≈ **88.2KB/秒**，base64 后还要再涨 1/3
+  → 约 **117KB/秒**。实测 30 秒音频 → 3.5MB payload。
+
+  所以「语音条」天生只适合短音频：一首 4 分钟的歌约 **28MB payload**，
+  协议端基本收不下。本插件按 `song.duration` 预估体积，
+  超过 90 秒就**明确降级到链接并提示**，而不是发出去让用户干等。
+
+- **想发整首就用 `file` 模式**：`Comp.File(name=..., url=直链)` 生成的
+  payload 只有 `{"type":"file","data":{"name":...,"file":"<直链>"}}`，
+  **协议端自己去拉**——既不受 WAV 转换影响，也不占本地带宽。
+
+### 配置重组
+
+**新增「点歌」分组**（6 项）：开启点歌 / 默认平台 / 列表长度 / 发送方式 /
+网易云Cookie / QQ音乐Cookie。
+
+**删除的分组与配置项**：
+
+| 位置 | 项 | 原因 |
+|---|---|---|
+| `netease`（整组） | `isSendVocal` | 未移植：发语音走 NTQQ 私有协议 |
+| | `useLocalNeteaseAPI` / `neteaseCloudAPIServer` | 未使用：自建 NeteaseCloudMusicApi |
+| | `neteaseCloudCookie` / `neteaseCloudAudioQuality` | 未移植：云盘命令 |
+| `other` | `kugouApiServer` / `kugouCookie` / `kugouCookieFields` / `kugouAudioQuality` | 酷狗已移除 |
+| | `qqMusicAudioQuality` | 未引用：音质由取直链时的档位决定 |
+| 命令规则 | `#rns` / `#rnq` / `#rks` / `#rkq` | 依赖的自建服务都没实现，留着只会一直刷警告 |
+
+点歌平台选项里的**酷狗已移除**（老取直链接口恒返 `err_code=30020`，
+可用替代拿不到可分享的直链）。
+
+### 迁移
+
+`core/config_migrate.py` 新增 `migrate_music_config()`，在插件加载时
+**自动**把旧路径的值搬到 `music.*`：
+
+```
+netease.useNeteaseSongRequest  ->  music.enable
+netease.songRequestPlatform    ->  music.platform   （kugou 自动回退 netease）
+netease.songRequestMaxList     ->  music.maxList
+netease.neteaseCookie          ->  music.neteaseCookie
+other.qqMusicCookie            ->  music.qqMusicCookie
+```
+
+规则是「**新位置还停在默认值才用旧值覆盖**」——如果用户已经在新位置设过，
+保留新值。搬迁后旧键一律清除，`netease` 组空了就整组删除。
+
+迁移过程**幂等**（插件重载会多次触发），有 24 项离线断言覆盖
+（`tests/test_music_config.py`）。
+
+### 其它
+
+- 酷狗链接解析（发酷狗分享链接）改为**明确的未支持提示**，
+  并引导用户改用 `#点歌`，不再要求自建 API 服务。
+- `Song` 新增 `duration` 字段（网易云 `dt`、QQ音乐 `interval`），
+  用于语音模式的体积预估。
+
 ## v1.2.0（2026-09-17）
 
 新增 **点歌搜索**：`#点歌 歌名` 搜歌并列出候选（歌名 + 歌手 + 播放页链接）。

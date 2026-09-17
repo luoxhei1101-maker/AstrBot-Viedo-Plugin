@@ -509,16 +509,6 @@ COMMAND_RULES: tuple[dict, ...] = (
     },
     {"key": "biliScan", "name": "B站扫码", "pattern": r"^#(?:RBQ|rbq)$", "handler": "bili_scan", "admin": True},
     {"key": "biliState", "name": "B站状态", "pattern": r"^#(?:RBS|rbs)$", "handler": "bili_state", "admin": True},
-    {
-        "key": "neteaseStatus",
-        "name": "网易云状态",
-        "pattern": r"^#(?:网易云状态|rns|RNS|网易云云盘状态|rncs|RNCS)$",
-        "handler": "netease_status",
-        "admin": True,
-    },
-    {"key": "neteaseScan", "name": "网易云扫码", "pattern": r"^#(?:rnq|RNQ|rncq|RNCQ)$", "handler": "netease_scan", "admin": True},
-    {"key": "kugouStatus", "name": "酷狗状态", "pattern": r"^#(?:酷狗状态|rks|RKS)$", "handler": "kugou_status", "admin": True},
-    {"key": "kugouScan", "name": "酷狗扫码", "pattern": r"^#(?:rkq|RKQ)$", "handler": "kugou_scan", "admin": True},
     # 点歌搜索。注意 pattern 里 `点歌` 后面必须跟内容（`(.+)`），否则单独一个
     # 「点歌」会命中并回一条空搜索；`(?:网易云|QQ|qq)?` 是可选平台前缀，
     # 不写就默认按「网易云 → QQ音乐」依次尝试。
@@ -529,6 +519,11 @@ COMMAND_RULES: tuple[dict, ...] = (
         "handler": "music_search",
         "admin": False,
     },
+    # 说明：原 Guoba 面板带来的 `#rns`（网易云状态）/`#rnq`（网易云扫码）/
+    # `#rks`（酷狗状态）/`#rkq`（酷狗扫码）四条规则已移除——它们依赖的
+    # NeteaseCloudMusicApi 自建服务与酷狗自建 API 在本移植版里都没实现，
+    # 留着只会让「规则表引用了不存在的 resolver」警告一直刷屏。
+    # 点歌现在只需要在配置里填 Cookie，不需要扫码。
 )
 
 

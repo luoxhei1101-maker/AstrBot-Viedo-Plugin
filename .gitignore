@@ -26,3 +26,8 @@ downloads/
 Thumbs.db
 *.swp
 *~
+
+# 本地改配置/改 schema 前的临时备份
+*.bak
+*.bak-*
+*.orig

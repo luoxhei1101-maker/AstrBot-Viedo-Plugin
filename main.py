@@ -63,6 +63,7 @@ from .core.douyin_comment import fetch_douyin_comments
 from .core.config_migrate import (
     heal as heal_config,
     migrate_cookie_fields,
+    migrate_music_config,
 )
 from .core.constants import (
     AUTO_RULES,
@@ -84,6 +85,7 @@ from .core.http import HttpError, close_session as close_http_session
 from .core.media import MergeError, merge_dash
 from .core.music_search import (
     PLATFORM_LABELS,
+    get_play_url as music_get_play_url,
     search as music_search,
 )
 from .platforms import ResolveResult, call
@@ -201,8 +203,9 @@ _COOKIE_FIELDS: dict[str, str] = {
     "xiaoheihe": "xiaoheihe.xiaoheiheCookie",
     # 点歌用。网易云只要 MUSIC_U；QQ音乐要一整串（含 qqmusic_key），
     # 详见 core/music_search.py 的模块 docstring。
-    "netease": "netease.neteaseCookie",
-    "qqmusic": "other.qqMusicCookie",
+    # v1.3.0 起统一放在独立的 music 分组里。
+    "netease": "music.neteaseCookie",
+    "qqmusic": "music.qqMusicCookie",
 }
 
 
@@ -325,9 +328,11 @@ class Main(Star):
         「期望是 string, 得到了 int」——用户根本没碰那个字段。详见
         ``core/config_migrate.py`` 的说明。
 
-        先做 Cookie 逐项填写「dict -> template_list」的结构性迁移，
-        再做通用类型自愈。顺序不能反：通用自愈会把 template_list 的
-        旧 dict 值包成 ``[{...}]``，反而弄坏配置。
+        先做 Cookie 逐项填写「dict -> template_list」的结构性迁移、再把散落的
+        点歌配置搬进 ``music`` 分组，最后做通用类型自愈。顺序不能反：
+        通用自愈会把 template_list 的旧 dict 值包成 ``[{...}]``，反而弄坏配置；
+        而点歌配置的搬迁要赶在自愈「用默认值补齐新键」之前才有意义
+        （详见 ``core/config_migrate.py::migrate_music_config``）。
         """
         schema_path = Path(__file__).parent / "_conf_schema.json"
         if not schema_path.is_file():
@@ -344,10 +349,13 @@ class Main(Star):
         # 1) Cookie 逐项填写：dict -> template_list（结构性迁移，先做）
         migrate_changes = migrate_cookie_fields(self.conf_data)
 
-        # 2) 通用类型自愈（不在这里触发保存，等两处都处理完统一存一次）
+        # 2) 点歌配置搬进 music 分组 + 清理废弃键
+        music_changes = migrate_music_config(self.conf_data)
+
+        # 3) 通用类型自愈（不在这里触发保存，等前面都处理完统一存一次）
         heal_changes = heal_config(self.conf_data, schema, save=None)
 
-        changes = migrate_changes + heal_changes
+        changes = migrate_changes + music_changes + heal_changes
         if not changes:
             return
 
@@ -1426,7 +1434,7 @@ class Main(Star):
     # ==================================================================
 
     # 命令里显式写的平台前缀 -> 内部平台 key。
-    # 不写就按配置的 songRequestPlatform 走。
+    # 不写就按配置的 music.platform 走。
     _MUSIC_PREFIX: dict[str, str] = {
         "网易云": "netease",
         "网抑云": "netease",
@@ -1437,29 +1445,113 @@ class Main(Star):
         "QQ": "qqmusic",
     }
 
+    # 各发送模式一次送出多少首。
+    # link 是列表形式（全部列出让人挑）；card / voice / file 每条都是独立
+    # 消息，发太多会刷屏，而且 voice / file 还要先下载音频，所以给个小上限。
+    _MUSIC_SEND_LIMIT: dict[str, int] = {
+        "link": 0,   # 0 = 不限
+        "card": 3,
+        "voice": 1,
+        "file": 1,
+    }
+
+    # 语音模式的安全上限（秒）。
+    #
+    # ⚠️ ``Comp.Record`` 的 ``convert_to_base64()`` 把 ``target_format="wav"``
+    # **写死了**（AstrBot 的 ``core/message/components.py``），也就是任何音频进来
+    # 都会先转成未压缩 WAV：44100Hz / 16bit / 单声道 ≈ 88.2KB/秒，
+    # base64 之后还要再涨 1/3 → 约 117KB/秒，而且这个转换绕不过去。
+    # 一首 4 分钟的歌 ≈ 28MB payload，协议端基本收不下。
+    # 所以按估算体积提前拦住并明确降级，而不是发出去卡死。
+    _MUSIC_VOICE_MAX_SECONDS = 90        # 90 秒 ≈ 10.5MB payload
+    _MUSIC_VOICE_BYTES_PER_SEC = 117_000  # base64 后的近似字符数/秒
+
     def _music_target_platform(self) -> str:
         """配置里选的默认点歌平台。"""
-        raw = str(self.conf_get("netease.songRequestPlatform", "netease") or "netease")
-        # 配置里的选项是 netease / kugou / qq，映射到内部 key
+        raw = str(self.conf_get("music.platform", "netease") or "netease")
         return {"netease": "netease", "qq": "qqmusic", "qqmusic": "qqmusic"}.get(
             raw, "netease"
         )
 
-    async def cmd_music_search(self, event: AstrMessageEvent):
-        """``#点歌 <关键词>`` —— 搜索歌曲并列出候选。
+    def _music_send_mode(self) -> str:
+        """配置里选的发送方式。认不出的一律回退到最稳的 link。"""
+        mode = str(self.conf_get("music.sendMode", "link") or "link").strip().lower()
+        return mode if mode in self._MUSIC_SEND_LIMIT else "link"
 
-        输出「歌名 - 歌手 + 播放页链接」，**不发音频本体**（不占带宽、
-        不用转码）。QQ 音乐配了 Cookie 后，链接点开就是完整版。
+    async def _music_resolve_url(self, song) -> str:
+        """取音频直链（自动带上配置里对应平台的 Cookie）。"""
+        try:
+            return await music_get_play_url(
+                song,
+                netease_cookie=self.cookie_for("netease"),
+                qq_cookie=self.cookie_for("qqmusic"),
+                high=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - 取直链失败不该让整条命令崩
+            logger.warning(f"[R插件] 点歌取直链失败: {type(exc).__name__}: {exc}")
+            return ""
+
+    @staticmethod
+    def _music_card(song) -> Comp.Music | None:
+        """把一首歌构造成音乐分享卡。
+
+        ⚠️ **``Music`` 的 ``_type`` 必须用 ``object.__setattr__`` 设置**，
+        这是踩出来的：
+
+        - 构造时传 ``_type=`` -> 被 pydantic **静默忽略**（参数不在模型字段里）
+        - 实例化后赋值 ``comp._type = ...`` -> ``ValueError: "Music" object
+          has no field "_type"``（被 pydantic 的 ``__setattr__`` 拦下）
+        - 只有 ``object.__setattr__`` 能写进 ``__dict__``
+
+        而 AstrBot 的 respond stage **有专门的校验器读它**：
+
+        - 非 custom：``comp.id and comp._type and comp._type != "custom"``
+        - custom：``comp._type == "custom" and comp.url and comp.audio and comp.title``
+
+        `_type` 缺失时**访问本身就抛 ``AttributeError``**，整条消息发不出去。
+
+        返回 ``None`` 表示这首歌构造不出合法卡片（调用方应跳过）。
+        """
+        if song.platform == "netease":
+            sid = song.song_id if song.song_id.isdigit() else "0"
+            comp = Comp.Music(id=int(sid))
+            object.__setattr__(comp, "_type", "163")
+            return comp
+
+        # QQ 音乐走 custom 模式：url + audio + title 三个都必须有
+        if not (song.play_url and song.page_url and song.name):
+            return None
+        comp = Comp.Music(
+            url=song.page_url,
+            audio=song.play_url,
+            title=song.name,
+            content=song.artist,
+            image=song.cover,
+        )
+        object.__setattr__(comp, "_type", "custom")
+        return comp
+
+    async def cmd_music_search(self, event: AstrMessageEvent):
+        """``#点歌 <关键词>`` —— 搜索歌曲并按配置的发送方式送出。
+
+        发送方式由 ``music.sendMode`` 决定：
+
+        - ``link``：列出「歌名 - 歌手 + 播放页链接」（最稳，零额外请求）
+        - ``card``：发音乐分享卡（网易云走 ``_type=163``，QQ音乐走 ``custom``）
+        - ``voice``：下载音频后以语音条发出（受 WAV 体积限制，见
+          ``_MUSIC_VOICE_MAX_SECONDS``）
+        - ``file``：以群文件形式发音频（``Comp.File`` + URL，协议端自己去拉，
+          不占本地带宽也不受 WAV 限制）
 
         平台选择：
         - 命令里写了前缀（``#点歌 网易云 晴天``）→ 只搜那个平台
-        - 没写 → 用配置的 ``songRequestPlatform``；**若该平台没结果，
+        - 没写 → 用配置的 ``music.platform``；**若该平台没结果，
           自动试另一个**（群里体验优先，不然用户会以为点歌坏了）
         """
-        if not self.conf_get("netease.useNeteaseSongRequest", False):
+        if not self.conf_get("music.enable", False):
             yield event.plain_result(
                 "🎵 点歌功能未启用。\n"
-                "请在插件配置的「网易云音乐」分组里打开 **开启点歌功能**。"
+                "请在插件配置的「点歌」分组里打开 **开启点歌**。"
             )
             return
 
@@ -1477,7 +1569,7 @@ class Main(Star):
             yield event.plain_result("🎵 用法：`#点歌 歌名`（可加平台，如 `#点歌 QQ音乐 晴天`）")
             return
 
-        limit = int(self.conf_get("netease.songRequestMaxList", 10) or 10)
+        limit = int(self.conf_get("music.maxList", 10) or 10)
         limit = max(1, min(limit, 20))
 
         # 搜索。用户在命令里明确指定平台时不 fallback——尊重用户的选择，
@@ -1485,11 +1577,10 @@ class Main(Star):
         songs, used = await music_search(keyword, platform=platform_key, limit=limit)
 
         if not songs and platform_key is None:
-            # 没指定平台且默认平台无结果 -> 试另一个
-            fallback = "qqmusic" if self._music_target_platform() == "netease" else "netease"
-            logger.info(
-                f"[R插件] 点歌「{keyword}」在默认平台无结果，回退到 {fallback}"
+            fallback = (
+                "qqmusic" if self._music_target_platform() == "netease" else "netease"
             )
+            logger.info(f"[R插件] 点歌「{keyword}」在默认平台无结果，回退到 {fallback}")
             songs, used = await music_search(keyword, platform=fallback, limit=limit)
 
         if not songs:
@@ -1512,20 +1603,114 @@ class Main(Star):
             return
 
         label = PLATFORM_LABELS.get(used, used)
-        logger.info(f"[R插件] 点歌「{keyword}」-> {label} {len(songs)} 首")
+        mode = self._music_send_mode()
+        logger.info(f"[R插件] 点歌「{keyword}」-> {label} {len(songs)} 首，发送方式={mode}")
 
+        if mode == "link":
+            async for item in self._music_render_link(event, songs, used, label, keyword):
+                yield item
+            return
+
+        # card / voice / file 都需要先拿到直链
+        per = self._MUSIC_SEND_LIMIT[mode]
+        targets = songs if per == 0 else songs[:per]
+
+        pick = targets[0] if targets else None
+        if mode == "card":
+            yield event.plain_result(f"🎵 {label} · 点歌「{keyword}」")
+        elif pick is not None:
+            yield event.plain_result(
+                f"🎵 {label} · 点歌「{keyword}」\n正在准备「{pick.label}」…"
+            )
+
+        sent = 0
+        for song in targets:
+            song.play_url = await self._music_resolve_url(song)
+            if mode == "card":
+                comp = self._music_card(song)
+                if comp is None:
+                    continue
+                yield event.chain_result([comp])
+                sent += 1
+                continue
+
+            if not song.play_url:
+                continue
+
+            if mode == "voice":
+                async for item in self._music_render_voice(event, song, label):
+                    yield item
+                sent += 1
+            else:  # file
+                yield event.chain_result(
+                    [Comp.File(name=f"{song.label}.mp3", url=song.play_url)]
+                )
+                sent += 1
+
+        if not sent:
+            # 兜底：所有目标都没成功，至少把链接给出去，别让用户空等
+            yield event.plain_result(
+                "🎵 音频准备失败（可能是没配 Cookie 或接口限流），先给链接：\n"
+                + "\n".join(f"· {s.label}\n  {s.page_url}" for s in songs[:3])
+            )
+
+    async def _music_render_link(self, event, songs, used: str, label: str, keyword: str):
+        """``link`` 模式：列出「歌名 - 歌手 + 播放页链接」。"""
         lines = [f"🎵 {label} · 点歌「{keyword}」", ""]
         for i, song in enumerate(songs, 1):
             lines.append(f"{i}. {song.label}")
             if song.page_url:
                 lines.append(f"   {song.page_url}")
-
-        # QQ 音乐没配 Cookie 时提醒一句——否则用户会奇怪"链接点开怎么只有试听"
         if used == "qqmusic" and not self.cookie_for("qqmusic"):
             lines.append("")
             lines.append("💡 未配置 QQ音乐 Cookie，链接点开可能只能试听")
-
         yield event.plain_result("\n".join(lines))
+
+    async def _music_render_voice(self, event, song, label: str):
+        """``voice`` 模式：下载音频后以语音条发送。
+
+        ⚠️ 体积问题：``Comp.Record`` 会把音频转成未压缩 WAV，base64 后
+        约 117KB/秒的 payload。**同容器部署**下这只是一个较大的 HTTP 请求；
+        **跨容器**时要在 HTTP body 里塞这么多字符，长歌大概率失败。
+        所以先用 ``song.duration`` 估算，超限就明确降级到链接，
+        而不是发出去让用户等到超时。
+        """
+        est = song.duration * self._MUSIC_VOICE_BYTES_PER_SEC
+        if song.duration > self._MUSIC_VOICE_MAX_SECONDS:
+            yield event.plain_result(
+                f"🎵「{song.label}」约 {song.duration // 60} 分 {song.duration % 60} 秒，"
+                f"语音条发不下（WAV 体积约 {est / 1024 / 1024:.0f}MB）。\n"
+                "改用链接：\n"
+                f"{song.page_url}\n"
+                "（想要整首可听，把「发送方式」改成 **音乐卡片** 或 **音频文件**）"
+            )
+            return
+
+        try:
+            path = await download_media(
+                song.play_url, prefix="music", timeout=90.0
+            )
+        except (HttpError, MediaTooLarge) as exc:
+            logger.warning(f"[R插件] 点歌音频下载失败: {exc}")
+            yield event.plain_result(
+                f"🎵「{song.label}」音频下载失败，改用链接：\n{song.page_url}"
+            )
+            return
+
+        # 登记给 AstrBot，事件结束后自动回收
+        try:
+            event.track_temporary_local_file(str(path))
+        except Exception:  # noqa: BLE001 - 老版本可能没这个方法
+            pass
+
+        try:
+            comp = Comp.Record.fromFileSystem(str(path))
+            yield event.chain_result([comp])
+        except Exception as exc:  # noqa: BLE001 - 转码失败时别静默
+            logger.warning(f"[R插件] 点歌语音转码失败: {type(exc).__name__}: {exc}")
+            yield event.plain_result(
+                f"🎵「{song.label}」语音转码失败（音频可能过长），改用链接：\n{song.page_url}"
+            )
         event.stop_event()
 
     async def cmd_bili_state(self, event: AstrMessageEvent):

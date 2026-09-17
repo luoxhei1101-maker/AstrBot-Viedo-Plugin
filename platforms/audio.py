@@ -4,13 +4,30 @@
 - 网易云  <- ``constants/tools.js`` 的 NETEASE_TEMP_API（第三方直链接口）
 - QQ音乐  <- QQ_MUSIC_TEMP_API
 - 汽水音乐 <- QISHUI_MUSIC_TEMP_API
-- 酷狗    <- 需要自建 kugouApiServer（原版配置项），未配置时明确报错而不是静默失败
+- 酷狗    <- **未支持**（见下）
 - AppleMusic / Spotify <- 原版走外部的 freyr 服务，未移植
+
+**这个模块只处理「分享链接 -> 音频」**（用户手里已经有链接）。
+「点歌搜索」是另一条链路，在 ``core/music_search.py``。
 
 原版的音乐模块真正复杂的地方是**扫码登录 + Cookie 保活 + 自建
 NeteaseCloudMusicApi 服务**（``utils/music-platform/`` 那一套）。
 这里先用第三方直链接口把"发链接能拿到歌"这个主流程跑通，
 登录态和音质选择留给后续。
+
+关于酷狗
+========
+
+原版依赖用户自建 ``kugouApiServer``（一个 kugou-api 服务）。本移植版
+**不再提供这个配置项**，理由：
+
+1. 老取直链接口 ``wwwapi.kugou.com/play/songinfo`` 现在恒返回
+   ``err_code=30020``，已经失效；
+2. 可用的替代（``m.kugou.com/api/v1/wechat/index``）直接返回音频流本体，
+   **没有可分享的播放页/直链**，不适合"发链接"这种交付方式；
+3. 要求用户为了解析酷狗链接去自建一个服务，成本与收益不成比例。
+
+所以命中酷狗链接时给明确提示，而不是让用户去配一个配不出来的东西。
 """
 
 from __future__ import annotations
@@ -205,41 +222,19 @@ _KG_RE = re.compile(
 
 @register("kugou")
 async def resolve_kugou(link: str, ctx: ResolverContext) -> ResolveResult:
-    """酷狗音乐。
+    """酷狗音乐 —— 本移植版不支持。
 
-    原版依赖用户自建的 ``kugouApiServer``，所以这里也走同一个配置项：
-    配了就请求，没配就明确告诉用户缺什么。
+    （原因见模块 docstring：原版依赖用户自建 ``kugouApiServer``，
+    而它背后的接口已失效；可用的替代又拿不到可分享的直链。）
     """
     if not _KG_RE.search(link):
         return ResolveResult.fail("酷狗音乐", "不是酷狗链接")
-
-    server = ctx.conf("other.kugouApiServer", "") or ""
-    if not server:
-        return not_ported(
-            "酷狗音乐",
-            "需要在插件配置里填「酷狗 API 服务器地址」",
-            "一个 kugou-api 服务（原版配置项 kugouApiServer）",
-        )
-
-    keyword = _keyword_from_link(link)
-    try:
-        data = await fetch_json(
-            f"{server.rstrip('/')}/search/complex?keywords={keyword}&page=1&pagesize=1",
-            retries=1,
-            timeout=20.0,
-        )
-    except HttpError as exc:
-        return ResolveResult.fail("酷狗音乐", f"自建接口请求失败: {exc}")
-
-    audio = _first_url(data)
-    if not audio:
-        return ResolveResult.fail("酷狗音乐", "自建接口没有返回可用的音频直链")
-
-    return ResolveResult.ok(
+    logger.info("[R插件] 酷狗链接解析未支持，已跳过")
+    return not_ported(
         "酷狗音乐",
-        audios=[audio],
-        title=_first_text(data, ("songname", "name", "title"))[:120],
-        author=_first_text(data, ("singername", "singer", "author")),
+        "本插件不支持解析酷狗链接",
+        "酷狗老接口已失效、替代接口拿不到可分享直链，故未移植。"
+        "如需听歌可用 `#点歌 歌名`（支持网易云 / QQ音乐）",
     )
 
 

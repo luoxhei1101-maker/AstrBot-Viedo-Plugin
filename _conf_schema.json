@@ -950,101 +950,8 @@
       }
     }
   },
-  "netease": {
-    "description": "网易云音乐（Cookie、音质、点歌）",
-    "type": "object",
-    "hint": "对应原 Guoba 面板的「网易云音乐」分组",
-    "items": {
-      "isSendVocal": {
-        "description": "网易云开启发送音频",
-        "type": "bool",
-        "hint": "默认开启，识别音乐之后是否转化群语音发送，关闭将获得一定的性能提升",
-        "default": true
-      },
-      "useNeteaseSongRequest": {
-        "description": "开启点歌功能",
-        "type": "bool",
-        "hint": "默认不开启；开启后可使用 #点歌 / #听 / #播放，平台由下方「点歌平台」决定",
-        "default": false
-      },
-      "songRequestPlatform": {
-        "description": "点歌平台",
-        "type": "string",
-        "hint": "选择 #点歌 / #听 / #播放 使用的音乐平台；云盘相关命令始终走网易云，不受此项影响",
-        "default": "netease",
-        "options": [
-          "netease",
-          "kugou",
-          "qq"
-        ],
-        "labels": [
-          "网易云音乐",
-          "酷狗音乐",
-          "QQ音乐"
-        ]
-      },
-      "songRequestMaxList": {
-        "description": "点歌列表长度",
-        "type": "int",
-        "hint": "点歌选择列表长度，默认 10",
-        "default": 10
-      },
-      "useLocalNeteaseAPI": {
-        "description": "使用自建网易云API",
-        "type": "bool",
-        "hint": "默认不开启，有条件可以查看https://gitlab.com/Binaryify/neteasecloudmusicapi进行搭建",
-        "default": false
-      },
-      "neteaseCloudAPIServer": {
-        "description": "自建网易云API地址",
-        "type": "string",
-        "hint": "填入自建API地址，例：http://localhost:3000",
-        "default": ""
-      },
-      "neteaseCookie": {
-        "description": "网易云Cookie",
-        "type": "string",
-        "hint": "可以发送 #RNQ / #rnq 快捷获取 或 者在网易云官网自己获取，格式为：MUSIC_U=xxx",
-        "default": ""
-      },
-      "neteaseCloudCookie": {
-        "description": "网易云云盘Cookie",
-        "type": "string",
-        "hint": "可以发送 #RNCQ / #rncq 快捷获取 或 者在网易云官网自己获取，格式为：MUSIC_U=xxx",
-        "default": ""
-      },
-      "neteaseCloudAudioQuality": {
-        "description": "网易云解析最高音质",
-        "type": "string",
-        "hint": "网易云解析最高音质(目前仅针对自建最新API服务器生效！！需vip账号ck！！默认极高，杜比全景声由于编码特殊需要设备支持，更高请根据登陆的账号和服务器承载能力进行选择)",
-        "default": "exhigh",
-        "options": [
-          "standard",
-          "higher",
-          "exhigh",
-          "lossless",
-          "hires",
-          "jyeffect",
-          "sky",
-          "dolby",
-          "jymaster"
-        ],
-        "labels": [
-          "标准",
-          "较高",
-          "极高",
-          "无损",
-          "Hi-Res",
-          "高清环绕声",
-          "沉浸环绕声",
-          "杜比全景声(不推荐)",
-          "超清母带"
-        ]
-      }
-    }
-  },
   "other": {
-    "description": "其他平台（微博、小红书、视频号、酷狗、QQ音乐、链接总结）",
+    "description": "其他平台（微博、小红书、视频号、链接总结）",
     "type": "object",
     "hint": "对应原 Guoba 面板的「其他平台」分组",
     "items": {
@@ -1098,64 +1005,6 @@
         "labels": [
           "混元 175B（默认）",
           "DeepSeek V3"
-        ]
-      },
-      "kugouApiServer": {
-        "description": "酷狗API地址",
-        "type": "string",
-        "hint": "自建 KuGouMusicApi 服务地址，自建教程：https://github.com/MakcRe/KuGouMusicApi",
-        "default": ""
-      },
-      "kugouAudioQuality": {
-        "description": "酷狗解析音质",
-        "type": "string",
-        "hint": "酷狗歌曲解析优先选择的音质，若目标歌曲不支持则自动降级",
-        "default": "viper_clear",
-        "options": [
-          "viper_clear",
-          "flac",
-          "320",
-          "128"
-        ],
-        "labels": [
-          "Hi-Res",
-          "无损 FLAC",
-          "高品 320K",
-          "普通 128K"
-        ]
-      },
-      "kugouCookie": {
-        "description": "酷狗搜索Cookie",
-        "type": "string",
-        "hint": "仅在走 KuGouMusicApi 搜索兜底时使用，文档示例：token=xxx;userid=xxx;dfid=xxx；也可发送 #RKQ 自动扫码获取　【两种填法二选一】① 直接粘整段 Cookie（本项）；② 不想拼格式就填下面的「逐项填写」，表格里下拉选字段、填值。涉及字段：token、userid、dfid",
-        "default": ""
-      },
-      "qqMusicCookie": {
-        "description": "QQ音乐Cookie",
-        "type": "string",
-        "hint": "浏览器登录 https://y.qq.com 后 F12→Network→任意请求→Request Headers→Cookie 复制；本地直连 musics.fcg 搜索/取流用，不依赖服务器",
-        "default": ""
-      },
-      "qqMusicAudioQuality": {
-        "description": "QQ音乐解析音质",
-        "type": "string",
-        "hint": "QQ音乐歌曲解析优先选择的音质，若目标歌曲不支持则自动降级；auto=按默认候选顺序（低码率OGG→128K→320K→M4A→试听）",
-        "default": "auto",
-        "options": [
-          "auto",
-          "standard",
-          "128k",
-          "320k",
-          "m4a",
-          "trial"
-        ],
-        "labels": [
-          "自动（默认候选顺序）",
-          "标准 OGG（低码率）",
-          "128K MP3",
-          "320K MP3",
-          "M4A",
-          "仅试听片段"
         ]
       },
       "kuaishouCookie": {
@@ -1284,47 +1133,6 @@
             }
           }
         }
-      },
-      "kugouCookieFields": {
-        "description": "酷狗Cookie 逐项填写（可选）",
-        "type": "template_list",
-        "hint": "点「添加条目」→ 下拉选字段名 → 填值，一行一个字段。插件会自动拼成 key=value; key=value 的标准格式，不用你自己拼分号。其中 token 或 userid 至少要填一个。留空则使用上面的「整段 Cookie」。",
-        "default": [],
-        "templates": {
-          "token": {
-            "name": "token",
-            "hint": "登录令牌",
-            "items": {
-              "value": {
-                "description": "token 的值",
-                "type": "string",
-                "default": ""
-              }
-            }
-          },
-          "userid": {
-            "name": "userid",
-            "hint": "用户 ID",
-            "items": {
-              "value": {
-                "description": "userid 的值",
-                "type": "string",
-                "default": ""
-              }
-            }
-          },
-          "dfid": {
-            "name": "dfid",
-            "hint": "设备指纹",
-            "items": {
-              "value": {
-                "description": "dfid 的值",
-                "type": "string",
-                "default": ""
-              }
-            }
-          }
-        }
       }
     }
   },
@@ -1407,6 +1215,67 @@
         "type": "int",
         "hint": "【涉及哔哩哔哩、抖音、YouTuBe、tiktok】下载并发个数：与【允许多用户下载个数】不同，这个功能影响下载速度。默认是1表示不使用，使用根据服务器性能进行选择，如果不确定是否可以用1即可，高性能服务器随意4~12都可以，看CPU的实力",
         "default": 1
+      }
+    }
+  },
+  "music": {
+    "description": "点歌（网易云 / QQ音乐）",
+    "type": "object",
+    "hint": "「#点歌 歌名」搜索并列出候选。网易云匿名就能用；QQ音乐需要 Cookie，否则只能试听",
+    "items": {
+      "enable": {
+        "description": "开启点歌",
+        "type": "bool",
+        "hint": "开启后可用 #点歌 歌名；也能指定平台：#点歌 网易云 歌名 / #点歌 QQ音乐 歌名",
+        "default": false
+      },
+      "platform": {
+        "description": "默认平台",
+        "type": "string",
+        "hint": "不写平台时搜哪个。网易云更稳（匿名即可取直链）；QQ音乐音质好但有随机限流，偶尔需要重试",
+        "default": "netease",
+        "options": [
+          "netease",
+          "qq"
+        ],
+        "labels": [
+          "网易云音乐",
+          "QQ音乐"
+        ]
+      },
+      "maxList": {
+        "description": "列表长度",
+        "type": "int",
+        "hint": "一次列出多少首候选，1–20",
+        "default": 10
+      },
+      "sendMode": {
+        "description": "发送方式",
+        "type": "string",
+        "hint": "link=歌名+网页链接（最稳、不占带宽）；card=音乐卡片（群里可直接点播放）；voice=语音条（下载后发送，体积较大、部分平台有大小限制）",
+        "default": "link",
+        "options": [
+          "link",
+          "card",
+          "voice"
+        ],
+        "labels": [
+          "文字 + 链接",
+          "音乐卡片",
+          "语音条"
+        ]
+      },
+      "neteaseCookie": {
+        "description": "网易云Cookie",
+        "type": "string",
+        "hint": "在网易云官网登录后 F12 取，格式：MUSIC_U=xxx。不填也能用，填了才能播放 VIP 歌曲",
+        "default": ""
+      },
+      "qqMusicCookie": {
+        "description": "QQ音乐Cookie",
+        "type": "string",
+        "hint": "浏览器登录 https://y.qq.com 后 F12→Network→任意请求→Request Headers→Cookie 整串复制。必须含 qqmusic_key（约 12 小时过期）",
+        "default": ""
       }
     }
   }

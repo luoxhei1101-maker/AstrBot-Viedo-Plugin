@@ -4,7 +4,6 @@
 
     抖音  douyinCookie: 格式：odin_tt=xxx;passport_fe_beating_status=xxx;sid_guard=xxx;...
     微博  weiboCookie:  格式：_T_WM=xxx; WEIBOCN_FROM=xxx; MLOGIN=xxx; XSRF-TOKEN=xxx; ...
-    酷狗  kugouCookie:  格式：token=xxx;userid=xxx;dfid=xxx
     小黑盒 xiaoheiheCookie: 格式：x_xhh_tokenid=xxx
 
 让用户从浏览器里挑着复制、再手动拼 ``key=value; key=value``，很容易漏分号、

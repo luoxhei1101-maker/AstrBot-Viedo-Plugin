@@ -113,6 +113,14 @@ class Song:
     page_url: str = ""
     """歌曲网页地址，取直链失败时的兜底。"""
 
+    duration: int = 0
+    """时长（秒）。取不到为 0。
+
+    语音模式的体积预估需要它——``Comp.Record`` 会把音频转成**未压缩 WAV**
+    （44100Hz / 16bit / 单声道 ≈ 88.2KB/秒），base64 后还要再涨 1/3，
+    所以必须提前知道时长才拦得住「点一首 5 分钟的歌结果 payload 30MB」。
+    """
+
     play_url: str = ""
     """音频直链。搜索阶段为空，按需再取（见 ``get_play_url``）。"""
 
@@ -166,6 +174,12 @@ async def search_netease(keyword: str, limit: int = MAX_RESULTS) -> list[Song]:
         )
         album = item.get("al") or {}
         privilege = item.get("privilege") or {}
+        # 网易云的时长字段是 dt（毫秒）；有的版本给 interval（秒）
+        dur = 0
+        if isinstance(item.get("dt"), (int, float)):
+            dur = int(item["dt"]) // 1000
+        elif isinstance(item.get("interval"), (int, float)):
+            dur = int(item["interval"])
         out.append(
             Song(
                 platform="netease",
@@ -175,6 +189,7 @@ async def search_netease(keyword: str, limit: int = MAX_RESULTS) -> list[Song]:
                 album=str(album.get("name") or ""),
                 cover=str(album.get("picUrl") or ""),
                 page_url=NETEASE_SONG_PAGE.format(id=sid),
+                duration=max(dur, 0),
                 extra={
                     # fee: 0 免费 / 1 VIP / 4 需购买 / 8 低音质免费
                     "fee": item.get("fee"),
@@ -303,6 +318,7 @@ async def search_qqmusic(keyword: str, limit: int = MAX_RESULTS) -> list[Song]:
                 album=_strip_em(str(album.get("name") or "")),
                 cover=_qq_cover(item),
                 page_url=QQ_MUSIC_SONG_PAGE.format(mid=mid),
+                duration=_qq_duration(item),
                 extra={
                     # 取直链时要用（文件名格式是 M800<media_mid>.mp3）
                     "media_mid": (item.get("file") or {}).get("media_mid"),
@@ -448,6 +464,19 @@ def _qq_filenames(
             continue
         out.append(f"{prefix}{media_mid}.{ext}")
     return out
+
+
+def _qq_duration(item: dict) -> int:
+    """QQ 音乐的时长（秒）。字段名见过 ``interval``，也见过 ``songInfo.interval``。"""
+    for key in ("interval", "duration"):
+        v = item.get(key)
+        if isinstance(v, (int, float)) and v > 0:
+            return int(v)
+    info = item.get("songInfo") or {}
+    v = info.get("interval") if isinstance(info, dict) else None
+    if isinstance(v, (int, float)) and v > 0:
+        return int(v)
+    return 0
 
 
 def _qq_cover(item: dict) -> str:

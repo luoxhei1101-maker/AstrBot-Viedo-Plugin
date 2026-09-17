@@ -217,3 +217,130 @@ def migrate_cookie_fields(conf: dict) -> list[str]:
         )
 
     return changes
+
+
+# ==========================================================================
+# v1.3.0：点歌配置独立成 music 分组
+# ==========================================================================
+
+# 旧路径 -> 新路径。三元组是 (旧分组, 旧键, 新键)。
+_MUSIC_MOVES: tuple[tuple[str, str, str], ...] = (
+    ("netease", "useNeteaseSongRequest", "enable"),
+    ("netease", "songRequestPlatform", "platform"),
+    ("netease", "songRequestMaxList", "maxList"),
+    ("netease", "neteaseCookie", "neteaseCookie"),
+    ("other", "qqMusicCookie", "qqMusicCookie"),
+)
+
+# 新分组各键的 schema 默认值。
+#
+# **必须硬编码**：AstrBot 的 ``check_config_integrity`` 会用 schema 默认值把缺失的
+# 键补齐，等本模块跑的时候 ``music.*`` 往往已经是默认值了。所以判断「要不要搬」
+# 不能只看新旧值是否为空，得看**新值是否还停在默认值上**——停在默认值才说明
+# 用户没在新位置设过，可以放心用旧值覆盖。
+_MUSIC_DEFAULTS: dict[str, Any] = {
+    "enable": False,
+    "platform": "netease",
+    "maxList": 10,
+    "sendMode": "link",
+    "neteaseCookie": "",
+    "qqMusicCookie": "",
+}
+
+# schema 里已移除、可以直接丢弃的旧键：(分组, 键...)
+_MUSIC_DROP: dict[str, tuple[str, ...]] = {
+    "netease": (
+        "isSendVocal",            # 未移植：发语音走 NTQQ 私有协议
+        "useLocalNeteaseAPI",     # 未使用：自建 NeteaseCloudMusicApi
+        "neteaseCloudAPIServer",  # 同上
+        "neteaseCloudCookie",     # 未移植：云盘命令
+        "neteaseCloudAudioQuality",  # 仅在自建 API 下才生效，实际无效
+    ),
+    "other": (
+        "kugouApiServer",     # 酷狗已移除（老接口失效 + 无播放页链接）
+        "kugouAudioQuality",
+        "kugouCookie",
+        "kugouCookieFields",
+        "qqMusicAudioQuality",  # 未引用：音质由取直链时的档位决定
+    ),
+}
+
+# 旧值里已经不再支持的平台 -> 回退目标
+_MUSIC_PLATFORM_FALLBACK: dict[str, str] = {
+    "kugou": "netease",   # 酷狗出局
+    "qqmusic": "qq",      # 归一化到新 schema 的取值
+}
+
+
+def migrate_music_config(conf: dict) -> list[str]:
+    """把散落在 ``netease`` / ``other`` 里的点歌配置搬到 ``music`` 分组。
+
+    v1.3.0 把点歌从「网易云音乐」分组里独立出来，同时清掉了随原 Guoba 面板
+    一起带过来、但本移植版从未使用（或已失效）的项。用户的 Cookie 和开关
+    **不能丢**，所以这里做一次性搬迁。
+
+    搬迁规则（顺序很重要）：
+
+    1. 新位置的值**还停在默认值上** -> 用旧值覆盖（说明用户没在新位置设过）
+    2. 新位置已有非默认值 -> 保留新值（用户已经在新位置设过了）
+    3. 旧平台值不再支持（如 ``kugou``）-> 回退到 :data:`_MUSIC_PLATFORM_FALLBACK`
+    4. 搬迁完成后，把 :data:`_MUSIC_DROP` 里的废弃键删掉；``netease`` 组空了
+       就整组删除
+
+    Returns:
+        迁移记录，用于写日志。
+    """
+    changes: list[str] = []
+
+    music = conf.get("music")
+    if not isinstance(music, dict):
+        music = {}
+        conf["music"] = music
+
+    for old_group, old_key, new_key in _MUSIC_MOVES:
+        group = conf.get(old_group)
+        if not isinstance(group, dict) or old_key not in group:
+            continue
+
+        # 先把旧键取走（pop），无论最后搬不搬都不该留在旧位置——
+        # schema 里已经没有它了，留着就是一份永远不显示、也不会再被读到的垃圾。
+        old_val = group.pop(old_key)
+
+        if old_val in (None, "", False, 0) and not isinstance(old_val, bool):
+            # 旧值为空，没什么可搬的
+            continue
+
+        current = music.get(new_key, _MUSIC_DEFAULTS.get(new_key))
+        at_default = current == _MUSIC_DEFAULTS.get(new_key)
+        if not at_default:
+            # 用户已经在新位置设过了，新值优先（旧值丢弃）
+            continue
+
+        if old_val == _MUSIC_DEFAULTS.get(new_key):
+            # 旧值本身就是默认值，搬了也没变化，省一次写盘
+            continue
+
+        if new_key == "platform":
+            old_val = _MUSIC_PLATFORM_FALLBACK.get(str(old_val), old_val)
+
+        music[new_key] = old_val
+        changes.append(f"music.{new_key} <- {old_group}.{old_key} = {old_val!r}")
+
+    # 清理废弃键
+    for group_name, keys in _MUSIC_DROP.items():
+        group = conf.get(group_name)
+        if not isinstance(group, dict):
+            continue
+        for key in keys:
+            if key in group:
+                group.pop(key, None)
+                changes.append(f"删除废弃配置 {group_name}.{key}")
+
+    # netease 组搬空+清空后就没用了，整组删掉（避免配置里留一个空壳）
+    net = conf.get("netease")
+    if isinstance(net, dict) and not net:
+        del conf["netease"]
+        changes.append("删除空的 netease 分组")
+
+    return changes
+
