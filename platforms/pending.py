@@ -77,16 +77,6 @@ async def resolve_youtube(link: str, ctx: ResolverContext) -> ResolveResult:
 # ==========================================================================
 
 
-@register("xiaohongshu")
-async def resolve_xiaohongshu(link: str, ctx: ResolverContext) -> ResolveResult:
-    """小红书。"""
-    return not_ported(
-        "小红书",
-        "需要 xsec_token 处理 + Cookie，原版还有 `__INITIAL_STATE__` 解析",
-        "有效的小红书 Cookie（原版配置项 xiaohongshuCookie）",
-    )
-
-
 @register("weixin_channel")
 async def resolve_weixin_channel(link: str, ctx: ResolverContext) -> ResolveResult:
     """微信视频号。"""

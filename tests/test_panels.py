@@ -227,6 +227,19 @@ def render_checks() -> None:
         print("  (跳过：本机没装 Pillow，容器里有)")
         return
 
+    # 光有 Pillow 还不够 —— 渲染要中文字体，而 Noto CJK 只在容器镜像里。
+    # 本机（Windows）没有这个字体时渲染必然失败，那属于「环境不具备」，
+    # 跳过而不是判定失败，否则每次在本机跑都是假红。
+    try:
+        from astrbot_plugin_rconsole.core.render_image import font as _probe_font
+
+        _probe_font(24)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  (跳过：本机缺中文字体，容器里有 —— {type(exc).__name__}: {exc})")
+        print("        想在本机验渲染：docker exec astrbot python "
+              ".../tests/test_panels.py")
+        return
+
     import asyncio
 
     from astrbot_plugin_rconsole.core.panels import (

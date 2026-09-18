@@ -5,8 +5,10 @@ desc: >-
   自动识别聊天中的分享链接并解析出媒体内容。移植自 Yunzai-Bot 插件
   rconsole-plugin（作者 zhiyu1998），覆盖抖音、B站、快手、微博、AcFun、小红书、
   米游社、小黑盒、微视、网易云／QQ音乐／酷狗等平台，并保留原版的第三方接口轮换、
-  失败降级、AI 链接总结与翻译能力。另支持「#点歌 歌名」搜歌（网易云 / QQ音乐）、网易云扫码登录，以及 #R菜单 / #cookie状态 / #服务状态 三个图片命令。
-version: 1.5.1
+  失败降级、AI 链接总结与翻译能力。另支持「#点歌 歌名」搜歌（网易云 / QQ音乐）、网易云扫码登录，
+  以及 #R菜单 / #cookie状态 / #服务状态 三个图片命令；管理员可用 #R配置 在聊天里开关平台解析、
+  私信设置 Cookie、把解析内容切成「聊天记录」合并转发。
+version: 1.6.0
 author: Echo (port)
 repo: https://github.com/luoxhei1101-maker/AstrBot-Viedo-Plugin
 astrbot_version: ">=4.16,<5"

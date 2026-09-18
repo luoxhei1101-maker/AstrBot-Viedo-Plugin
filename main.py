@@ -96,7 +96,13 @@ from .core.music_sign_proxy import (
     DEFAULT_UPSTREAM as MUSIC_SIGN_UPSTREAM,
     SignProxy,
 )
-from .core.cookie_spec import SPEC_BY_PLATFORM
+from .core.cookie_spec import (
+    COOKIE_REQUIRED_ANY,
+    SPEC_BY_PLATFORM,
+    check_cookie,
+    get_spec,
+    parse_cookie_keys,
+)
 from .core import netease_login
 from .core.cookie_status import check_all as check_all_cookies
 from .core.panels import (
@@ -131,6 +137,15 @@ _COOKIE_LABELS: dict[str, str] = {
 
 # B 站 QQ 小程序的 appid（判断 Json 消息段是不是 B 站小程序卡片用）
 _BILI_MINIAPP_APPID = "1109937557"
+
+
+def _brief_names(names: list[str], limit: int = 8) -> str:
+    """把一长串平台名压成一行（给 #R配置 总览用，太长了会刷屏）。"""
+    if not names:
+        return "（无）"
+    if len(names) <= limit:
+        return "、".join(names)
+    return "、".join(names[:limit]) + f" 等 {len(names)} 个"
 
 
 def _read_video_base64(path: Path) -> str:
@@ -224,6 +239,8 @@ _LOCAL_COMMAND_METHODS: dict[str, str] = {
     "cookie_status": "cmd_cookie_status",
     "service_status": "cmd_service_status",
     "r_menu": "cmd_r_menu",
+    # 配置管理：要读写配置、判断私聊/管理员，还要维护「等 Cookie 输入」的会话
+    "r_config": "cmd_r_config",
 }
 
 # 自动识别用的合并正则。必须是模块级常量——装饰器在类定义时求值，
@@ -253,6 +270,122 @@ _COOKIE_FIELDS: dict[str, str] = {
     "netease": "music.neteaseCookie",
     "qqmusic": "music.qqMusicCookie",
 }
+
+
+# ----------------------------------------------------------------------
+# #R配置 命令用的别名表
+# ----------------------------------------------------------------------
+#
+# 用户不该为了关一个平台先去记「内部 key 是 xhs 还是 xiaohongshu」。
+# 中文名、key、以及群里常用的口语叫法都收进来，输入时统一 lower() 再查。
+
+# 平台开关：输入 -> AUTO_RULES 里的 key
+_PLATFORM_ALIAS: dict[str, str] = {
+    **{r.key.lower(): r.key for r in AUTO_RULES},
+    **{r.name.lower(): r.key for r in AUTO_RULES},
+    "b站": "bili",
+    "bilibili": "bili",
+    "哔哩": "bili",
+    "小红书": "xhs",
+    "红书": "xhs",
+    "油管": "sy2b",
+    "ytb": "sy2b",
+    "youtube": "sy2b",
+    "推特": "twitter_x",
+    "x": "twitter_x",
+    "twitter": "twitter_x",
+    "ins": "instagram",
+    "ig": "instagram",
+    "视频号": "weixinChannel",
+    "微信视频号": "weixinChannel",
+    "贴吧": "general",
+    "西瓜": "general",
+    "通用": "general",
+    "皮皮虾": "general",
+    "网易云": "netease",
+    "网易": "netease",
+    "网抑云": "netease",
+    "qq音乐": "qqMusic",
+    "qqmusic": "qqMusic",
+    "qq": "qqMusic",
+    "酷狗": "kugouMusic",
+    "汽水": "qishuiMusic",
+    "汽水音乐": "qishuiMusic",
+    "波点": "bodianMusic",
+    "小飞机": "aircraft",
+    "tg": "aircraft",
+    "最右": "zuiyou",
+    "微视": "weishi",
+    "ac": "acfun",
+}
+
+# Cookie 设置：输入 -> _COOKIE_FIELDS 里的 key
+#
+# 注意和上面那张表**不是同一套 key**：平台开关用 AUTO_RULES 的 key（小红书是
+# `xhs`），Cookie 用 _COOKIE_FIELDS 的 key（小红书是 `xiaohongshu`，沿用原
+# Guoba 面板的字段名）。两张表分开才不会被这种历史差异绊倒。
+_COOKIE_ALIAS: dict[str, str] = {
+    "bili": "bili",
+    "b站": "bili",
+    "哔哩哔哩": "bili",
+    "哔哩": "bili",
+    "bilibili": "bili",
+    "douyin": "douyin",
+    "抖音": "douyin",
+    "kuaishou": "kuaishou",
+    "快手": "kuaishou",
+    "weibo": "weibo",
+    "微博": "weibo",
+    "xiaohongshu": "xiaohongshu",
+    "xhs": "xiaohongshu",
+    "小红书": "xiaohongshu",
+    "红书": "xiaohongshu",
+    "miyoushe": "miyoushe",
+    "米游社": "miyoushe",
+    "米哈游": "miyoushe",
+    "weixinchannel": "weixinChannel",
+    "视频号": "weixinChannel",
+    "微信视频号": "weixinChannel",
+    "xiaoheihe": "xiaoheihe",
+    "小黑盒": "xiaoheihe",
+    "netease": "netease",
+    "网易云": "netease",
+    "网易": "netease",
+    "网抑云": "netease",
+    "qqmusic": "qqmusic",
+    "qq音乐": "qqmusic",
+    "qq": "qqmusic",
+}
+
+# 「#R配置」的前缀。**要求带 # 或 /**：`R配置` 这几个字落到自然语言里
+# 概率不低（群里可能有人问「R配置在哪改」），不像 #R菜单 那样允许省略前缀。
+_RCONFIG_PREFIX = re.compile(
+    r"^[/#]{1,2}\s*(?:R配置|r配置|R设置|r设置|Rconfig|rconfig|Rc|rc)(?=\s|$)\s*",
+    re.IGNORECASE,
+)
+
+# 等 Cookie 输入的会话存活时长（秒）
+_COOKIE_PENDING_TTL = 180.0
+
+# 当前插件实例。CookieInputFilter 是**类级**的自定义 filter（装饰器在类定义时
+# 求值，拿不到 self），只能通过模块级引用找回插件实例。AstrBot 每个插件只实例化
+# 一次，所以这里不会串台。
+_CURRENT_PLUGIN: "Main | None" = None
+
+
+class CookieInputFilter(CustomFilter):
+    """只在「正在等管理员发 Cookie」的会话里命中。
+
+    用自定义 filter 而不是 regex：Cookie 是一整串没有固定格式的内容，
+    正则没法描述「就是它」；而按会话状态判断是精确的、也不会误伤群里的
+    普通消息（等待状态只在私聊里由 ``#R配置 cookie <平台>`` 创建）。
+    """
+
+    def filter(self, event: AstrMessageEvent, cfg: AstrBotConfig) -> bool:
+        plugin = _CURRENT_PLUGIN
+        if plugin is None:
+            return False
+        return plugin.has_pending_cookie(event.unified_msg_origin)
 
 
 class _ResolverCtx:
@@ -285,6 +418,14 @@ class Main(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
         super().__init__(context, config)
         self.conf_data: AstrBotConfig | dict = config or {}
+
+        # 让 CookieInputFilter 找得到本实例（见模块级 _CURRENT_PLUGIN 的说明）
+        global _CURRENT_PLUGIN
+        _CURRENT_PLUGIN = self
+
+        # 「等管理员发 Cookie」的会话：umo -> (截止时间戳, Cookie 平台 key)。
+        # 只有私聊里由 `#R配置 cookie <平台>` 创建，3 分钟过期。
+        self._cookie_pending: dict[str, tuple[float, str]] = {}
 
         # 扫码登录的轮询任务。Context.register_task 已经弃用
         # （源码注释：改用 initialize() 里起后台任务），但扫码是「按需触发」的，
@@ -339,7 +480,29 @@ class Main(Star):
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
+        self._log_disabled_platforms()
         await self._start_sign_proxy()
+
+    def _log_disabled_platforms(self) -> None:
+        """启动时汇总「已支持但没勾选」的平台。
+
+        「某平台的链接发进去没反应」是最常见的反馈，九成是
+        ``plugin.enabled_platforms`` 没勾上。以前只有真的发了那条链接才会在
+        日志里留一行跳过记录，事后排查很费劲；这里启动时一次说清楚。
+        """
+        enabled = self._enabled_keys()
+        missing = [r.name for r in AUTO_RULES if r.key not in enabled]
+        if not missing:
+            logger.info(f"[R插件] 全部 {len(AUTO_RULES)} 个平台都已启用自动解析")
+            return
+        logger.info(
+            f"[R插件] 未启用自动解析的平台（{len(missing)}/{len(AUTO_RULES)}）："
+            f"{'、'.join(missing)}"
+        )
+        logger.info(
+            "[R插件] 想启用哪个，在聊天里发「#R配置 平台 <平台名> 开」；"
+            "也可以在 WebUI 插件配置里勾选"
+        )
 
     async def _start_sign_proxy(self) -> None:
         """按配置启动音乐卡片签名代理。
@@ -544,6 +707,14 @@ class Main(Star):
             return set()
         return {str(x) for x in raw}
 
+    def _forward_enabled(self) -> bool:
+        """解析内容是否用「聊天记录（合并转发）」发送。
+
+        由 ``plugin.send_as_forward`` 控制；聊天里可用
+        ``#R配置 形式 聊天记录`` / ``#R配置 形式 直发`` 随时切换。
+        """
+        return bool(self.conf_get("plugin.send_as_forward", False))
+
     # ==================================================================
     # 入口一：自动识别分享链接
     # ==================================================================
@@ -621,6 +792,47 @@ class Main(Star):
             event, text, forced_resolver=handled, forced_name=text[:20]
         ):
             yield item
+
+    # ==================================================================
+    # 入口三：等 Cookie 时的「下一条消息」
+    # ==================================================================
+
+    @filter.custom_filter(CookieInputFilter)
+    async def on_cookie_input(self, event: AstrMessageEvent):
+        """把「等待 Cookie」状态下管理员发的下一条消息当成 Cookie 收下。
+
+        两步式设置（``#R配置 cookie 小红书`` → 机器人提示 → 粘贴整串）比
+        一条长命令好：Cookie 动辄几百上千字符，塞进命令里既容易截断，
+        也会留在聊天记录里。
+
+        **consume 必须在第一个 await 之前**：asyncio 是单线程，同一个会话的
+        两条消息几乎同时进来时，如果先把状态删掉放在 await 之后，两条都会
+        被当成 Cookie 各写一次（序号点播踩过同样的坑）。所以这里 peek 完
+        立刻 consume。
+        """
+        umo = event.unified_msg_origin
+        entry = self._cookie_pending.get(umo)
+        if not entry:
+            return
+
+        # ---- 先消费掉等待状态，再往下走（下面就开始有 await 了）----
+        self._cookie_pending.pop(umo, None)
+        deadline, platform = entry
+
+        label = self._cookie_label(platform)
+        if time.time() > deadline:
+            yield event.plain_result(f"⌛ 等待超时，请重新发「#R配置 cookie {label}」")
+            event.stop_event()
+            return
+
+        text = event.get_message_str().strip()
+        if text in ("取消", "cancel", "#取消", "/取消", "算了"):
+            yield event.plain_result(f"已取消设置 {label} 的 Cookie。")
+            event.stop_event()
+            return
+
+        yield event.plain_result(self._set_cookie(platform, text))
+        event.stop_event()
 
     # ==================================================================
 
@@ -734,22 +946,65 @@ class Main(Star):
     async def _render(self, event: AstrMessageEvent, result: ResolveResult):
         """把解析结果渲染成 AstrBot 消息。
 
-        顺序统一为「先简介（类型 + 标题 + 作者），后媒体」——用户要的是先看到
-        这条作品是什么、谁发的，再看到视频/图集本身，而不是先被媒体刷屏。
+        两种「发送形式」，由 ``plugin.send_as_forward`` 决定：
+
+        - **直发**（默认，走 ``_render_direct``）：先发文字简介，再逐个发媒体
+        - **聊天记录**（走 ``_render_forward``）：简介与全部媒体打包成一条合并转发
+
+        两条路的顺序都是「先简介、后媒体」——用户要先看到这条作品是什么、
+        谁发的，再看到内容本身，而不是先被媒体刷屏。
+
+        评论（B站/抖音）是附加链路，不参与上面的打包：它们本来就是各自一条
+        合并转发，所以统一放在最后补发，两条路都能走到。
+        """
+        async for item in self._render_body(event, result):
+            yield item
+
+        # ---- B站评论（附加功能，失败不拖垮主流程）----
+        async for item in self._maybe_send_bili_comments(event, result):
+            yield item
+
+        # ---- 抖音评论（附加功能，失败不拖垮主流程）----
+        async for item in self._maybe_send_douyin_comments(event, result):
+            yield item
+
+    async def _render_body(self, event: AstrMessageEvent, result: ResolveResult):
+        """按配置选发送形式，并把「识别前缀 / 是否带简介」算出来。
+
+        前缀是给``_build_intro``用的（简介文本里那一行），不是单独发出去的
+        提示 —— 开了聊天记录转发之后，简介直接进第一个节点，不会再有一条
+        独立的「识别成功」消息。
+        """
+        # 识别前缀沿用原 Guoba 面板配置；原版默认空串，这里给个更直观的兜底
+        prefix = str(self.conf_get("global.identifyPrefix", "") or "").strip() or "🔗 识别："
+        show_desc = bool(self.conf_get("plugin.show_desc", True))
+
+        # ---- 纯文本类结果（AI 总结 / 翻译）----
+        # 这类结果本身没有媒体，包成聊天记录只会多一层翻页，永远直发
+        if result.extra.get("text_only") and result.desc:
+            yield event.plain_result(f"{prefix}{result.platform}\n{result.desc}")
+            return
+
+        if self._forward_enabled():
+            async for item in self._render_forward(event, result, prefix, show_desc):
+                yield item
+        else:
+            async for item in self._render_direct(event, result, prefix, show_desc):
+                yield item
+
+    async def _render_direct(
+        self,
+        event: AstrMessageEvent,
+        result: ResolveResult,
+        prefix: str,
+        show_desc: bool,
+    ):
+        """直发：简介单独一条，媒体逐条发出去。
 
         一个作品可能同时有多种媒体：抖音动图就是「多个视频 + BGM」，
         B 站合并产出的是本地视频。所以这里不是 if/elif 一路到底，
         而是依次追加。
         """
-        # 识别前缀沿用原 Guoba 面板配置；原版默认空串，这里给个更直观的兜底
-        prefix = str(self.conf_get("global.identifyPrefix", "") or "").strip() or "🔗 识别："
-        show_desc = self.conf_get("plugin.show_desc", True)
-
-        # ---- 纯文本类结果（AI 总结 / 翻译）----
-        if result.extra.get("text_only") and result.desc:
-            yield event.plain_result(f"{prefix}{result.platform}\n{result.desc}")
-            return
-
         # ---- 先发文字简介（类型 + 标题 + 作者）----
         if show_desc:
             intro = self._build_intro(result, prefix)
@@ -873,13 +1128,214 @@ class Main(Star):
                 async for item in self._render_text_only(event, result):
                     yield item
 
-        # ---- B站评论（附加功能，失败不拖垮主流程）----
-        async for item in self._maybe_send_bili_comments(event, result):
-            yield item
+    async def _render_forward(
+        self,
+        event: AstrMessageEvent,
+        result: ResolveResult,
+        prefix: str,
+        show_desc: bool,
+    ):
+        """聊天记录形式：把整条解析结果打包成**一条合并转发**发出去。
 
-        # ---- 抖音评论（附加功能，失败不拖垮主流程）----
-        async for item in self._maybe_send_douyin_comments(event, result):
-            yield item
+        节点构成（顺序固定）：
+
+        1. 简介节点（类型 / 标题 / 作者）—— ``show_desc`` 关掉时没有这个节点
+        2. 之后每个媒体各占一个节点，顺序与作品本身一致
+
+        **不再发**「🔗 识别：xx」那条独立提示 —— 简介已经进了第一个节点，
+        单独再发一条纯属噪音。
+
+        媒体遵守既有铁律：能落盘的一律先落盘、再转 base64 塞进节点
+        （``Comp.Image.fromFileSystem`` / ``_video_component``），和直发走的是
+        同一条跨容器安全路径。
+
+        没有任何媒体时**不硬凑聊天记录**：一条只有文字的转发，点开跟普通
+        消息看到的一模一样还多一次点击，这种情况退回普通文本情报。
+        """
+        node_name = (event.get_sender_name() or "").strip() or "解析结果"
+        node_uin = str(event.get_sender_id() or "")
+
+        def _node(comps: list) -> Comp.Node:
+            # 一个节点一个媒体：和 _send_album 的转发分支保持一致，
+            # 这样在 QQ 客户端里每个媒体都是独立一条「消息」，可单独转发/保存
+            return Comp.Node(comps, name=node_name, uin=node_uin)
+
+        nodes: list = []
+        if show_desc:
+            intro = self._build_intro(result, prefix)
+            if intro:
+                nodes.append(_node([Comp.Plain(intro)]))
+        intro_nodes = len(nodes)
+
+        failures: list[str] = []
+
+        # ---- B站 DASH 延迟合并 ----
+        skip_images = False
+        skip_videos = False
+        dash_merge = result.extra.get("dash_merge")
+        if dash_merge and dash_merge.get("video") and dash_merge.get("audio"):
+            comp = None
+            try:
+                merged = await merge_dash(
+                    dash_merge["video"],
+                    dash_merge["audio"],
+                    tag=f"bili_{result.extra.get('bvid', 'x')}",
+                )
+                event.track_temporary_local_file(str(merged))
+                comp = await self._video_component(merged)
+                if comp is None:
+                    raise MergeError(f"合并产物不可读: {merged}")
+            except MergeError as exc:
+                # 合并失败降级为无声视频轨（和直发同策略）
+                logger.warning(f"[R插件][B站] 合并失败，降级为无声视频轨: {exc}")
+                try:
+                    comp = Comp.Video.fromURL(dash_merge["video"])
+                except Exception as exc2:  # noqa: BLE001
+                    logger.warning(f"[R插件][B站] 无声视频轨也发送失败: {exc2}")
+                    comp = None
+                    failures.append(f"B站视频（{exc}）")
+            if comp is not None:
+                nodes.append(_node([comp]))
+                skip_images = True  # 视频已进节点，封面图不再单独占一个节点
+
+        # ---- 本地视频（其它平台的合并产物）----
+        for path in result.local_videos[:1]:
+            event.track_temporary_local_file(path)
+            comp = await self._video_component(path)
+            if comp is None:
+                failures.append(f"本地视频（{Path(path).name} 不可读）")
+                continue
+            nodes.append(_node([comp]))
+
+        # ---- 图集（抖音：静态图与动图混排，顺序按作品原样）----
+        failed_album = 0
+        if result.extra.get("album_kinds"):
+            kinds = result.extra.get("album_kinds") or []
+            still_paths = await self._download_album_stills(result, list(result.images))
+            anim_paths = await self._download_album_videos(result, list(result.videos))
+
+            vi = 0
+            ii = 0
+            for kind in kinds:
+                if kind == "animated":
+                    if vi >= len(anim_paths):
+                        continue
+                    path = anim_paths[vi]
+                    vi += 1
+                    if path is None:
+                        failed_album += 1
+                        continue
+                    event.track_temporary_local_file(str(path))
+                    comp = await self._video_component(path)
+                    if comp is None:
+                        failed_album += 1
+                        continue
+                    nodes.append(_node([comp]))
+                else:
+                    if ii >= len(still_paths):
+                        continue
+                    path = still_paths[ii]
+                    ii += 1
+                    if path is None:
+                        failed_album += 1
+                        continue
+                    event.track_temporary_local_file(str(path))
+                    try:
+                        nodes.append(_node([Comp.Image.fromFileSystem(str(path))]))
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(f"[R插件] 转发节点图片构造失败: {exc}")
+                        failed_album += 1
+            skip_images = True
+            skip_videos = True
+
+        # ---- 视频直链 ----
+        if result.videos and not skip_videos:
+            send_mode = self.conf_get("plugin.send_mode", "url")
+            added = False
+            oversize = False
+            if send_mode == "download":
+                local_path, oversize_msg = await self._download_video(result)
+                if oversize_msg:
+                    # 超限是明确结论：这个视频直接放弃，不退回直链
+                    # （直发路径也是这么判的，否则等于绕过了大小限制）
+                    oversize = True
+                    failures.append(str(oversize_msg).removeprefix("⚠️ ").strip())
+                elif local_path:
+                    event.track_temporary_local_file(local_path)
+                    comp = await self._video_component(local_path)
+                    if comp is None:
+                        failures.append("下载后的视频文件不可读")
+                    else:
+                        nodes.append(_node([comp]))
+                        added = True
+
+            if not added and not oversize:
+                # 直链模式，或下载失败——退回把解析出的地址交给发送端（同直发）
+                for comp in self._build_video_chain(result):
+                    nodes.append(_node([comp]))
+                    added = True
+                if not added:
+                    failures.append("视频链接不可用")
+
+        # ---- 音频（音乐平台结果 / 抖音背景音乐）----
+        #
+        # 这里**必须先落盘再进节点**，不能像直发那样直接把 URL 交给
+        # ``Comp.Record.fromURL``：合并转发里 Record 由 AstrBot 自己下载并转成
+        # wav（``Node.to_dict`` → ``Record.convert_to_base64``），那一步失败会抛
+        # 异常，把**整条聊天记录**一起拖垮 —— 直发时它只是单独一条消息，转发时
+        # 它是同一个消息链的一部分，代价完全不同。
+        audio_max = int(self.conf_get("global.videoSizeLimit", 70) or 70) * 1024 * 1024
+        for url in result.audios[:3]:
+            try:
+                path = await download_media(url, prefix="audio", max_bytes=audio_max)
+            except Exception as exc:  # noqa: BLE001 - 单个音频失败不拖垮整条转发
+                logger.warning(f"[R插件] 转发节点音频下载失败，跳过: {exc}")
+                failures.append("音频")
+                continue
+            event.track_temporary_local_file(str(path))
+            try:
+                nodes.append(_node([Comp.Record.fromFileSystem(str(path))]))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[R插件] 转发节点音频构造失败: {exc}")
+                failures.append("音频")
+
+        # ---- 图片 ----
+        failed_images = 0
+        if result.images and not skip_images and not skip_videos:
+            paths = await self._download_images(result, list(result.images))
+            for path in paths:
+                if path is None:
+                    failed_images += 1
+                    continue
+                event.track_temporary_local_file(str(path))
+                try:
+                    nodes.append(_node([Comp.Image.fromFileSystem(str(path))]))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[R插件] 转发节点图片构造失败: {exc}")
+                    failed_images += 1
+
+        if failed_album:
+            failures.append(f"{failed_album} 项图集媒体")
+        if failed_images:
+            failures.append(f"{failed_images} 张图片")
+
+        media_nodes = len(nodes) - intro_nodes
+        if media_nodes <= 0:
+            # 一个媒体都没能进节点：不硬发空壳聊天记录，退回文字情报
+            logger.warning(f"[R插件] {result.platform} 无媒体可转发，退回文本")
+            async for item in self._render_text_only(event, result):
+                yield item
+            return
+
+        if failures:
+            detail = "；".join(dict.fromkeys(failures))
+            yield event.plain_result(f"⚠️ 部分内容未能发送：{detail}")
+
+        logger.info(
+            f"[R插件] 以聊天记录发送 {result.platform}：{media_nodes} 个内容节点"
+            + ("（含简介节点）" if intro_nodes else "")
+        )
+        yield event.chain_result([Comp.Nodes(nodes)])
 
     async def _maybe_send_bili_comments(
         self, event: AstrMessageEvent, result: ResolveResult
@@ -1440,19 +1896,28 @@ class Main(Star):
             ``(本地路径, 超限提示)``。下载失败时路径为 None 且提示为空
             （调用方会退回直链），超限时提示非空（调用方应直接放弃）。
         """
-        video_url = result.videos[0]
-        try:
-            # 大小上限沿用原 Guoba 面板的 videoSizeLimit（单位 MB）
-            max_mb = int(self.conf_get("global.videoSizeLimit", 70) or 70)
-            path = await download_media(
-                video_url, prefix="video", max_bytes=max_mb * 1024 * 1024
-            )
-            return str(path), ""
-        except MediaTooLarge as exc:
-            return None, f"⚠️ {result.platform} 视频过大，已跳过：{exc}"
-        except (HttpError, OSError) as exc:
-            logger.warning(f"[R插件] 视频下载失败，回退直发链接: {exc}")
-            return None, ""
+        # 主链接失败时依次试备份 —— 小红书同一视频有多个画质档 / CDN 域名，
+        # 单条挂了换一条就能下（见 platforms/xiaohongshu.py 的 video_backups）
+        candidates = list(result.videos[:1]) + list(
+            result.extra.get("video_backups") or []
+        )
+        # 大小上限沿用原 Guoba 面板的 videoSizeLimit（单位 MB）
+        max_mb = int(self.conf_get("global.videoSizeLimit", 70) or 70)
+
+        for url in candidates:
+            try:
+                path = await download_media(
+                    url, prefix="video", max_bytes=max_mb * 1024 * 1024
+                )
+                return str(path), ""
+            except MediaTooLarge as exc:
+                # 超限是明确结论，换备份也一样超，直接放弃
+                return None, f"⚠️ {result.platform} 视频过大，已跳过：{exc}"
+            except (HttpError, OSError) as exc:
+                logger.warning(f"[R插件] 视频下载失败，尝试下一个地址: {exc}")
+                continue
+
+        return None, ""
 
     def _build_video_chain(self, result: ResolveResult) -> list:
         """把视频直链拼成消息链。抖音动图会有多条，一次发出去。"""
@@ -1662,6 +2127,16 @@ class Main(Star):
         lines.append("【管理员】")
         lines.append("　#RNQ　网易云扫码登录")
         lines.append("　#RBQ　B站扫码登录　#RBS　B站登录状态")
+        lines.append("")
+        # 配置类命令统一收在 #R配置 一个入口下；这里顺手把「当前发送形式」
+        # 和「切到另一个形式」的命令并排显示，省得用户去记当前是哪个
+        form_now = "聊天记录" if self._forward_enabled() else "直发"
+        form_to = "直发" if self._forward_enabled() else "聊天记录"
+        lines.append("【管理员配置】发 #R配置 帮助 看全部")
+        lines.append("　#R配置 平台 抖音 开|关　　开关某个平台的解析")
+        lines.append(f"　#R配置 形式 {form_to}　　　当前：{form_now}")
+        lines.append("　#R配置 cookie 小红书　　　私聊设置 Cookie（两步）")
+        lines.append("　#R配置 点歌 平台 网易云　　默认平台 / 数量 / 发送方式")
         if bot_name:
             lines.append("")
             lines.append(f"— {bot_name}")
@@ -1745,6 +2220,575 @@ class Main(Star):
         lines.append("")
         lines.extend(info.get("env_lines", []))
         return "\n".join(lines)
+
+    # ==================================================================
+    # #R配置 —— 聊天里改常用配置（仅管理员）
+    # ==================================================================
+    #
+    # 起因：常用开关（某个平台要不要解析、点歌默认平台、发送形式）原本只能去
+    # WebUI 的插件配置里翻分组找，改一次要开网页。这里把它们搬到聊天里，
+    # 顺手把「设 Cookie」做成私信两步式 —— Cookie 是凭据，在群里粘贴等于公开。
+
+    # 点歌「发送方式」可选值：词 -> 配置值
+    _MUSIC_SEND_ALIAS: dict[str, str] = {
+        "链接": "link", "link": "link", "列表": "link",
+        "卡片": "card", "card": "card",
+        "语音": "voice", "voice": "voice", "音频": "voice",
+        "文件": "file", "file": "file",
+    }
+    # 点歌「方式」：列表（发列表图再回序号）或直接送（直接发第一首）
+    _MUSIC_SEARCH_ALIAS: dict[str, str] = {
+        "列表": "list", "list": "list", "搜索": "list",
+        "直接": "direct", "direct": "direct", "单曲": "direct", "直发": "direct",
+    }
+    # 点歌默认平台
+    _MUSIC_PLATFORM_ALIAS: dict[str, str] = {
+        "netease": "netease", "网易云": "netease", "网抑云": "netease", "网易": "netease",
+        "qqmusic": "qqmusic", "qq音乐": "qqmusic", "qq": "qqmusic",
+    }
+    _MUSIC_LABELS: dict[str, str] = {"netease": "网易云", "qqmusic": "QQ音乐"}
+
+    _ON_WORDS = frozenset({"开", "开启", "启用", "打开", "on", "1", "true", "是", "yes"})
+    _OFF_WORDS = frozenset({"关", "关闭", "禁用", "off", "0", "false", "否", "no"})
+
+    async def cmd_r_config(self, event: AstrMessageEvent):
+        """``#R配置`` —— 在聊天里改常用配置（仅管理员）。
+
+        ==============================================  ================================
+        命令                                            作用
+        ==============================================  ================================
+        ``#R配置``                                      总览
+        ``#R配置 帮助``                                  完整用法
+        ``#R配置 平台``                                  所有平台开关状态
+        ``#R配置 平台 抖音 开|关``                        开关某平台的自动解析
+        ``#R配置 cookie``                                各平台 Cookie 配置情况
+        ``#R配置 cookie 小红书``                         私信里进入「等你发 Cookie」
+        ``#R配置 cookie 小红书 <整串>``                   直接设置（前面加「强制」跳过体检）
+        ``#R配置 cookie 小红书 清除``                     清空
+        ``#R配置 点歌 平台|数量|发送|方式|开关 <值>``       点歌相关设置
+        ``#R配置 形式 聊天记录|直发``                      解析内容发送形式
+        ==============================================  ================================
+
+        为什么「发送形式」值得单独一个开关：内容多的时候合并成一条聊天记录
+        不刷屏；想让内容一眼可见时直发更合适。两种都有人要，所以做成可切换的，
+        默认直发（跟升级前一致）。
+        """
+        text = event.get_message_str().strip()
+        rest = _RCONFIG_PREFIX.sub("", text, count=1).strip()
+        parts = rest.split()
+        sub = parts[0].lower() if parts else ""
+        # 子命令之后的**原始**文本（保留内部空格）。Cookie 必须用这份：
+        # 先 split 再拼回去会把 `a=1; b=2` 里的空格吃掉
+        tail = re.sub(r"^\S+\s*", "", rest, count=1) if sub else ""
+
+        try:
+            if not sub:
+                yield event.plain_result(self._cfg_overview())
+            elif sub in ("帮助", "help", "?", "？", "h"):
+                yield event.plain_result(self._cfg_help())
+            elif sub in ("平台", "platform", "pf"):
+                yield event.plain_result(self._cfg_platform(parts[1:]))
+            elif sub in ("cookie", "ck"):
+                async for item in self._cfg_cookie(event, tail):
+                    yield item
+            elif sub in ("点歌", "music", "歌"):
+                yield event.plain_result(self._cfg_music(parts[1:]))
+            elif sub in ("形式", "发送形式", "转发", "form", "send"):
+                yield event.plain_result(self._cfg_form(parts[1:]))
+            else:
+                yield event.plain_result(
+                    f"❓ 不认识「{parts[0]}」，发「#R配置 帮助」看全部用法。"
+                )
+        except Exception as exc:  # noqa: BLE001 - 聊天命令出错也不该炸给框架
+            logger.error(f"[R插件][R配置] 执行出错: {type(exc).__name__}: {exc}")
+            yield event.plain_result(f"❌ 执行出错：{type(exc).__name__}: {exc}")
+
+    # ------------------------------------------------------------------
+    # 总览 / 帮助
+    # ------------------------------------------------------------------
+
+    def _cfg_overview(self) -> str:
+        enabled = [r.name for r in AUTO_RULES if r.key in self._enabled_keys()]
+        mode = "聊天记录（合并转发）" if self._forward_enabled() else "直发（多条消息）"
+
+        music_on = "开" if self.conf_get("music.enable", False) else "关"
+        m_platform = self._music_label(str(self.conf_get("music.platform", "netease") or "netease"))
+        m_count = self.conf_get("music.maxList", 10)
+        m_send = str(self.conf_get("music.sendMode", "link") or "link")
+        m_search = "列表" if str(self.conf_get("music.searchMode", "list") or "list") == "list" else "直接送"
+
+        lines = [
+            "⚙️ R插件配置总览",
+            "",
+            f"📤 解析发送形式：**{mode}**",
+            f"🧩 自动解析平台：{len(enabled)}/{len(AUTO_RULES)} 个启用",
+            f"　　　{_brief_names(enabled)}",
+            f"🎵 点歌：{music_on}　默认 {m_platform}　列表 {m_count} 首　{m_search}　发送方式 {m_send}",
+            "",
+            self._cookie_brief(),
+            "",
+            "改配置：#R配置 帮助",
+        ]
+        return "\n".join(lines)
+
+    def _cfg_help(self) -> str:
+        return "\n".join([
+            "⚙️ #R配置 · 用法（仅管理员，带 # 或 / 前缀）",
+            "",
+            "【解析】",
+            "　#R配置 平台　　　　　　　列出所有平台的开关状态",
+            "　#R配置 平台 抖音 关　　　关掉抖音的自动解析（改「开」则打开）",
+            "　#R配置 形式 聊天记录　　　解析内容打包成一条聊天记录发出",
+            "　#R配置 形式 直发　　　　　改回「简介 + 媒体」多条消息直发",
+            "",
+            "【Cookie】（设置类只能在私聊里做）",
+            "　#R配置 cookie　　　　　　查看各平台是否已配置",
+            "　#R配置 cookie 小红书　　 我提示后，你把整串 Cookie 发过来",
+            "　#R配置 cookie 小红书 <串>　直接设置；不必完整，但要有必备字段",
+            "　#R配置 cookie 小红书 强制 <串>　跳过必备字段检查强行写入",
+            "　#R配置 cookie 小红书 清除　清空该平台的 Cookie",
+            "",
+            "【点歌】",
+            "　#R配置 点歌 平台 网易云｜QQ音乐",
+            "　#R配置 点歌 数量 10　　　列表显示几首",
+            "　#R配置 点歌 发送 链接｜卡片｜语音｜文件",
+            "　#R配置 点歌 方式 列表｜直接",
+            "　#R配置 点歌 开关 开｜关",
+            "",
+            "平台名支持中文名或内部 key（抖音 / douyin 都认）。",
+        ])
+
+    # ------------------------------------------------------------------
+    # 平台开关
+    # ------------------------------------------------------------------
+
+    def _cfg_platform(self, args: list[str]) -> str:
+        enabled = self._enabled_keys()
+
+        # 不带参数：列状态（格式对齐，方便一眼扫）
+        if not args:
+            lines = ["🧩 平台开关（✅ 已启用 / ⬜ 未启用）", ""]
+            for rule in AUTO_RULES:
+                mark = "✅" if rule.key in enabled else "⬜"
+                lines.append(f"{mark} {rule.name}　（{rule.key}）")
+            lines.append("")
+            lines.append(f"共 {len(enabled)}/{len(AUTO_RULES)} 个启用")
+            lines.append("用法：#R配置 平台 <平台名> 开｜关")
+            return "\n".join(lines)
+
+        if len(args) < 2:
+            return "❓ 用法：#R配置 平台 <平台名> 开｜关\n例如：`#R配置 平台 抖音 关`"
+
+        # 平台名里可能有空格，所以约定「最后一个词是开/关，前面全是平台名」
+        action = args[-1].lower()
+        name = "".join(args[:-1])
+        key = _PLATFORM_ALIAS.get(name.lower())
+        if not key:
+            return (
+                f"❓ 不认识平台「{name}」。\n"
+                "发 `#R配置 平台` 可以看到全部平台的准确名字。"
+            )
+
+        if action in self._ON_WORDS:
+            turning_on = True
+        elif action in self._OFF_WORDS:
+            turning_on = False
+        else:
+            return f"❓ 只认「开」或「关」，收到的是「{args[-1]}」。"
+
+        keys = self._enabled_keys()
+        if turning_on:
+            keys.add(key)
+        else:
+            keys.discard(key)
+
+        # 按 AUTO_RULES 的顺序存，WebUI 里勾选框的顺序才稳定
+        ordered = [r.key for r in AUTO_RULES if r.key in keys]
+        err = self._save_conf("plugin.enabled_platforms", ordered)
+        if err:
+            return f"❌ 保存失败：{err}"
+
+        rule = next((r for r in AUTO_RULES if r.key == key), None)
+        label = rule.name if rule else key
+        if turning_on:
+            return f"✅ 已开启 **{label}** 的自动解析（当前 {len(ordered)} 个平台启用）"
+        return (
+            f"✅ 已关闭 **{label}** 的自动解析（当前 {len(ordered)} 个平台启用）\n"
+            "以后这个平台的链接不再自动处理。"
+        )
+
+    # ------------------------------------------------------------------
+    # Cookie
+    # ------------------------------------------------------------------
+
+    async def _cfg_cookie(self, event: AstrMessageEvent, rest: str):
+        """Cookie 子命令：查看 / 设置（两步式或直接带值） / 清除。
+
+        参数从**原始文本**里切，而不是 ``split()`` 之后的词表：Cookie 里有
+        ``; `` 这种带空格的分隔符，先按空白切成词再拼回去会把空格吃掉，
+        写进配置的串就变味了（实测踩过：``a=1; b=2`` 被写成 ``a=1;b=2``）。
+        """
+        text = str(rest or "").strip()
+        if not text:
+            yield event.plain_result(self._cookie_config_overview())
+            return
+
+        match = re.match(r"^(\S+)(?:\s+([\s\S]*))?$", text)
+        if not match:
+            yield event.plain_result(self._cookie_config_overview())
+            return
+        name = match.group(1)
+        tail = (match.group(2) or "").strip()
+
+        key = _COOKIE_ALIAS.get(name.lower())
+        if not key:
+            yield event.plain_result(
+                f"❓ 不认识平台「{name}」。可设置的平台：\n"
+                "　" + "、".join(self._cookie_label(p) for p in _COOKIE_FIELDS)
+            )
+            return
+
+        label = self._cookie_label(key)
+
+        # ---- 不带值：进入「等 Cookie」状态（两步式）----
+        if not tail:
+            if not event.is_private_chat():
+                yield event.plain_result(
+                    "🔒 Cookie 只能在**私聊**里设置，免得发到群里被别人拿走。\n"
+                    f"请私聊我发：`#R配置 cookie {name}`"
+                )
+                return
+
+            umo = event.unified_msg_origin
+            # 登记等待状态（同步操作，放在第一个 await 之前）
+            self._cookie_pending[umo] = (time.time() + _COOKIE_PENDING_TTL, key)
+            need = " 或 ".join(COOKIE_REQUIRED_ANY.get(key) or ()) or "任意 key=value"
+            yield event.plain_result(
+                f"⌛ 请在 **{int(_COOKIE_PENDING_TTL // 60)} 分钟**内，把 {label} 的 Cookie 整串"
+                "发给我（浏览器 F12 → Network → 随便点一个请求 → 复制请求头里的 Cookie）。\n"
+                f"· 不要求完整，但必须包含 **{need}**\n"
+                "· 发「取消」可以放弃"
+            )
+            return
+
+        # 「强制」前缀：跳过必备字段体检
+        force = False
+        value = tail
+        fm = re.match(r"^(?:强制|force|-f)(?:\s+([\s\S]*))?$", tail, re.IGNORECASE)
+        if fm:
+            force = True
+            value = (fm.group(1) or "").strip()
+
+        if value in ("清除", "清空", "删除", "clear", "reset"):
+            yield event.plain_result(self._clear_cookie(key))
+            return
+
+        if not event.is_private_chat():
+            yield event.plain_result(
+                "🔒 设置 Cookie 请私聊我操作，别在群里贴凭据。\n"
+                f"私聊发：`#R配置 cookie {name}`"
+            )
+            return
+
+        yield event.plain_result(self._set_cookie(key, value, force=force))
+
+    def _set_cookie(self, platform: str, raw: str, force: bool = False) -> str:
+        """写入某个平台的 Cookie，返回给用户看的提示。
+
+        「允许不完整，但必须带必备字段」：完整度不检查（平台字段经常变，
+        要求填全只会把人挡在门外），但一个必备字段都没有的串肯定是粘错了，
+        直接拒收。确实要强行写入时用 ``force``（用户在命令里加「强制」）。
+        """
+        value = str(raw or "").strip()
+        label = self._cookie_label(platform)
+        if not value:
+            return f"❌ {label} 的 Cookie 是空的，没写入。"
+
+        if not force:
+            passed, why = check_cookie(platform, value)
+            if not passed:
+                return (
+                    f"❌ {label} 的 Cookie 没通过检查：{why}\n"
+                    f"确认这串没问题的话，改用：`#R配置 cookie {label} 强制 <整串>`"
+                )
+
+        err = self._save_conf(_COOKIE_FIELDS[platform], value)
+        if err:
+            return f"❌ 保存失败：{err}"
+
+        # 「逐项填写」的优先级比整段高，留着旧值会把刚设置的顶掉
+        # （B站扫码写凭据时踩过同一个坑）
+        cleared = ""
+        spec = get_spec(platform)
+        if spec is not None:
+            existing = self.conf_get(spec.fields_path, []) or []
+            if existing:
+                err2 = self._save_conf(spec.fields_path, [])
+                cleared = (
+                    "\n（已顺手清空旧的「逐项填写」，否则它会覆盖这次的值）"
+                    if not err2
+                    else "\n⚠️ 旧的「逐项填写」没清掉，可能覆盖这次的值，请去 WebUI 检查"
+                )
+
+        fields = parse_cookie_keys(value)
+        tail = "" if force else ""
+        return (
+            f"✅ {label} 的 Cookie 已保存：{len(value)} 字符 / {len(fields)} 个字段{cleared}\n"
+            f"发 `#cookie状态` 可以校验它现在是否有效。{tail}"
+        )
+
+    def _clear_cookie(self, platform: str) -> str:
+        label = self._cookie_label(platform)
+        err = self._save_conf(_COOKIE_FIELDS[platform], "")
+        if err:
+            return f"❌ 清空失败：{err}"
+        spec = get_spec(platform)
+        if spec is not None:
+            self._save_conf(spec.fields_path, [])
+        return f"✅ 已清空 {label} 的 Cookie"
+
+    def _cookie_config_overview(self) -> str:
+        lines = ["🔑 Cookie 配置情况", ""]
+        filled: list[str] = []
+        empty: list[str] = []
+        for platform in _COOKIE_FIELDS:
+            label = self._cookie_label(platform)
+            cookie = self.cookie_for(platform)
+            if not cookie:
+                empty.append(label)
+                continue
+            passed, _ = check_cookie(platform, cookie)
+            mark = "✅" if passed else "⚠️"
+            note = "" if passed else "（缺必备字段）"
+            filled.append(
+                f"{mark} {label}　{len(cookie)} 字符 / {len(parse_cookie_keys(cookie))} 个字段{note}"
+            )
+        lines.extend(filled or ["（还没有配置任何 Cookie）"])
+        if empty:
+            lines.append("")
+            lines.append("⬜ 未配置：" + "、".join(empty))
+        lines.append("")
+        lines.append("设置：#R配置 cookie <平台名>　（私聊发，我提示后再把整串发过来）")
+        lines.append("清空：#R配置 cookie <平台名> 清除")
+        return "\n".join(lines)
+
+    def _cookie_brief(self) -> str:
+        """一行 Cookie 概况（总览用）。"""
+        ok: list[str] = []
+        warn: list[str] = []
+        empty: list[str] = []
+        for platform in _COOKIE_FIELDS:
+            label = self._cookie_label(platform)
+            cookie = self.cookie_for(platform)
+            if not cookie:
+                empty.append(label)
+                continue
+            passed, _ = check_cookie(platform, cookie)
+            (ok if passed else warn).append(label)
+
+        parts: list[str] = []
+        if ok:
+            parts.append("✅ " + "、".join(ok))
+        if warn:
+            parts.append("⚠️ " + "、".join(warn) + "（缺必备字段）")
+        if empty:
+            parts.append("⬜ " + "、".join(empty))
+        return "🔑 Cookie：" + ("　".join(parts) if parts else "（无）")
+
+    def _cookie_label(self, platform: str) -> str:
+        """Cookie 平台的中文名（spec 里没写就用本文件的兜底表）。"""
+        spec = SPEC_BY_PLATFORM.get(platform)
+        return (spec.label if spec and spec.label else "") or _COOKIE_LABELS.get(
+            platform, platform
+        )
+
+    def has_pending_cookie(self, umo: str) -> bool:
+        """该会话是否在等 Cookie（顺手清理过期的）。"""
+        entry = self._cookie_pending.get(umo)
+        if not entry:
+            return False
+        deadline, _ = entry
+        if time.time() > deadline:
+            self._cookie_pending.pop(umo, None)
+            return False
+        return True
+
+    # ------------------------------------------------------------------
+    # 点歌设置
+    # ------------------------------------------------------------------
+
+    def _music_label(self, key: str) -> str:
+        return self._MUSIC_LABELS.get(key, key)
+
+    def _cfg_music(self, args: list[str]) -> str:
+        if not args:
+            on = "开" if self.conf_get("music.enable", False) else "关"
+            platform = self._music_label(str(self.conf_get("music.platform", "netease") or "netease"))
+            count = self.conf_get("music.maxList", 10)
+            send = str(self.conf_get("music.sendMode", "link") or "link")
+            search = str(self.conf_get("music.searchMode", "list") or "list")
+            return "\n".join([
+                "🎵 点歌设置",
+                "",
+                f"点歌开关：{on}",
+                f"默认平台：{platform}",
+                f"列表长度：{count} 首",
+                f"发送方式：{send}（link/card/voice/file）",
+                f"点歌方式：{'列表（发列表图，回序号播放）' if search == 'list' else '直接送（直接发第一首）'}",
+                "",
+                "改：#R配置 点歌 平台|数量|发送|方式|开关 <值>",
+            ])
+
+        if len(args) < 2:
+            return (
+                "❓ 用法：\n"
+                "　#R配置 点歌 平台 网易云｜QQ音乐\n"
+                "　#R配置 点歌 数量 <1-50>\n"
+                "　#R配置 点歌 发送 链接｜卡片｜语音｜文件\n"
+                "　#R配置 点歌 方式 列表｜直接\n"
+                "　#R配置 点歌 开关 开｜关"
+            )
+
+        field_key = args[0].lower()
+        raw = "".join(args[1:]).strip()
+        word = raw.lower()
+
+        # ---- 默认平台 ----
+        if field_key in ("平台", "默认平台", "platform"):
+            key = self._MUSIC_PLATFORM_ALIAS.get(word)
+            if not key:
+                return f"❓ 只支持 网易云 或 QQ音乐，收到「{raw}」。"
+            err = self._save_conf("music.platform", key)
+            if err:
+                return f"❌ 保存失败：{err}"
+            return f"✅ 默认点歌平台已改为 **{self._music_label(key)}**"
+
+        # ---- 列表长度 ----
+        if field_key in ("数量", "个数", "长度", "maxlist", "count"):
+            try:
+                value = int(word)
+            except ValueError:
+                return f"❓ 「{raw}」不是数字。"
+            if not 1 <= value <= 50:
+                return "❓ 数量要在 1-50 之间（太大了列表图会很长）。"
+            err = self._save_conf("music.maxList", value)
+            if err:
+                return f"❌ 保存失败：{err}"
+            return f"✅ 点歌列表长度已改为 **{value}** 首"
+
+        # ---- 发送方式 ----
+        if field_key in ("发送", "发送方式", "sendmode"):
+            value = self._MUSIC_SEND_ALIAS.get(word)
+            if not value:
+                return f"❓ 发送方式只认 链接｜卡片｜语音｜文件，收到「{raw}」。"
+            err = self._save_conf("music.sendMode", value)
+            if err:
+                return f"❌ 保存失败：{err}"
+            extra = ""
+            if value == "card" and not self.conf_get("music.enableSignProxy", True):
+                extra = "\n⚠️ 签名代理是关的，音乐卡片不会显示，建议先打开它。"
+            return f"✅ 点歌发送方式已改为 **{value}**{extra}"
+
+        # ---- 列表 / 直接送 ----
+        if field_key in ("方式", "模式", "searchmode"):
+            value = self._MUSIC_SEARCH_ALIAS.get(word)
+            if not value:
+                return f"❓ 点歌方式只认 列表｜直接，收到「{raw}」。"
+            err = self._save_conf("music.searchMode", value)
+            if err:
+                return f"❌ 保存失败：{err}"
+            return f"✅ 点歌方式已改为 **{value}**（{'发列表图后回序号' if value == 'list' else '直接发第一首'}）"
+
+        # ---- 总开关 ----
+        if field_key in ("开关", "enable"):
+            if word in self._ON_WORDS:
+                on = True
+            elif word in self._OFF_WORDS:
+                on = False
+            else:
+                return f"❓ 只认「开」或「关」，收到「{raw}」。"
+            err = self._save_conf("music.enable", on)
+            if err:
+                return f"❌ 保存失败：{err}"
+            return f"✅ 点歌已{'开启' if on else '关闭'}"
+
+        return f"❓ 不认识设置项「{args[0]}」，发「#R配置 帮助」看用法。"
+
+    # ------------------------------------------------------------------
+    # 发送形式
+    # ------------------------------------------------------------------
+
+    def _cfg_form(self, args: list[str]) -> str:
+        now = "聊天记录（合并转发）" if self._forward_enabled() else "直发（多条消息）"
+
+        if not args:
+            return "\n".join([
+                f"📤 解析内容发送形式：**{now}**",
+                "",
+                "· 聊天记录：每次解析打包成一条合并转发，简介和全部图片/视频都在里面，",
+                "　不再单独发「识别成功」那条提示 —— 内容多的时候不刷屏。",
+                "· 直发：简介一条、媒体一条条发 —— 想让内容直接可见时用这个。",
+                "",
+                "切换：#R配置 形式 聊天记录｜直发",
+            ])
+
+        word = "".join(args).lower()
+        if word in ("聊天记录", "聊天", "转发", "合并转发", "forward", "chat"):
+            err = self._save_conf("plugin.send_as_forward", True)
+            if err:
+                return f"❌ 保存失败：{err}"
+            return "✅ 已改为 **聊天记录（合并转发）**，下一条链接就按这个形式发。"
+
+        if word in ("直发", "普通", "分开", "direct", "normal", "off"):
+            err = self._save_conf("plugin.send_as_forward", False)
+            if err:
+                return f"❌ 保存失败：{err}"
+            return "✅ 已改回 **直发（多条消息）**。"
+
+        return f"❓ 只认「聊天记录」或「直发」，收到「{''.join(args)}」。"
+
+    # ------------------------------------------------------------------
+    # 写配置
+    # ------------------------------------------------------------------
+
+    def _save_conf(self, path: str, value) -> str:
+        """把 ``a.b.c`` 路径上的值写进插件配置并落盘，返回错误说明（空串=成功）。
+
+        ⚠️ **路径对应的键必须已经写在 ``_conf_schema.json`` 里**：AstrBot 在
+        插件代码跑起来之前会按 schema 裁剪配置，schema 里没有的键写进去当时
+        有效、下次启动就被删掉（v1.3.0 的 Cookie 就是这么丢的）。这里只负责写，
+        不负责补 schema —— 新增可写配置时记得两边一起加。
+        """
+        parts = [p for p in str(path).split(".") if p]
+        if not parts:
+            return "配置路径为空"
+
+        node = self.conf_data
+        for part in parts[:-1]:
+            nxt = node.get(part) if isinstance(node, dict) else None
+            if not isinstance(nxt, dict):
+                try:
+                    nxt = {}
+                    node[part] = nxt
+                except (TypeError, KeyError) as exc:
+                    return f"配置分组 {part} 不可写（{exc}）"
+            node = nxt
+
+        try:
+            node[parts[-1]] = value
+        except (TypeError, KeyError) as exc:
+            return f"写入 {path} 失败（{exc}）"
+
+        saver = getattr(self.conf_data, "save_config", None)
+        if callable(saver):
+            try:
+                saver()
+            except Exception as exc:  # noqa: BLE001
+                logger.error(f"[R插件][R配置] 保存配置文件失败: {exc}")
+                return f"保存到文件失败（{exc}）"
+
+        logger.info(f"[R插件][R配置] {path} 已更新")
+        return ""
 
     # ==================================================================
     # 点歌搜索

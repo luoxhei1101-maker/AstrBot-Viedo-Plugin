@@ -171,6 +171,12 @@
         "type": "bool",
         "default": true
       },
+      "send_as_forward": {
+        "description": "解析内容用聊天记录（合并转发）发送",
+        "type": "bool",
+        "hint": "开启后，每次解析的结果（简介 + 全部图片/视频/音频）打包成一条「合并转发」聊天记录发出来，不再单独刷多条消息、也不再发「识别成功」那条提示。聊天里可用「#R配置 形式 聊天记录」随时切换。",
+        "default": false
+      },
       "bili_quality_when_logged_in": {
         "description": "B站登录后请求的画质",
         "type": "string",

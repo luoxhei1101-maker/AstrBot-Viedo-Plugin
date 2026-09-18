@@ -163,6 +163,17 @@ except Exception as exc:  # noqa: BLE001
     print(f"  (导入失败: {exc})")
     HAS_PIL = False
 
+# 光有 Pillow 不够，渲染要中文字体（Noto CJK 只在容器镜像里）。
+# 本机没有时属于「环境不具备」，跳过而不是判定失败。
+if HAS_PIL:
+    try:
+        from astrbot_plugin_rconsole.core.render_image import font as _probe_font
+
+        _probe_font(24)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  (跳过：本机缺中文字体，容器里有 —— {type(exc).__name__}: {exc})")
+        HAS_PIL = False
+
 if HAS_PIL:
     import asyncio
 

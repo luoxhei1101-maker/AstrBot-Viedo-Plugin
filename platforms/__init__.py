@@ -19,6 +19,7 @@ from . import general as _general  # noqa: F401
 from . import kuaishou as _kuaishou  # noqa: F401
 from . import pending as _pending  # noqa: F401
 from . import social as _social  # noqa: F401
+from . import xiaohongshu as _xiaohongshu  # noqa: F401
 
 __all__ = [
     "ResolveResult",

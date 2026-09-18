@@ -598,6 +598,20 @@ COMMAND_RULES: tuple[dict, ...] = (
         "handler": "r_menu",
         "admin": False,
     },
+    # 聊天里改常用配置（平台开关 / Cookie / 点歌 / 发送形式）。
+    #
+    # **必须带 # 或 /**：`R配置` 落到自然语言里的概率不低，裸关键词会误伤。
+    # 子命令解析在 main.py::cmd_r_config，这里只做粗筛。
+    {
+        "key": "rConfig",
+        "name": "R配置",
+        "pattern": (
+            r"^[/#]{1,2}\s*(?:R配置|r配置|R设置|r设置|Rconfig|rconfig|Rc|rc)"
+            r"(?:\s|$)"
+        ),
+        "handler": "r_config",
+        "admin": True,
+    },
 )
 
 
