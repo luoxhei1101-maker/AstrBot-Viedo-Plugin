@@ -1,7 +1,7 @@
 # astrbot_plugin_rconsole
 
 > 群里发一条分享链接，机器人自动把视频 / 图集 / 音乐扒出来发回来；
-> 还支持点歌、扫码登录与三种状态查询图。
+> 还支持点歌、扫码登录与三种状态查询图，解析结果也可以**打包成一条聊天记录**发。
 >
 > 本插件是 Yunzai-Bot 插件 **R插件**（[rconsole-plugin](https://gitee.com/kyrzy0416/rconsole-plugin)，作者 zhiyu1998）在
 > [AstrBot](https://github.com/AstrBotDevs/AstrBot) 上的移植版。业务逻辑与设计思路来自原项目，
@@ -9,7 +9,7 @@
 >
 > 原项目 README 的声明同样适用：素材来源于网络，仅供交流学习使用，**严禁用于任何商业用途和非法行为**。
 
-**当前版本：v1.5.0** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
+**当前版本：v1.6.0** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
 
 <p align="center">
   <img src="https://q1.qlogo.cn/g?b=qq&nk=2593504303&s=640" width="104" height="104" alt="NaiLuo" />
