@@ -9,7 +9,7 @@
 >
 > 原项目 README 的声明同样适用：素材来源于网络，仅供交流学习使用，**严禁用于任何商业用途和非法行为**。
 
-**当前版本：v1.6.1** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
+**当前版本：v1.6.2** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
 
 <p align="center">
   <img src="https://q1.qlogo.cn/g?b=qq&nk=2593504303&s=640" width="104" height="104" alt="NaiLuo" />
@@ -490,7 +490,7 @@ QQ点歌 晴天          → 强制走 QQ 音乐
 | AcFun | ✅ | ajaxpipe 抠 JSON → m3u8 |
 | 哔哩哔哩 | ✅ 主干 | WBI 签名 + Cookie + DASH + ffmpeg 合并；**扫码登录**；评论（合并转发）；BBDown / 番剧 / 直播未移植 |
 | AI 总结 / 翻译 | ✅ | 复用 AstrBot 自带的 LLM |
-| 抖音 | ✅ 主干 | 主接口（a-bogus，配 Cookie）优先 + SSR 免登录兜底；动图/静态图逐项分流；评论（需 Cookie / node） |
+| 抖音 | ✅ 主干 | 主接口（a-bogus，配 Cookie）优先 + SSR 免登录兜底；动图/静态图逐项分流；**图集取原图不取压缩预览 + 多 CDN 候选回退**（v1.6.2）；评论（需 Cookie / node） |
 | 网易云 / QQ音乐 | ✅ 含点歌 | 链接解析 + **`#点歌` 搜索 / 取直链 / 音乐卡片**；网易云**扫码登录**。歌单未移植 |
 | 小黑盒 | 🟡 | 帖子解析（含 hkey 签名）；游戏页未移植 |
 | 米游社 / 微视 | 🟡 | 主干已移植 |
@@ -562,6 +562,22 @@ QQ点歌 晴天          → 强制走 QQ 音乐
 **Q：点歌的语音条发不出来？**
 正常现象，见[语音条的限制](#关于语音条的限制重要)。改用「音频文件」或「音乐卡片」。
 
+**Q：抖音图集总有几张发不出来 / 发出来是糊的？**
+自 v1.6.2 起已修。抖音图集每张图的 `url_list` 里有多个候选，分工不同：
+`.webp` 是**压缩预览**（质量 75 模板，体积只有原图一半），`.jpeg` 才是**原图**；
+而且 403 出现在哪个候选是**每张图固定的**（不是随机的，多试几次不会变好）。
+旧版按 `url_list` 原顺序「试到第一个成功就用」，所以经常拿到模糊的 `.webp`，
+候选少的图两个都 403 就整张丢掉。现在改成**原图优先排序 + 逐个候选回退**，
+并在下载层拦掉抖音 CDN 那个「200 + text/html 的 238 字节错误页」。
+实测同一图集总量从 425KB → 989KB（4 张从 webp 换成 jpeg）。
+
+**Q：为什么不能像原版那样把图片 URL 直接交给协议端发？**
+原版看起来「全都成功」，是因为它**根本不下载**——把 URL 交给协议端，抓失败也不
+报错、不阻塞其它图，所以观感是「全出来了」，但发出去的其实也是 `.webp` 压缩图，
+失败的图在 QQ 里就是个空白框。AstrBot 这边发送端的下载器**不带 Referer、没有
+候选回退、也不校验内容**，直发时只要一张失败就抛错，**整条消息链一起失败**
+（现象是「一条图都没发出来，只剩简介文字」）。所以本插件一律**先落盘再发本地文件**。
+
 ---
 
 ## 与原版的差异
@@ -590,19 +606,22 @@ QQ点歌 晴天          → 强制走 QQ 音乐
 测试全部**离线**、不依赖网络与 Cookie，直接跑就行：
 
 ```bash
-python tests/test_album_send_path.py    # 图集发送路径
-python tests/test_douyin_album.py       # 抖音图集动图 / 静图分流
-python tests/test_xiaohongshu.py        # 小红书解析（webId 剔除、画质挑选）
-python tests/test_forward_send.py       # 聊天记录转发发送形式
-python tests/test_r_config.py           # #R配置（平台开关 / 发送形式 / Cookie）
-python tests/test_music_search.py       # 点歌搜索 + 命令正则
-python tests/test_music_config.py       # 配置迁移
-python tests/test_music_pick.py         # 序号点播
-python tests/test_music_sign_proxy.py   # 音乐卡片签名代理
-python tests/test_music_url_guard.py    # 音频直链可用性校验
-python tests/test_panels.py             # 三个图片命令
-python tests/test_a_bogus_worker.py     # a-bogus 常驻 worker
-python tests/test_http_pool_bench.py    # 连接池基准
+python tests/test_album_send_path.py            # 图集发送路径
+python tests/test_douyin_album.py               # 抖音图集动图 / 静图分流
+python tests/test_douyin_album_candidates.py    # 抖音图集「原图优先」候选排序
+python tests/test_downloader_media_guard.py     # 下载器的软失败防护（403 错误页等）
+python tests/test_xiaohongshu.py                # 小红书解析（webId 剔除、画质挑选）
+python tests/test_forward_send.py               # 聊天记录转发发送形式
+python tests/test_r_config.py                   # #R配置（平台开关 / 发送形式 / Cookie）
+python tests/test_music_search.py               # 点歌搜索 + 命令正则
+python tests/test_music_config.py               # 配置迁移
+python tests/test_music_pick.py                 # 序号点播
+python tests/test_music_sign_proxy.py           # 音乐卡片签名代理
+python tests/test_music_url_guard.py            # 音频直链可用性校验
+python tests/test_panels.py                     # 三个图片命令
+python tests/test_a_bogus_worker.py             # a-bogus 常驻 worker
+python tests/test_http_pool_bench.py            # 连接池基准
+python tests/test_card_link.py                  # 分享卡片链接提取
 ```
 
 **`test_r_config.py` 里有一条特别值得留意的断言**：它用 AST 扫出所有

@@ -130,8 +130,12 @@ def static_checks() -> None:
 
     vids = _method_source(main_py, "_download_album_videos")
     check_true(
-        "_download_album_videos 使用 download_media 落盘",
-        "download_media(" in vids,
+        "_download_album_videos 使用 download_media_candidates（动图候选回退）",
+        "download_media_candidates(" in vids,
+    )
+    check_true(
+        "_download_album_videos 读取 animated_video_candidates",
+        "animated_video_candidates" in vids,
     )
     check_true(
         "_download_album_videos 是 async（内部要 await）",
@@ -400,13 +404,24 @@ def send_path_checks() -> None:
         made.append(p)
         return p
 
-    orig = (dl.download_many_candidates, dl.download_many, dl.download_media)
+    async def fake_media_candidates(urls, **kw):
+        """动图候选回退：第一个候选失败、第二个成功（模拟抖音 403 回退）。"""
+        return await fake_media(urls[0] if urls else "", **kw)
+
+    orig = (
+        dl.download_many_candidates,
+        dl.download_many,
+        dl.download_media,
+        dl.download_media_candidates,
+    )
     dl.download_many_candidates = fake_many_candidates
     dl.download_many = fake_many
     dl.download_media = fake_media
+    dl.download_media_candidates = fake_media_candidates
     main_mod.download_many_candidates = fake_many_candidates
     main_mod.download_many = fake_many
     main_mod.download_media = fake_media
+    main_mod.download_media_candidates = fake_media_candidates
 
     class FakeEvent:
         def __init__(self):
@@ -527,10 +542,16 @@ def send_path_checks() -> None:
             any("下载失败" in t for t in texts),
         )
     finally:
-        dl.download_many_candidates, dl.download_many, dl.download_media = orig
+        (
+            dl.download_many_candidates,
+            dl.download_many,
+            dl.download_media,
+            dl.download_media_candidates,
+        ) = orig
         main_mod.download_many_candidates = orig[0]
         main_mod.download_many = orig[1]
         main_mod.download_media = orig[2]
+        main_mod.download_media_candidates = orig[3]
         for p in made:
             p.unlink(missing_ok=True)
         try:

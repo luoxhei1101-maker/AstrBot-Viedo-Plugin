@@ -79,6 +79,7 @@ from .core.cookies import build_cookie
 from .core.downloader import (
     MediaTooLarge,
     download_media,
+    download_media_candidates,
     download_many,
     download_many_candidates,
 )
@@ -1670,19 +1671,23 @@ class Main(Star):
         抖音图集的图片直链是 ``p3-pc-sign.douyinpic.com`` 这类**带签名的 CDN
         地址**，而且：
 
-        1. 同一个 ``url_list`` 里有 ``.webp`` / ``.jpeg`` 两个变体，**哪一个
-           403 是随机的**——实测同一个作品里，有时 webp 挂、有时 jpeg 挂，
-           没有固定顺序可用；
-        2. 下载需要带 ``Referer: https://www.douyin.com/``，否则大概率 403。
+        1. 同一个 ``url_list`` 里有 ``.webp``（压缩预览）和 ``.jpeg``（原图）
+           两个变体，**体积差一倍以上**；403 出现在哪个位置是**每张图固定的**，
+           不是随机的（实测同一张图 3 轮探测结果一致）。所以「按原顺序试到
+           第一个成功就用」会**大概率拿到模糊的 .webp**——排序由
+           ``core.douyin_ssr.rank_image_candidates`` 负责改成原图优先；
+        2. 下载需要带 ``Referer: https://www.douyin.com/``，否则大概率 403；
+        3. 失败不是 4xx 而是 **200 + text/html 的 238 字节错误页**，
+           由 ``_stream_one(expect_media=True)`` 拦掉。
 
         AstrBot 的 ``respond.stage`` 在真正发出 ``Comp.Image.fromURL(url)`` 时，
-        是用它自己的下载器抓这个 URL 的——**不带 Referer、也没有候选回退**，
-        只要那一张失败就抛 ``DownloadFileHTTPError``，**整条消息链一起失败**。
-        这就是「图集一条都没发出来、只剩简介文字」的根因。
+        是用它自己的下载器抓这个 URL 的——**不带 Referer、没有候选回退、
+        也不校验内容**，只要那一张失败就抛 ``DownloadFileHTTPError``，
+        **整条消息链一起失败**。这就是「图集一条都没发出来、只剩简介文字」的根因。
 
         所以图集的静态图一律先用本插件自己的下载器（``_headers_for`` 补
-        Referer + ``download_many_candidates`` 逐个候选回退）落到本地，
-        发送端只发本地文件，不再碰远程签名 URL。
+        Referer + 原图优先排序 + ``download_many_candidates`` 逐个候选回退）落到
+        本地，发送端只发本地文件，不再碰远程签名 URL。
         """
         if not still_images:
             return []
@@ -1721,6 +1726,10 @@ class Main(Star):
         动图的播放直链（``aweme/v1/play``）同样会 403，而且 ``Comp.Video.fromURL``
         走的是发送端的下载器，失败同样会拖垮整条消息链。所以也一并落到本地。
 
+        **逐个候选回退**：动图视频轨的 url_list 和静态图一样有多个候选，
+        实测第一个常 403。``extra["animated_video_candidates"]`` 存了每个动图
+        的全部候选，按顺序试到能下为止；没有候选信息（旧缓存）就退回单 URL。
+
         这里刻意用**串行**：动图视频体积大，并发下载容易把带宽打满、
         也让适配器那边的发送排队。数量通常个位数，串行完全可接受。
         """
@@ -1730,15 +1739,27 @@ class Main(Star):
         max_mb = int(self.conf_get("global.videoSizeLimit", 70) or 70)
         max_bytes = max_mb * 1024 * 1024
 
+        raw_cands = result.extra.get("animated_video_candidates")
+        cands_list: list[list[str]] | None = None
+        if (
+            isinstance(raw_cands, list)
+            and len(raw_cands) == len(anim_videos)
+            and all(isinstance(c, list) and c for c in raw_cands)
+        ):
+            cands_list = raw_cands
+
         paths: list[Path | None] = []
-        for url in anim_videos:
+        for i, url in enumerate(anim_videos):
+            urls = cands_list[i] if cands_list else [url]
             try:
-                path = await download_media(
-                    url, prefix="album_video", max_bytes=max_bytes
+                path = await download_media_candidates(
+                    urls, prefix="album_video", max_bytes=max_bytes
                 )
                 paths.append(path)
             except Exception as exc:  # noqa: BLE001 - 单个动图失败不影响整批
-                logger.warning(f"[R插件][抖音] 动图下载失败 {url[:80]}: {exc}")
+                logger.warning(
+                    f"[R插件][抖音] 动图下载失败（{len(urls)} 个候选）{url[:70]}: {exc}"
+                )
                 paths.append(None)
         return paths
 

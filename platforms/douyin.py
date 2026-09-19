@@ -127,9 +127,11 @@ async def resolve_douyin(link: str, ctx: ResolverContext) -> ResolveResult:
         images: list[str] = []
         image_candidates: list[str] = []
         videos: list[str] = []
+        video_candidates: list[list[str]] = []
         for it in items:
             if it["kind"] == "animated":
                 videos.append(it["video_url"])
+                video_candidates.append(it.get("video_candidates") or [it["video_url"]])
             else:
                 images.append(it["image_url"])
                 image_candidates.append(it["image_candidates"])
@@ -145,6 +147,8 @@ async def resolve_douyin(link: str, ctx: ResolverContext) -> ResolveResult:
         if animated:
             # 动图按视频发，播放地址顺序与作品一致
             extra["animated_videos"] = videos
+            # 动图视频轨的多个候选直链（首个常 403，需要逐个回退）
+            extra["animated_video_candidates"] = video_candidates
 
         logger.info(
             f"[R插件][抖音] 图集解析：共 {len(items)} 项，"

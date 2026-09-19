@@ -50,6 +50,7 @@ import asyncio
 import json
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from astrbot.api import logger
 
@@ -272,6 +273,60 @@ def first_url(url_object: Any) -> str:
     return url_object.get("uri") or ""
 
 
+# ---------------------------------------------------------------------------
+# 图集直链的候选排序（v1.6.2）
+#
+# 实测结论（2026-09-20，两条真实图集、7 张图、每张 3 轮探测）：
+#
+#   | 候选位置 | 节点         | 后缀    | 实测结果                     |
+#   |---------|-------------|--------|------------------------------|
+#   | [0]     | p3-pc-sign  | .webp  | **可能 403**（每张图固定）      |
+#   | [1]     | p9-pc-sign  | .webp  | 基本 200，但**是压缩预览**      |
+#   | [2]     | p3-pc-sign  | .jpeg  | 基本 200，**是原图**           |
+#
+# 两个致命差异：
+#
+# 1. **`.webp` 是压缩预览，体积只有原图的 40% 左右**（同一张图实测
+#    107464 / 269965 字节）。按 ``url_list`` 顺序「试到第一个成功就用」
+#    会**大概率拿到 .webp 缩略图** —— 用户看到的就是「最好看的那张变糊了」。
+# 2. **403 不是随机的**：同一张图的同一候选，3 轮探测结果完全一致
+#    （各张图 403 出现在哪个位置不同，但一旦确定就不变）。所以「逐个试」
+#    在候选少的图上会**直接失败丢图**，而不是「多试几次就好了」。
+#
+# 因此这里**不再沿用 url_list 的顺序**，改成先按「原图优先」排序：
+# `.jpeg/.png` 排在 `.webp` 前面。节点（p3 / p9）不参与排序——实测两者
+# 返回的是同一份内容（字节数相同），换节点只是为了绕过 403。
+# ---------------------------------------------------------------------------
+
+# 原始格式（非压缩预览）；命中这些后缀的候选优先尝试
+_ORIGINAL_IMAGE_SUFFIXES = (".jpeg", ".jpg", ".png", ".heic", ".avif")
+# 压缩预览格式；排在原始格式之后
+_COMPRESSED_IMAGE_SUFFIXES = (".webp", ".gif")
+
+
+def _image_kind_rank(url: str) -> int:
+    """图片候选的优先级：越小越优先。
+
+    只看**路径里的扩展名**，不看 query（query 里 oep/签名参数不含扩展名）。
+    """
+    path = (urlsplit(url).path or "").lower()
+    if path.endswith(_ORIGINAL_IMAGE_SUFFIXES):
+        return 0
+    if path.endswith(_COMPRESSED_IMAGE_SUFFIXES):
+        return 1
+    return 2  # 认不出来的一律排在最后，但保留（可能是新的格式）
+
+
+def rank_image_candidates(urls: list[str]) -> list[str]:
+    """把图片候选按「原图优先」重排，同优先级保持原有相对顺序。
+
+    注意是**稳定排序**：同级内维持抖音给的顺序，这样「换节点绕 403」
+    这条路仍然能覆盖到（p3 / p9 都被保留，只是排在正确的格式档里）。
+    """
+    return sorted(urls, key=_image_kind_rank)
+
+
+
 def content_type(aweme: dict[str, Any]) -> str:
     """判定作品类型，原版 ``getAwemeContentType``。"""
     mapped = DY_TYPE_MAP.get(aweme.get("aweme_type"))
@@ -358,9 +413,10 @@ def album_items(aweme: dict[str, Any]) -> list[dict[str, Any]]:
                 "index": 0,
                 "kind": "still" | "animated",
                 "image_url": "首个图片直链",          # 动图时为空
-                "image_candidates": [...],            # 动图时为空
+                "image_candidates": [...],            # 动图时为空；已按原图优先排序
                 "video_uri": "视频轨 uri",            # 静态图时为空
                 "video_url": "拼好的播放地址",         # 静态图时为空
+                "video_candidates": [...],            # 静态图时为空；多个播放直链候选
             }
     """
     items: list[dict[str, Any]] = []
@@ -369,20 +425,33 @@ def album_items(aweme: dict[str, Any]) -> list[dict[str, Any]]:
             continue
 
         video = image.get("video") or {}
-        video_uri = (video.get("play_addr_h264") or {}).get("uri") or (
-            video.get("play_addr") or {}
-        ).get("uri") or ""
+        # 动图的视频轨优先 h264（兼容性最好），没有就退回通用 play_addr
+        video_addr = video.get("play_addr_h264") or video.get("play_addr") or {}
+        video_uri = video_addr.get("uri") or ""
 
         if video_uri:
+            # 视频轨的 url_list 同样是多节点候选，取第一个常 403（实测同图集）。
+            # 优先用抖音给的直链，再补上 snssdk 模板地址兜底。
+            video_candidates: list[str] = []
+            for u in video_addr.get("url_list") or []:
+                if u and u not in video_candidates:
+                    video_candidates.append(u)
+            for u in (
+                DY_TOUTIAO_INFO.replace("1080p", "1080p").replace("{}", video_uri),
+                DY_TOUTIAO_INFO.replace("1080p", "720p").replace("{}", video_uri),
+            ):
+                if u not in video_candidates:
+                    video_candidates.append(u)
+
             items.append(
                 {
                     "index": index,
                     "kind": "animated",
                     "image_url": "",
                     "image_candidates": [],
-                    # 直接给 1080p 模板；要压到 720p 由调用方改写 ratio
                     "video_uri": video_uri,
                     "video_url": DY_TOUTIAO_INFO.replace("{}", video_uri),
+                    "video_candidates": video_candidates,
                     "duration": normalize_duration_seconds(video.get("duration") or 0),
                 }
             )
@@ -393,6 +462,9 @@ def album_items(aweme: dict[str, Any]) -> list[dict[str, Any]]:
         for url in url_list:
             if url and url not in candidates:
                 candidates.append(url)
+        # 原图优先（.jpeg/.png 在 .webp 前面）。详见 rank_image_candidates 的说明：
+        # 按 url_list 原顺序「试到第一个成功就用」会大概率拿到 .webp 压缩预览。
+        candidates = rank_image_candidates(candidates)
         if candidates:
             items.append(
                 {

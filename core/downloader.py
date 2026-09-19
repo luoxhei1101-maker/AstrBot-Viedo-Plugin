@@ -107,6 +107,10 @@ async def download_media(
 
     Args:
         max_bytes: 大于 0 时做大小限制，超限抛 ``MediaTooLarge``。
+
+    注意：这个函数走 ``download_bytes``（一次性读进内存），**不做 Content-Type
+    校验**——抖音签名 CDN 的「软失败」（200 + text/html 错误页）挡不住。
+    需要这个保护时用 ``download_many`` / ``download_many_candidates``。
     """
     try:
         body = await download_bytes(url, timeout=timeout)
@@ -127,19 +131,80 @@ async def download_media(
     return path
 
 
+async def download_media_candidates(
+    urls: list[str],
+    *,
+    prefix: str = "media",
+    max_bytes: int = 0,
+    timeout: float = 120.0,
+    require_media: bool = True,
+) -> Path:
+    """按顺序尝试一组候选 URL，返回**第一个真正下载成功**的本地路径。
+
+    与 ``download_media`` 的区别：带 Content-Type / 大小校验，能挡住
+    「200 + text/html 错误页」这种软失败。全部候选失败时抛最后一个错误。
+
+    抖音图集的动图视频轨就是典型场景：``play_addr`` 的 url_list 同样有多个
+    节点，直接取第一个常 403。
+    """
+    if not urls:
+        raise HttpError("没有可下载的候选地址")
+
+    last_error: Exception | None = None
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=timeout), connector=aiohttp.TCPConnector(ssl=False)
+    ) as session:
+        for url in urls:
+            try:
+                return await _stream_one(
+                    session,
+                    url,
+                    prefix=prefix,
+                    max_bytes=max_bytes,
+                    expect_media=require_media,
+                )
+            except Exception as exc:  # noqa: BLE001 - 换下一个候选
+                last_error = exc
+                logger.debug(f"[R插件] 媒体候选失败 {url[:60]}: {exc}")
+                continue
+
+    raise HttpError(f"全部 {len(urls)} 个候选均下载失败：{last_error}")
+
+
 async def _stream_one(
     session: aiohttp.ClientSession,
     url: str,
     *,
     prefix: str,
     max_bytes: int,
+    expect_media: bool = False,
 ) -> Path:
-    """用共享 session 流式下载单个文件。"""
+    """用共享 session 流式下载单个文件。
+
+    Args:
+        expect_media: 为 True 时要求响应确实是媒体（见下方「软失败」说明）。
+            **下载图片/视频时必须开**——抖音 CDN 拿不到图时不会给 4xx/5xx 之外的
+            信号，而是回一个 200/206 + ``text/html`` 的错误页（实测 238 字节），
+            不校验的话这段 HTML 会被当成图片写盘、发出去是个破图。
+    """
     async with session.get(
         url, headers=_headers_for(url), allow_redirects=True
     ) as resp:
         if resp.status != 200:
             raise HttpError(f"下载失败 HTTP {resp.status}: {url}")
+
+        # 抖音签名 CDN 的「软失败」：状态码正常但内容是 HTML 错误页。
+        # 实测特征：Content-Type: text/html，正文 238 字节。
+        # 必须在写盘**之前**拦掉，否则会生成一个假图片文件。
+        if expect_media:
+            ctype = (resp.content_type or "").lower()
+            if ctype and not (
+                ctype.startswith("image/") or ctype.startswith("video/")
+                or ctype.startswith("audio/") or ctype == "application/octet-stream"
+            ):
+                raise HttpError(
+                    f"下载到非媒体内容（Content-Type: {ctype}）: {url}"
+                )
 
         # 有 Content-Length 时预判超限，别把整个大文件下完才发现超了
         clen = resp.content_length
@@ -162,6 +227,12 @@ async def _stream_one(
                         f"媒体大小超过上限 {max_bytes / 1024 / 1024:.1f}MB"
                     )
                 fh.write(chunk)
+
+        # 内容太小的「成功」几乎都是错误页（没有正常图片/视频只有几百字节）。
+        # 阈值取 1KB：最小的正常缩略图也远大于这个值。
+        if expect_media and total < 1024:
+            path.unlink(missing_ok=True)
+            raise HttpError(f"下载内容过小（{total} 字节），疑似错误页: {url}")
 
         logger.debug(f"[R插件] 流式下载 {total / 1024:.0f}KB -> {path.name}")
         return path
@@ -204,7 +275,8 @@ async def download_many(
             async with sem:
                 try:
                     return await _stream_one(
-                        session, url, prefix=prefix, max_bytes=max_bytes
+                        session, url, prefix=prefix, max_bytes=max_bytes,
+                        expect_media=True,
                     )
                 except Exception as exc:  # noqa: BLE001 - 单条失败不影响整批
                     logger.warning(f"[R插件] 下载失败 {url[:80]}: {exc}")
@@ -224,10 +296,14 @@ async def download_many_candidates(
 ) -> list[Path | None]:
     """并发下载，每项是一组候选 URL，逐个尝试直到成功。
 
-    抖音图集每张图的 ``url_list`` 有多个 CDN 节点（p3-sign / p11-sign /
-    p5-ex-gddgtc-sign …），每个的签名时效不一样——实测同一张图有的 URL 403、
-    有的 200，没有固定哪个位置一定可用。这里对每张图逐个尝试候选 URL，
-    第一个能下载的用，全部失败才返回 ``None``。
+    抖音图集每张图的 ``url_list`` 有多个 CDN 节点（p3-pc-sign / p9-pc-sign …），
+    403 出现在哪个候选是**每张图固定、但不同图不同**（实测同一张图 3 轮探测
+    结果完全一致，见 ``douyin_ssr.rank_image_candidates``）。所以这里逐个回退是
+    有效的——但**候选顺序必须已经排好「原图优先」**，否则会拿到 ``.webp``
+    压缩预览。排序由 ``rank_image_candidates`` 在解析层完成。
+
+    每项下载都带 ``expect_media=True``：抖音签名 CDN 的失败不是 4xx/5xx，
+    而是 **200 + text/html 的 238 字节错误页**，不校验就会被当成图片发出去。
     """
     if not candidates:
         return []
@@ -248,7 +324,8 @@ async def download_many_candidates(
                 for url in cands:
                     try:
                         return await _stream_one(
-                            session, url, prefix=prefix, max_bytes=max_bytes
+                            session, url, prefix=prefix, max_bytes=max_bytes,
+                            expect_media=True,
                         )
                     except Exception as exc:  # noqa: BLE001 - 换下一个候选
                         last_err = f"{type(exc).__name__}: {exc}"
