@@ -18,6 +18,9 @@ logs/
 temp/
 cache/
 downloads/
+# ⚠️ data/cmd_config.json 是 AstrBot 的**宿主侧**配置（含 WebUI 密码哈希、
+# t2i 模板），本地开发时 AstrBot 会把它生成在 cwd 下。绝不能进仓库。
+data/
 
 # 编辑器 / 系统
 .vscode/

@@ -138,6 +138,89 @@ _COOKIE_LABELS: dict[str, str] = {
 # B 站 QQ 小程序的 appid（判断 Json 消息段是不是 B 站小程序卡片用）
 _BILI_MINIAPP_APPID = "1109937557"
 
+# 卡片原始数据里的 JS/HTML 转义。**必须先还原再抠链接**：
+# 卡片里 URL 的分隔符常常是 `\u0026`（`&` 的 JS 转义）而不是明文 `&`，
+# 抠完再还原会把 URL 从 `&` 处截断，`xsec_token` 这种关键参数就丢了。
+_CARD_UNESCAPE: tuple[tuple[str, str], ...] = (
+    ("&#44;", ","),
+    ("&#38;", "&"),
+    ("&amp;", "&"),
+    ("\\u0026", "&"),
+    ("\\u002F", "/"),
+    ("\\u003A", ":"),
+    ("\\u003D", "="),
+    ("\\u003F", "?"),
+    ("\\u002f", "/"),
+    ("\\/", "/"),
+)
+
+# 卡片里抹掉图片/图标直链用的域名词（缩略图地址又长又没排查价值）。
+#
+# ⚠️ **不要只列小红书/B站的 CDN**：真实卡片里长直链的 host 五花八门
+# （实测小红书图文卡片的 ``preview`` 落在 ``qq.ugcimg.cn``，图标落在
+# ``open.gtimg.cn``）。漏掉一个就是几千字符刷进日志。这里按「腾讯系图片
+# 域名 + 各家内容 CDN」两类列，并且额外用下面那条长度规则兜底。
+_CARD_IMAGE_HOSTS = (
+    r"xhscdn|hdslb|douyinpic|weibocdn|sinaimg|ugcimg|gtimg|qpic|qlogo|"
+    r"img\.qq\.com|byteimg|pstatp|zhipin|hdslb\.com"
+)
+
+# 兜底：任何**带图片扩展/图片处理参数**的长 URL 也算图片
+_CARD_IMAGE_HINT = r"(?:\.(?:jpg|jpeg|png|webp|gif|avif|bmp))|(?:imageView2|/w/\d+|x-oss-process)"
+
+
+def _card_unescape(text: str) -> str:
+    """把卡片里那几种 JS/HTML 转义还原成可读字符。"""
+    for old, new in _CARD_UNESCAPE:
+        text = text.replace(old, new)
+    return text
+
+
+def _card_text(comp, *, mask_images: bool = False) -> str:
+    """把一个 ``Json`` 消息段拉平成文本（转义已还原）。
+
+    ``mask_images`` 为真时把图片直链替换成占位符 —— 只给日志用，别让一条
+    卡片的缩略图 URL 把日志刷爆。抹的时候刻意**保留 ``jumpUrl`` 这类内容
+    链接**（那正是排查要看的），只砍图片/图标。
+    """
+    data = getattr(comp, "data", None)
+    if not isinstance(data, dict):
+        return ""
+    try:
+        text = _card_unescape(json.dumps(data, ensure_ascii=False))
+    except (TypeError, ValueError):
+        return ""
+    if mask_images:
+        urls = list(extract_urls(text))
+        for url in urls:
+            is_image_host = re.search(_CARD_IMAGE_HOSTS, url, re.I) is not None
+            is_image_hint = re.search(_CARD_IMAGE_HINT, url, re.I) is not None
+            if is_image_host or is_image_hint:
+                text = text.replace(url, "<图片直链已省略>")
+    return text
+
+
+def _card_urls(comp) -> list[str]:
+    """从一个 ``Json`` 消息段里抠出所有 http(s) 链接。"""
+    return [u for u in extract_urls(_card_text(comp)) if u.startswith("http")]
+
+
+def _capture_card_links(event: AstrMessageEvent, comp) -> None:
+    """把「含受支持链接的卡片」原文记进日志，方便抓字段。
+
+    这一步**只记录、不发送**：QQ 分享卡片里的字段名（尤其小红书的
+    ``xsec_token`` 藏在哪个 key 里）东家改西家改，写死在代码里迟早失效。
+    先把原文落进日志，照着日志补规则，比对着手机截图猜字段靠谱得多。
+
+    日志里抹掉了图片直链，否则一条卡片的缩略图地址会把日志刷爆。
+    """
+    text = _card_text(comp, mask_images=True)
+    if not text:
+        return
+    logger.info(f"[R插件] 收到卡片原始数据（用于补识别规则）：{text[:6000]}")
+    if len(text) > 6000:
+        logger.info(f"[R插件] （卡片数据被截断，完整长度 {len(text)}）")
+
 
 def _brief_names(names: list[str], limit: int = 8) -> str:
     """把一长串平台名压成一行（给 #R配置 总览用，太长了会刷屏）。"""
@@ -211,16 +294,54 @@ def _find_bili_link_in_messages(messages: list) -> str | None:
     return None
 
 
+def _find_card_link(comp) -> str | None:
+    """从一个 ``Json`` 卡片里找出「本插件认识的平台链接」。
+
+    小程序卡片是 ``CQ:json`` 消息段，``get_message_str()`` 是空串，普通正则
+    永远匹配不到。这里把卡片原文抠出来，直接过一遍 ``AUTO_RULES`` 的识别
+    规则表 —— 以后新增平台**不用再单独为卡片写一套判断**，只要规则表里的
+    域名出现在卡片里就能命中。
+
+    ⚠️ **不要按字段名取链接**。实测两种卡片的字段位置完全不同：
+
+    ==================  ====================  ============================
+    卡片类型            链接字段              样例
+    ==================  ====================  ============================
+    B 站小程序          ``meta.detail_1.qqdocurl``  ``https://b23.tv/xxx``
+    小红书图文分享      ``meta.news.jumpUrl``       ``https://www.xiaohongshu.com/discovery/item/...``
+    ==================  ====================  ============================
+
+    连 ``app`` 字段都不一样（B 站是 ``com.tencent.miniapp_01``，小红书是
+    ``com.tencent.tuwen.lua``）。所以这里**只认「卡片里有没有我们认识的
+    链接」**，不认字段名也不认 appid —— 通用且不会因为 QQ 改字段而失效。
+
+    返回能交给对应 resolver 直接用的链接，找不到返回 ``None``。
+    """
+    for url in _card_urls(comp):
+        rule = match_rule(url, AUTO_RULES)
+        if rule is not None:
+            return url
+    return None
+
+
 class BiliMiniappFilter(CustomFilter):
-    """只在消息里出现 B 站小程序卡片时命中。
+    """只在消息里出现「本插件认识的卡片」时命中。
 
     用自定义 filter 而不是 ``@filter.regex``：regex 匹配的是 ``get_message_str()``，
     而小程序卡片是纯 Json 消息段、没有文本，regex 永远匹配不到。自定义 filter
     直接检查消息组件链，并且只在命中时返回 True，不会污染其它消息的唤醒判定。
+
+    名字里的 Bili 是历史遗留（最早只做了 B 站小程序），现在覆盖所有卡片类型：
+    小红书、B 站、微博…只要卡片里的链接能被 ``AUTO_RULES`` 认出来。
     """
 
     def filter(self, event: AstrMessageEvent, cfg: AstrBotConfig) -> bool:
-        return _find_bili_link_in_messages(event.get_messages()) is not None
+        for comp in event.get_messages():
+            if not isinstance(comp, Comp.Json):
+                continue
+            if _find_bili_link_in_messages([comp]) or _find_card_link(comp):
+                return True
+        return False
 
 
 # 需要 event / Context 才能干活、不走 resolver 注册表的命令。
@@ -731,25 +852,55 @@ class Main(Star):
             yield item
 
     # ==================================================================
-    # 入口一点五：B 站小程序卡片（QQ 群里分享的 B 站视频小程序，不是链接）
+    # 入口一点五：分享卡片（QQ 群里分享的「小程序卡片」，不是链接文本）
     # ==================================================================
 
     @filter.custom_filter(BiliMiniappFilter)
     async def on_bili_miniapp(self, event: AstrMessageEvent):
-        """B 站小程序卡片 → 提取跳转链接 → 走 B 站解析。
+        """分享卡片 → 提取跳转链接 → 按识别到的平台走解析。
 
-        小程序卡片是 ``CQ:json`` 消息段，``get_message_str()`` 是空串，
-        正则匹配不到，所以用自定义 filter 检查消息组件链（见
-        ``BiliMiniappFilter``）。
+        卡片是 ``CQ:json`` 消息段，``get_message_str()`` 是空串，正则匹配不到，
+        所以用自定义 filter 检查消息组件链（见 ``BiliMiniappFilter``）。
+
+        两类卡片都走这里：
+
+        - **B 站小程序**：appid ``1109937557``，跳转链接在 ``qqdocurl``
+          （``b23.tv`` 短链）。这条链路先于通用链走，因为它能兜底抠 BV 号。
+        - **其它卡片**（小红书、微博…）：从卡片原文里抠出链接后交给规则表判断。
+
+        不管能不能解析，卡片原文都会记进日志（见 ``_capture_card_links``），
+        方便按真实字段补规则。
         """
-        link = _find_bili_link_in_messages(event.get_messages())
-        if not link:
+        messages = event.get_messages()
+
+        # 先把卡片原文记下来（只记录、不发送），排查字段用
+        for comp in messages:
+            if isinstance(comp, Comp.Json):
+                _capture_card_links(event, comp)
+
+        # ---- B 站小程序：仍然用原来的专用链路（有 BV 号兜底）----
+        link = _find_bili_link_in_messages(messages)
+        if link:
+            logger.info(f"[R插件] 识别到 B 站小程序卡片: {link[:80]}")
+            async for item in self._dispatch(
+                event, link, forced_resolver="bilibili", forced_name="哔哩哔哩"
+            ):
+                yield item
             return
-        logger.info(f"[R插件] 识别到 B 站小程序卡片: {link[:80]}")
-        async for item in self._dispatch(
-            event, link, forced_resolver="bilibili", forced_name="哔哩哔哩"
-        ):
-            yield item
+
+        # ---- 其它平台卡片：抠出链接，交给统一派发（内部会按规则表识别平台）----
+        for comp in messages:
+            if not isinstance(comp, Comp.Json):
+                continue
+            link = _find_card_link(comp)
+            if not link:
+                continue
+            rule = match_rule(link, AUTO_RULES)
+            name = rule.name if rule else ""
+            logger.info(f"[R插件] 识别到 {name or '未知平台'} 卡片: {link[:100]}")
+            async for item in self._dispatch(event, link):
+                yield item
+            return
 
     # ==================================================================
     # 入口二：命令式规则（#RNQ / 翻en xxx / #总结一下 ...）
