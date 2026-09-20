@@ -60,6 +60,19 @@ class ResolveResult:
     error: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
+    rejected: bool = False
+    """是否属于「解析成功，但按规则/能力限制没发」。
+
+    和单纯 ``success=False`` 的区别：``rejected`` 说明**作品信息已经拿到了**，
+    只是被时长上限、体积上限、未移植功能这类**明确且可解释的规则**拦住。
+
+    这类**必须**告知用户原因。因为用户看到的只是「发了个链接，机器人没反应」，
+    不去翻服务器日志根本不知道是配置限制；而这类原因恰恰是他自己能改的。
+
+    网络抖动、接口报错这类「真失败」则交给 ``plugin.reply_on_error`` 决定，
+    否则群里每来一次超时都被刷一条报错。
+    """
+
     @property
     def has_media(self) -> bool:
         return bool(self.videos or self.local_videos or self.images or self.audios)
@@ -67,6 +80,15 @@ class ResolveResult:
     @classmethod
     def fail(cls, platform: str, error: str) -> ResolveResult:
         return cls(platform=platform, success=False, error=error)
+
+    @classmethod
+    def reject(cls, platform: str, error: str) -> ResolveResult:
+        """按规则/能力限制拒绝发送 —— 这类始终会回一句原因给用户。
+
+        用于「解析出来了但按配置不发」的场景，例如视频时长超上限、
+        功能未移植。不要用它包装网络错误，那种情况应该用 ``fail()``。
+        """
+        return cls(platform=platform, success=False, error=error, rejected=True)
 
     @classmethod
     def ok(cls, platform: str, **kwargs: Any) -> ResolveResult:

@@ -156,6 +156,18 @@ def _track_url(track: dict) -> str:
     return track.get("baseUrl") or track.get("base_url") or ""
 
 
+def _fmt_duration(seconds: int) -> str:
+    """575 -> '9分35秒'。给用户看的，别把裸秒数丢出去让人自己换算。"""
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}小时{m}分{s}秒"
+    if m:
+        return f"{m}分{s}秒"
+    return f"{s}秒"
+
+
 @register("bilibili")
 async def resolve_bilibili(link: str, ctx: ResolverContext) -> ResolveResult:
     """B 站视频解析。"""
@@ -209,12 +221,15 @@ async def resolve_bilibili(link: str, ctx: ResolverContext) -> ResolveResult:
     if not cid:
         return ResolveResult.fail("哔哩哔哩", "没能取到 cid")
 
-    # 时长限制（原版配置项 biliDuration，默认 480 秒）
+    # 时长限制（原版配置项 biliDuration，默认 480 秒）。
+    # 注意这类用 reject() 而不是 fail()：作品信息已经拿到了，只是按配置不发，
+    # 用户不改配置就永远发不出来 —— 必须明确告诉他，否则「发了没反应」没法排查。
     max_duration = int(ctx.conf("bili.biliDuration", 480) or 0)
     if max_duration > 0 and duration > max_duration:
-        return ResolveResult.fail(
+        return ResolveResult.reject(
             "哔哩哔哩",
-            f"视频时长 {duration}s 超过配置上限 {max_duration}s（可在配置里调整）",
+            f"视频时长 {_fmt_duration(duration)} 超过上限 {_fmt_duration(max_duration)}"
+            f"（可在插件配置里调整 biliDuration）",
         )
 
     base_info = {

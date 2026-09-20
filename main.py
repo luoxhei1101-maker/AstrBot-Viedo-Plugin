@@ -1059,8 +1059,22 @@ class Main(Star):
 
             if not result.success or not result.has_media:
                 if not result.success:
-                    logger.warning(f"[R插件] {result.platform} 解析失败: {result.error}")
-                    if result.error and self.conf_get("plugin.reply_on_error", False):
+                    # 区分两类失败，日志也分开：
+                    # - 按规则拒绝（rejected）：作品已解析出来，只是被配置限制/能力
+                    #   约束拦住。这类原因用户自己能改，**必须**告诉他；
+                    # - 真失败：网络抖动、接口报错、链接失效。默认静默，
+                    #   免得群里每次网络超时都刷一条报错。
+                    if result.rejected:
+                        logger.warning(
+                            f"[R插件] {result.platform} 按规则未发送: {result.error}"
+                        )
+                    else:
+                        logger.warning(f"[R插件] {result.platform} 解析失败: {result.error}")
+
+                    notify = result.rejected or self.conf_get(
+                        "plugin.reply_on_error", False
+                    )
+                    if result.error and notify:
                         yield event.plain_result(f"❌ {result.platform}：{result.error}")
                 else:
                     # 拿到了信息但没媒体（比如 B 站限流拿不到直链），把文字情报发出去
