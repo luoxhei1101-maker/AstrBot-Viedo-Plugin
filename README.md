@@ -9,7 +9,7 @@
 >
 > 原项目 README 的声明同样适用：素材来源于网络，仅供交流学习使用，**严禁用于任何商业用途和非法行为**。
 
-**当前版本：v1.6.4** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
+**当前版本：v1.6.5** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
 
 <p align="center">
   <img src="https://q1.qlogo.cn/g?b=qq&nk=2593504303&s=640" width="104" height="104" alt="NaiLuo" />
@@ -292,6 +292,45 @@ Cookie 是凭据，**只能在私聊里设置**（群里执行只回一句提示
 > 保存时会**顺手清空同平台的「逐项填写」** —— 它的优先级更高，留着旧值会把刚
 > 设置的整串顶掉。设置完发 `#cookie状态` 可校验有没有真的生效。
 
+##### 私信发了命令却没反应？先查 AstrBot 的会话白名单
+
+这是**最容易踩的坑**，而且症状特别容易被误判成「插件坏了」：
+
+```
+你（私聊）：#R配置 cookie 小红书
+（机器人：什么都不回）
+```
+
+**根因不在插件。** AstrBot 有一条 `whitelist_check` 流水线阶段，它在事件
+**派发给插件之前**执行；私信会话不在白名单里就直接 `stop_event()` ——
+插件**根本没收到这条消息**，自然不可能有回执。
+
+日志里的特征是这一行（`docker logs astrbot | grep whitelist_check`）：
+
+```
+[Core] [INFO] [whitelist_check.stage:65]: Session ID
+default:FriendMessage:1234567890 is not in the session allowlist,
+so event propagation was stopped.
+```
+
+> **「群里能用、私信不能用」是正常现象** —— 群号往往早就在白名单里了，
+> 而私信会话 ID 是另一套写法（`平台:FriendMessage:QQ号`），不会被一并放行。
+
+**三种解法**（AstrBot WebUI → 配置 → 平台设置；改完**重启 AstrBot** 才生效）：
+
+| 方案 | 怎么做 | 适合 |
+|---|---|---|
+| **管理员私信豁免**（推荐） | 打开 `wl_ignore_admin_on_friend` | 你的 QQ 已在 AstrBot 管理员名单里。一次设置，以后管理员的私信都放行 |
+| 精确加白名单 | 把 `default:FriendMessage:<你的QQ号>` 加进 `id_whitelist` | 不是管理员，或只想放行某一个人 |
+| 关掉白名单检查 | 关掉 `enable_id_white_list` | 不在意任何人私聊机器人（**不推荐**，白名单本身是有用的） |
+
+会话 ID 直接复制日志里那串即可。白名单在 `cmd_config.json` 的
+`platform_settings` 里，也可以手动改（注意该文件带 UTF-8 BOM）。
+
+> 本插件在**群里**收到 Cookie 设置指令时，只会回一句「请私聊我发」并且
+> **不写入**（免得凭据发到群里被别人拿走）。所以你在群里看到提示、
+> 私信却毫无反应时，基本就是这个白名单在拦。
+
 ### 点歌
 
 **首次使用需要打开开关**：插件配置 →「点歌」分组 → **开启点歌**（默认关闭）。
@@ -314,6 +353,8 @@ QQ点歌 晴天          → 强制走 QQ 音乐
 ```
 
 - 列表图由插件现画（平台色条 + 封面 + 序号 + 歌名/歌手/专辑），**无二维码**
+- 出图约 **0.6 秒**（v1.6.5 起；此前约 4.7 秒）。封面会走平台的缩略图接口
+  并缓存，所以**重复点同一首歌更快**
 - 序号只在**该会话 60 秒内搜索过**时才生效，不会干扰群里的普通数字消息
 - **序号是一次性的**：点播成功后列表立刻失效，再发同一个序号不会有任何反应；
   序号越界只给提示、不失效，可以直接改发别的序号
@@ -639,6 +680,7 @@ python tests/test_r_config.py                   # #R配置（平台开关 / 发�
 python tests/test_music_search.py               # 点歌搜索 + 命令正则
 python tests/test_music_config.py               # 配置迁移
 python tests/test_music_pick.py                 # 序号点播
+python tests/test_music_card_image_perf.py      # 点歌列表图出图性能（小图 URL / 缓存 / 线程池）
 python tests/test_music_sign_proxy.py           # 音乐卡片签名代理
 python tests/test_music_url_guard.py            # 音频直链可用性校验
 python tests/test_panels.py                     # 三个图片命令
