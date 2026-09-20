@@ -160,28 +160,52 @@ def part_a_bili_reject() -> None:
     )
     check_true("时长超限: 文案里带着上限值", "8分0秒" in (res.error or ""))
     check_true("时长超限: 文案指明可调整", "biliDuration" in (res.error or ""))
+    # ---- 下面几条是 v1.6.4 的核心：不能只回一句「超时长」就完事 ----
+    check("时长超限: 带上了标题", res.title, "测试视频")
+    check("时长超限: 带上了 UP 主", res.author, "测试UP")
+    check(
+        "时长超限: extra 里给出了作品页链接（关键）",
+        (res.extra or {}).get("web_url"),
+        "https://www.bilibili.com/video/BV1xx411c7mD",
+    )
+    check_true(
+        "时长超限: 链接是作品页而不是带签名的 CDN 媒体直链",
+        "bilibili.com/video/" in str((res.extra or {}).get("web_url"))
+        and "upgcxcode" not in str((res.extra or {}).get("web_url")),
+    )
 
 
 def part_a_source_guard() -> None:
-    """静态锁死：main.py 必须让 rejected 绕过 reply_on_error。"""
+    """静态锁死：main.py 必须让 rejected 结果带着链接发出去。"""
     print("\n[A] main.py 源码不变量")
     src = (_ROOT / "main.py").read_text(encoding="utf-8")
 
     check_true("main.py 里用到了 result.rejected", "result.rejected" in src)
     check_true(
-        "main.py 里 rejected 与 reply_on_error 是「或」关系（绕过开关）",
-        "notify = result.rejected or self.conf_get(" in src
-        or "result.rejected or self.conf_get(" in src,
+        "rejected 分支与 has_media 分支都走 _render_text_only",
+        src.count("async for item in self._render_text_only(event, result):") >= 2,
+    )
+    check_true(
+        "文本渲染支持作品页链接（web_url）",
+        'result.extra.get("web_url")' in src and "👉 观看地址：" in src,
     )
     check_true(
         "日志区分「按规则未发送」与「解析失败」",
         "按规则未发送" in src and "解析失败" in src,
     )
-    # 时长限制那处必须用 reject 而不是 fail
+    # 时长限制那处必须用 reject 而不是 fail，且要把链接带出来
     bsrc = (_ROOT / "platforms" / "bilibili.py").read_text(encoding="utf-8")
     check_true(
         "B 站时长超限用的是 ResolveResult.reject(",
         "ResolveResult.reject(" in bsrc,
+    )
+    check_true(
+        "B 站 reject 时带上了 web_url（作品页链接）",
+        '"web_url": watch_url' in bsrc,
+    )
+    check_true(
+        "B 站 reject 时带上了 title / author",
+        "title=title," in bsrc and "author=author," in bsrc,
     )
 
 
@@ -303,7 +327,13 @@ def part_b_dispatch_notice() -> None:
 
         return [c[1] for c in ev.chains if isinstance(c, tuple) and c[0] == "plain"]
 
-    REJECTED = ResolveResult.reject("哔哩哔哩", "视频时长 9分35秒 超过上限 8分0秒")
+    REJECTED = ResolveResult.reject(
+        "哔哩哔哩",
+        "视频时长 9分35秒 超过上限 8分0秒，未下载（可在插件配置里调整 biliDuration）",
+        title="东尼爆改麦晓雯！男人也可以这么美丽吗？！",
+        author="流萤Zz",
+        extra={"web_url": "https://www.bilibili.com/video/BV1xx411c7mD"},
+    )
     FAILED = ResolveResult.fail("哔哩哔哩", "视频信息接口请求失败: 连接超时")
 
     # ---- 1) 按规则拒绝 + reply_on_error 关闭 -> 仍然必须提示 ----
@@ -311,6 +341,17 @@ def part_b_dispatch_notice() -> None:
     check_true(
         "rejected + reply_on_error=False: 仍然回了提示（关键）",
         any("9分35秒" in t for t in texts),
+    )
+    joined = "\n".join(texts)
+    check_true("rejected: 输出里有标题", "东尼爆改麦晓雯" in joined)
+    check_true("rejected: 输出里有 UP 主", "流萤Zz" in joined)
+    check_true(
+        "rejected: 输出里有可点的作品链接（关键）",
+        "https://www.bilibili.com/video/BV1xx411c7mD" in joined,
+    )
+    check_true(
+        "rejected: 原因行带 ⏱️ 前缀（和普通备注区分开）",
+        "⏱️" in joined,
     )
 
     # ---- 2) 按规则拒绝 + reply_on_error 打开 -> 也提示 ----

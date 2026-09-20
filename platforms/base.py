@@ -82,13 +82,18 @@ class ResolveResult:
         return cls(platform=platform, success=False, error=error)
 
     @classmethod
-    def reject(cls, platform: str, error: str) -> ResolveResult:
+    def reject(cls, platform: str, error: str, **kwargs: Any) -> ResolveResult:
         """按规则/能力限制拒绝发送 —— 这类始终会回一句原因给用户。
 
         用于「解析出来了但按配置不发」的场景，例如视频时长超上限、
         功能未移植。不要用它包装网络错误，那种情况应该用 ``fail()``。
+
+        ``**kwargs`` 用来把**已经拿到的作品信息**一并带上（``title`` /
+        ``author`` / ``desc`` / ``extra`` 等）。主流程会把它们和作品链接
+        一起发出去，用户至少知道这条是什么、该去哪看 —— 只回一句
+        「超时长」等于把皮球踢回给用户。
         """
-        return cls(platform=platform, success=False, error=error, rejected=True)
+        return cls(platform=platform, success=False, error=error, rejected=True, **kwargs)
 
     @classmethod
     def ok(cls, platform: str, **kwargs: Any) -> ResolveResult:

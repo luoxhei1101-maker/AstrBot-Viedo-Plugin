@@ -1068,16 +1068,16 @@ class Main(Star):
                         logger.warning(
                             f"[R插件] {result.platform} 按规则未发送: {result.error}"
                         )
+                        # 既然作品信息已经拿到了，就把标题和链接一起发出去，
+                        # 而不是只丢一句「超时长」让用户自己想办法。
+                        async for item in self._render_text_only(event, result):
+                            yield item
                     else:
                         logger.warning(f"[R插件] {result.platform} 解析失败: {result.error}")
-
-                    notify = result.rejected or self.conf_get(
-                        "plugin.reply_on_error", False
-                    )
-                    if result.error and notify:
-                        yield event.plain_result(f"❌ {result.platform}：{result.error}")
+                        if result.error and self.conf_get("plugin.reply_on_error", False):
+                            yield event.plain_result(f"❌ {result.platform}：{result.error}")
                 else:
-                    # 拿到了信息但没媒体（比如 B 站限流拿不到直链），把文字情报发出去
+                    # 拿到了信息但没有媒体（比如 B 站限流拿不到直链），把文字情报发出去
                     async for item in self._render_text_only(event, result):
                         yield item
                 continue
@@ -1099,14 +1099,31 @@ class Main(Star):
     # ==================================================================
 
     async def _render_text_only(self, event: AstrMessageEvent, result: ResolveResult):
-        """没有媒体、只有文字信息时的输出（B 站取不到直链的情况）。"""
+        """没有媒体、只有文字信息时的输出。
+
+        两类场景都会走到这里：
+
+        - **B 站限流拿不到直链**（``success=True`` 但无媒体）：把标题 / 作者
+          这些情报发出去，总比什么都不发好；
+        - **视频超过配置的时长上限**（``rejected``）：除了说明原因，还要给出
+          **作品页链接** —— 只告诉用户「太长不发」，他知道为什么不发了，
+          却不知道该去哪看。原版到这里就断了（只发文字、连链接都没有），
+          想看只能自己拿标题去搜。
+        """
         lines = [f"🔗 {result.platform}"]
         if result.title:
             lines.append(f"标题：{result.title}")
         if result.author:
             lines.append(f"作者：{result.author}")
         if result.error:
-            lines.append(f"备注：{result.error}")
+            lines.append(
+                f"⏱️ {result.error}" if result.rejected else f"备注：{result.error}"
+            )
+
+        url = result.extra.get("web_url")
+        if url:
+            lines.append(f"👉 观看地址：{url}")
+
         yield event.plain_result("\n".join(lines))
 
     async def _render(self, event: AstrMessageEvent, result: ResolveResult):

@@ -222,14 +222,30 @@ async def resolve_bilibili(link: str, ctx: ResolverContext) -> ResolveResult:
         return ResolveResult.fail("哔哩哔哩", "没能取到 cid")
 
     # 时长限制（原版配置项 biliDuration，默认 480 秒）。
-    # 注意这类用 reject() 而不是 fail()：作品信息已经拿到了，只是按配置不发，
-    # 用户不改配置就永远发不出来 —— 必须明确告诉他，否则「发了没反应」没法排查。
+    # 用 reject() 而不是 fail()：作品信息已经拿到了，只是按配置不下载。
+    # 并且把标题 / UP主 / 作品页链接一并带出去 —— 只回一句「超时长」的话，
+    # 用户知道为什么不发了，却不知道该去哪看（原版就是只发文字、连链接都没有）。
     max_duration = int(ctx.conf("bili.biliDuration", 480) or 0)
     if max_duration > 0 and duration > max_duration:
+        watch_url = f"https://www.bilibili.com/video/{bvid}"
+        # 多 P 视频对齐本插件「默认取第一 P」的行为，链接也指到第一 P
+        if len(pages) > 1:
+            watch_url += "?p=1"
         return ResolveResult.reject(
             "哔哩哔哩",
-            f"视频时长 {_fmt_duration(duration)} 超过上限 {_fmt_duration(max_duration)}"
+            f"视频时长 {_fmt_duration(duration)} 超过上限 "
+            f"{_fmt_duration(max_duration)}，未下载"
             f"（可在插件配置里调整 biliDuration）",
+            title=title,
+            author=author,
+            desc=desc,
+            extra={
+                # 注意发的是**作品页链接**（稳定、点开就能看），
+                # 不是带签名的 CDN 媒体直链（那个几小时就过期，还没法直接播）。
+                "web_url": watch_url,
+                "duration": duration,
+                "max_duration": max_duration,
+            },
         )
 
     base_info = {
