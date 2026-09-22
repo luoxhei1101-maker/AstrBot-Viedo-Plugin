@@ -9,7 +9,7 @@
 >
 > 原项目 README 的声明同样适用：素材来源于网络，仅供交流学习使用，**严禁用于任何商业用途和非法行为**。
 
-**当前版本：v1.6.5** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
+**当前版本：v1.6.6** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
 
 <p align="center">
   <img src="https://q1.qlogo.cn/g?b=qq&nk=2593504303&s=640" width="104" height="104" alt="NaiLuo" />
@@ -529,9 +529,9 @@ QQ点歌 晴天          → 强制走 QQ 音乐
 | 快手 / 西瓜 / 皮皮虾 / 皮皮搞笑 / QQ小世界 / 贴吧 / 即刻 | ✅ | 第三方接口轮换 |
 | 微博 | ✅ | 正文 / 图集 / 视频，含 `mid2id` base62 转换 |
 | AcFun | ✅ | ajaxpipe 抠 JSON → m3u8 |
-| 哔哩哔哩 | ✅ 主干 | WBI 签名 + Cookie + DASH + ffmpeg 合并；**扫码登录**；评论（合并转发）；**超时长会给出作品链接**（v1.6.4）；BBDown / 番剧 / 直播未移植 |
+| 哔哩哔哩 | ✅ 主干 | WBI 签名 + Cookie + DASH + ffmpeg 合并；**扫码登录**；评论（合并转发，**含评论图片**，v1.6.6）；**超时长会给出作品链接**（v1.6.4）；BBDown / 番剧 / 直播未移植 |
 | AI 总结 / 翻译 | ✅ | 复用 AstrBot 自带的 LLM |
-| 抖音 | ✅ 主干 | 主接口（a-bogus，配 Cookie）优先 + SSR 免登录兜底；动图/静态图逐项分流；**图集取原图不取压缩预览 + 多 CDN 候选回退**（v1.6.2）；评论（需 Cookie / node） |
+| 抖音 | ✅ 主干 | 主接口（a-bogus，配 Cookie）优先 + SSR 免登录兜底；动图/静态图逐项分流；**图集取原图不取压缩预览 + 多 CDN 候选回退**（v1.6.2）；评论（需 Cookie / node，**含评论图片与动图**，v1.6.6） |
 | 网易云 / QQ音乐 | ✅ 含点歌 | 链接解析 + **`#点歌` 搜索 / 取直链 / 音乐卡片**；网易云**扫码登录**。歌单未移植 |
 | 小黑盒 | 🟡 | 帖子解析（含 hkey 签名）；游戏页未移植 |
 | 米游社 / 微视 | 🟡 | 主干已移植 |
@@ -639,6 +639,20 @@ QQ点歌 晴天          → 强制走 QQ 音乐
 注意关掉时长限制后，几小时的直播回放也可能会被拉下来，占带宽和临时目录。
 网络类失败（超时 / 接口报错）仍然默认静默，照旧由 `reply_on_error` 控制。
 
+**Q：评论里的图片能一起提取出来吗？**
+能，v1.6.6 起。发出去的样子：
+
+- **静态图**：文字在上、图片在下，放**同一条**转发记录里；
+- **动图**：转成 mp4 后**单独发一条**（有文字的话文字也单独一条）——
+  混在一起 QQ 那边渲染顺序会乱；
+- **纯图评论**（作者经常只发图不配字）也能正常发出来，正文只留一行时间/地点/赞数。
+
+图片和作品图集一样是**先下到本地再发**，而且取的是**原图**（抖音评论图的
+`origin_url` 实测 1600×1600，`.jpeg` 候选比 `.png` 小 20%）。
+
+需要满足：评论开关打开（`biliComments` / `douyinComments`），
+抖音还需要 `node`（生成 `a-bogus` 签名）并建议配 Cookie。
+
 ---
 
 ## 与原版的差异
@@ -681,6 +695,7 @@ python tests/test_music_search.py               # 点歌搜索 + 命令正则
 python tests/test_music_config.py               # 配置迁移
 python tests/test_music_pick.py                 # 序号点播
 python tests/test_music_card_image_perf.py      # 点歌列表图出图性能（小图 URL / 缓存 / 线程池）
+python tests/test_comment_image.py              # 评论图片 / 动图提取（纯图评论不再被丢）
 python tests/test_music_sign_proxy.py           # 音乐卡片签名代理
 python tests/test_music_url_guard.py            # 音频直链可用性校验
 python tests/test_panels.py                     # 三个图片命令

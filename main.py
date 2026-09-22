@@ -85,7 +85,12 @@ from .core.downloader import (
 )
 from .core.external import describe_environment, find_tool
 from .core.http import HttpError, close_session as close_http_session
-from .core.media import MergeError, merge_dash
+from .core.media import (
+    MergeError,
+    animated_to_mp4,
+    is_animated_image,
+    merge_dash,
+)
 from .core.music_card_image import render_song_list
 from .core.music_search import (
     PLATFORM_LABELS,
@@ -1520,6 +1525,90 @@ class Main(Star):
         )
         yield event.chain_result([Comp.Nodes(nodes)])
 
+    # ---- 评论图片 ----
+    # 每条评论最多带几张图：带图评论常见 1 张，九宫格也有，3 张够用且不至于刷屏
+    _COMMENT_IMAGE_MAX = 3
+    # 单张评论图大小上限。抖音评论原图是 1600×1600（约 660 KB），8MB 很宽裕；
+    # 卡个上限是防止「10 条评论 × 多图」把临时目录撑爆
+    _COMMENT_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+
+    async def _build_comment_nodes(
+        self, event: AstrMessageEvent, comments: list[dict]
+    ) -> list:
+        """把评论列表转成合并转发节点，**带图的先把图落到本地**。
+
+        排布规则（对齐用户要的观感）：
+
+        - **静态图**：文字在上、图片在下，放**同一个节点**（一条评论 = 一条记录）；
+        - **动图**：转成 mp4 后**单独成一条**（文字另起一条）—— 实测动图和静态图
+          混在同一节点里，QQ 那边的渲染顺序会乱掉。
+
+        为什么要落盘：抖音评论图直链是带签名的 CDN 地址，需要正确的 Referer、
+        而且同一张图有 4 个 CDN 候选 —— AstrBot 发送端的下载器两者都不具备，
+        直发会**整条消息链一起失败**（详见 ``_download_album_stills`` 的说明）。
+
+        昵称用评论者、QQ 号用发起解析的用户（对齐合并转发的身份规则）。
+        """
+        sender_uin = str(event.get_sender_id() or "")
+        nodes: list = []
+
+        for c in comments:
+            text = str(c.get("text") or "")
+            nickname = c["nickname"]
+            statics: list = []
+            videos: list = []
+
+            for cands in (c.get("images") or [])[: self._COMMENT_IMAGE_MAX]:
+                try:
+                    path = await download_media_candidates(
+                        list(cands),
+                        prefix="comment_img",
+                        max_bytes=self._COMMENT_IMAGE_MAX_BYTES,
+                    )
+                except Exception as exc:  # noqa: BLE001 - 单张图失败不影响这条评论
+                    logger.debug(f"[R插件][评论] 图片下载失败，跳过这张: {exc}")
+                    continue
+                event.track_temporary_local_file(str(path))
+
+                # 动图在接口层没有任何标记（image_list 的字段和静态图一模一样），
+                # 只能下下来看文件本身是不是动的
+                comp_video = None
+                if is_animated_image(path):
+                    mp4 = await animated_to_mp4(path)
+                    if mp4:
+                        event.track_temporary_local_file(str(mp4))
+                        try:
+                            comp_video = await self._video_component(mp4)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(f"[R插件][评论] 动图转组件失败: {exc}")
+                if comp_video is not None:
+                    videos.append(comp_video)
+                    continue
+
+                # 静态图（或动图转码失败时的降级）
+                try:
+                    statics.append(Comp.Image.fromFileSystem(str(path)))
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[R插件][评论] 图片组件构造失败: {exc}")
+
+            if videos:
+                # 有动图：文字一条、每张动图各一条，静态图再跟在后面
+                if text:
+                    nodes.append(
+                        Comp.Node([Comp.Plain(text)], name=nickname, uin=sender_uin)
+                    )
+                for comp in videos:
+                    nodes.append(Comp.Node([comp], name=nickname, uin=sender_uin))
+                if statics:
+                    nodes.append(Comp.Node(statics, name=nickname, uin=sender_uin))
+            else:
+                comps = ([Comp.Plain(text)] if text else []) + statics
+                # 纯图评论 text 为空，但 comps 里有图 —— 不能因为没文字就丢掉
+                if comps:
+                    nodes.append(Comp.Node(comps, name=nickname, uin=sender_uin))
+
+        return nodes
+
     async def _maybe_send_bili_comments(
         self, event: AstrMessageEvent, result: ResolveResult
     ):
@@ -1527,7 +1616,7 @@ class Main(Star):
 
         评论是附加功能：平台不是 B 站、开关没开、没有 aid、抓不到，都直接
         跳过，绝不影响主流程。发出去的形态用原版截图失败时的兜底方案——
-        文本合并转发（不依赖截图）。
+        文本（+ 图片）合并转发，不依赖截图。
         """
         if result.platform != "哔哩哔哩":
             return
@@ -1549,12 +1638,9 @@ class Main(Star):
         if not comments:
             return
 
-        # 昵称用评论者，QQ 号用发起解析的用户（对齐合并转发的身份规则）
-        sender_uin = str(event.get_sender_id() or "")
-        nodes = [
-            Comp.Node([Comp.Plain(c["text"])], name=c["nickname"], uin=sender_uin)
-            for c in comments
-        ]
+        nodes = await self._build_comment_nodes(event, comments)
+        if not nodes:
+            return
         try:
             yield event.chain_result([Comp.Nodes(nodes)])
         except Exception as exc:  # noqa: BLE001
@@ -1591,11 +1677,9 @@ class Main(Star):
         if not comments:
             return
 
-        sender_uin = str(event.get_sender_id() or "")
-        nodes = [
-            Comp.Node([Comp.Plain(c["text"])], name=c["nickname"], uin=sender_uin)
-            for c in comments
-        ]
+        nodes = await self._build_comment_nodes(event, comments)
+        if not nodes:
+            return
         try:
             yield event.chain_result([Comp.Nodes(nodes)])
         except Exception as exc:  # noqa: BLE001

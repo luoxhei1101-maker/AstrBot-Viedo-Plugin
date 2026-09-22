@@ -35,6 +35,69 @@ def ffmpeg_available() -> bool:
     return find_tool("ffmpeg") is not None
 
 
+def is_animated_image(path: str | Path) -> bool:
+    """判断一个图片文件是不是**动图**（GIF / 动图 WebP）。
+
+    为什么要看文件本身：评论里的「动图」在接口层**没有任何标记** ——
+    ``image_list`` 的字段和静态图完全一样（实测扫了 28 个作品 / 955 条评论，
+    连 ``video_list`` 都全是 None），所以只能下下来看内容。
+
+    Pillow 不可用或读不动这个文件时一律返回 False：当作静态图发，
+    最坏是「动图不动」，不会让整条流程失败。
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return False
+    try:
+        with Image.open(path) as im:
+            frames = int(getattr(im, "n_frames", 1))
+            return bool(getattr(im, "is_animated", False)) and frames > 1
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def animated_to_mp4(src: str | Path, *, timeout: float = 120.0) -> Path | None:
+    """把动图转成 mp4；失败返回 None（由调用方决定降级）。
+
+    为什么转 mp4：QQ 里「动图」按**视频**发才稳 —— 直接发 GIF，部分客户端
+    会把它压成静态首帧，用户就看不到动效了。
+
+    几个必要的参数：
+
+    - ``scale=trunc(iw/2)*2:trunc(ih/2)*2``：h264 要求宽高为偶数，
+      GIF 常见奇数尺寸，不补齐会被 ffmpeg 直接拒绝。
+    - ``-pix_fmt yuv420p``：不加的话某些播放器 / 协议端放不出来。
+    - ``-movflags +faststart``：把 moov 挪到文件头，发送端能边下边播。
+    - ``-an``：动图本来就没音轨，显式声明，免得 ffmpeg 塞一条空音轨进去。
+    """
+    ffmpeg = find_tool("ffmpeg")
+    if not ffmpeg:
+        return None
+
+    src = Path(src)
+    out = src.with_name(f"{src.stem}_anim.mp4")
+    result = await run(
+        ffmpeg,
+        "-y",
+        "-loglevel", "error",
+        "-i", str(src),
+        "-an",
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "22",
+        str(out),
+        timeout=timeout,
+    )
+    if not result.ok or not out.exists() or out.stat().st_size == 0:
+        logger.debug(f"[R插件][动图] 转 mp4 失败: {getattr(result, 'tail', '')}")
+        return None
+    return out
+
+
 async def _download(url: str, dest: Path, *, headers: dict | None = None) -> Path:
     """下载一个流到指定路径。"""
     import aiohttp

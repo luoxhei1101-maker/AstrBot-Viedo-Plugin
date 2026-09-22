@@ -53,12 +53,34 @@ def _fmt_time(ctime) -> str:
         return ""
 
 
+def _comment_image_candidates(item: dict) -> list[list[str]]:
+    """取出一条评论里每张图的候选 URL（B 站是单地址，包成单元素列表）。
+
+    统一成 ``list[list[str]]`` 是为了和抖音那边共用同一个发送端逻辑
+    （抖音一张图有 4 个 CDN 候选，需要逐个回退，B 站只有 ``img_src`` 一个）。
+    """
+    content = item.get("content") or {}
+    out: list[list[str]] = []
+    for pic in content.get("pictures") or []:
+        if not isinstance(pic, dict):
+            continue
+        src = str(pic.get("img_src") or "").strip()
+        if src:
+            out.append([src])
+    return out
+
+
 def _normalize_comment(item: dict) -> dict | None:
-    """把一条 B 站评论转成 ``{nickname, text}``，无正文则返回 None。"""
+    """把一条 B 站评论转成 ``{nickname, text, images}``。
+
+    **只要文字或图片有一个就保留** —— 以前是「没正文就 return None」，
+    纯图评论（UP 主有时就这么发）会被整条丢掉。
+    """
     member = item.get("member") or {}
     content = item.get("content") or {}
     message = str(content.get("message") or "").strip()
-    if not message:
+    images = _comment_image_candidates(item)
+    if not message and not images:
         return None
 
     nickname = member.get("uname") or "B站用户"
@@ -80,8 +102,15 @@ def _normalize_comment(item: dict) -> dict | None:
         meta_parts.append(f"赞 {like}")
     meta = " · ".join(meta_parts)
 
-    text = message if not meta else f"{message}\n—— {meta}"
-    return {"nickname": nickname, "text": text}
+    if message and meta:
+        text = f"{message}\n—— {meta}"
+    elif message:
+        text = message
+    else:
+        # 纯图评论：正文为空，只留一行 meta（不留空行）
+        text = f"—— {meta}" if meta else ""
+
+    return {"nickname": nickname, "text": text, "images": images}
 
 
 async def fetch_bili_comments(
