@@ -49,6 +49,37 @@ def _fmt_time(ctime) -> str:
         return ""
 
 
+def _sticker_candidates(item: dict) -> list[str]:
+    """取出评论里**表情包**（``sticker``）的候选 URL，动图版优先。
+
+    这是踩了很多坑才找到的东西 —— 评论里的「动图」既不在 ``image_list``
+    也不在 ``video_list``，而是独立的 ``sticker`` 字段（表情包），结构：
+
+    .. code-block:: json
+
+        {"id": 7667238231015948297, "width": 344, "height": 240,
+         "static_url": {...}, "animate_url": {...}, "sticker_type": 2, ...}
+
+    实测（作品 7687666222385355867，210 条评论里 41 条带 sticker）：
+
+    - ``static_url`` / ``animate_url`` 都下过，类型有
+      ``image/gif``（**123 帧的真动图**）/ ``png`` / ``jpeg`` / ``webp``；
+    - 两字段的 URL **实测常常完全相同**（原素材本身就是 GIF / 静态图），
+      所以按 ``animate_url`` → ``static_url`` 的顺序取一个就行；
+    - **光看字段名判断不了是不是动图**，最终还得靠下载后的内容检测
+      （``core/media.is_animated_image``）。
+    """
+    st = item.get("sticker")
+    if not isinstance(st, dict):
+        return []
+    for field in ("animate_url", "static_url"):
+        urls = (st.get(field) or {}).get("url_list") or []
+        cands = [u for u in urls if u]
+        if cands:
+            return cands
+    return []
+
+
 def _comment_image_candidates(item: dict) -> list[list[str]]:
     """取出一条评论里每张图的**候选 URL 列表**（原图优先）。
 
@@ -68,6 +99,9 @@ def _comment_image_candidates(item: dict) -> list[list[str]]:
     ``.jpeg`` 两种 —— 实测都是 1600×1600 原图，但 ``.jpeg`` 只有 660 KB
     （PNG 是 804 KB）。所以复用图集那套 ``rank_image_candidates``
     （``.jpeg`` 排在 ``.image`` 前面）顺手就把体积也优化了。
+
+    除了 ``image_list``，**还要收评论的 ``sticker``（表情包）** ——
+    评论里的动图就在那里，见 ``_sticker_candidates``。
     """
     out: list[list[str]] = []
     for img in item.get("image_list") or []:
@@ -80,6 +114,12 @@ def _comment_image_candidates(item: dict) -> list[list[str]]:
                 cands.append(u)
         if cands:
             out.append(rank_image_candidates(cands))
+
+    sticker = _sticker_candidates(item)
+    if sticker:
+        # sticker 的 URL 没有文件扩展名，rank_image_candidates 不会重排
+        # （都落进「其他」档，稳定排序保持原顺序），直接放进去即可
+        out.append(sticker)
     return out
 
 

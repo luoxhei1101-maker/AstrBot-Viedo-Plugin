@@ -173,6 +173,117 @@ def part_a_douyin() -> None:
 
 
 # ==========================================================================
+# A2) 评论表情包 sticker —— 动图就藏在这里
+# ==========================================================================
+
+# 真实抓到的 sticker（作品 7687666222385355867 的 peach猹 评论）
+# 实测两个 URL 都返回 image/gif、344×240、123 帧
+STICKER_GIF = {
+    "id": 7667238231015948297,
+    "width": 344,
+    "height": 240,
+    "static_url": {
+        "uri": "tos-cn-o-0812/oUZAeCE4IpDAxzgoCJAEFunAf5CABqIygMELYN",
+        "url_list": [
+            "https://p26-sign.douyinpic.com/obj/tos-cn-o-0812/AAA?sc=sticker_heif",
+            "https://p5-ex-gddgtc-sign.douyinpic.com/obj/tos-cn-o-0812/AAA?sc=sticker_heif",
+        ],
+        "width": 344,
+        "height": 240,
+    },
+    "animate_url": {
+        "uri": "tos-cn-o-0812/oUZAeCE4IpDAxzgoCJAEFunAf5CABqIygMELYN",
+        "url_list": [
+            "https://p26-sign.douyinpic.com/obj/tos-cn-o-0812/AAA?sc=sticker_heif",
+            "https://p5-ex-gddgtc-sign.douyinpic.com/obj/tos-cn-o-0812/AAA?sc=sticker_heif",
+        ],
+        "width": 344,
+        "height": 240,
+    },
+    "sticker_type": 2,
+    "origin_package_id": -4156610121569672,
+    "id_str": "7667238231015948297",
+    "author_sec_uid": "",
+    "activity_schema": "",
+    "activity_desc": "",
+}
+
+
+def part_a2_sticker() -> None:
+    print("\n[A2] 评论表情包 sticker（动图在这里）")
+    from astrbot_plugin_rconsole.core.douyin_comment import (
+        _normalize_comment,
+        _sticker_candidates,
+    )
+
+    # ---- 1) 候选提取：animate_url 优先 ----
+    got = _sticker_candidates({"sticker": STICKER_GIF})
+    check_true("sticker 能提出候选（关键）", len(got) == 2)
+    check_true(
+        "  取的是 animate_url（动图版优先）",
+        all(u.endswith("sc=sticker_heif") for u in got),
+    )
+
+    # ---- 2) 只有 static_url 时退回它 ----
+    only_static = {
+        "sticker": {
+            "static_url": {"url_list": ["https://x/static.png"]},
+        }
+    }
+    check("只有 static_url 时退回它", _sticker_candidates(only_static),
+          ["https://x/static.png"])
+
+    # ---- 3) 异常结构不炸 ----
+    check("没有 sticker -> []", _sticker_candidates({}), [])
+    check("sticker 不是 dict -> []", _sticker_candidates({"sticker": "??"}), [])
+    check("url_list 为空 -> []",
+          _sticker_candidates({"sticker": {"static_url": {"url_list": []}}}), [])
+
+    # ---- 4) 纯 sticker 评论（无文字、无 image_list）必须保留 ----
+    item = {
+        "user": {"nickname": "早晨我睡觉"},
+        "text": "我没有绷住，大火还得靠小猫",
+        "digg_count": 58,
+        "create_time": 1789995384,
+        "ip_label": "广西",
+        "content_type": 3,
+        "sticker": STICKER_GIF,
+    }
+    c = _normalize_comment(item)
+    check_true("带 sticker 的评论保留", c is not None)
+    if c:
+        check_true("  文本正确", c["text"].startswith("我没有绷住"))
+        check("  sticker 进了 images（关键）", len(c["images"]), 1)
+        check("  该 sticker 有 2 个候选", len(c["images"][0]), 2)
+
+    # ---- 5) 只有 sticker 没有任何文字 ----
+    c2 = _normalize_comment({
+        "user": {"nickname": "菜包包"},
+        "text": "",
+        "sticker": STICKER_GIF,
+    })
+    check_true("纯 sticker（无文字）也不被丢（关键）", c2 is not None)
+    if c2:
+        check("  图数量为 1", len(c2["images"]), 1)
+
+    # ---- 6) image_list + sticker 同时存在时两个都要 ----
+    c3 = _normalize_comment({
+        "user": {"nickname": "双份"},
+        "text": "图文 + 表情包",
+        "image_list": [_dy_image_block([DY_JPEG])],
+        "sticker": STICKER_GIF,
+    })
+    if c3:
+        check("image_list 与 sticker 都被收集", len(c3["images"]), 2)
+
+    # ---- 7) 真实场景回归：这条作品里的 sticker 评论不再丢 ----
+    check_true(
+        "截图里那条评论现在能提取到",
+        c is not None and len(c["images"]) > 0,
+    )
+
+
+# ==========================================================================
 # B) B 站评论解析
 # ==========================================================================
 
@@ -502,6 +613,7 @@ def main() -> int:
     print("=" * 72)
 
     part_a_douyin()
+    part_a2_sticker()
     part_b_bili()
     part_c_animated()
     part_d_nodes()

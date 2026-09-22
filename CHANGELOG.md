@@ -1,5 +1,72 @@
 # 更新日志
 
+## v1.6.7（2026-09-22）
+
+**修复：评论区里的「动图」（表情包）现在能提取了。**
+
+### 问题
+
+v1.6.6 让评论图片能发了，但用户说「评论区里有动图评论」，怎么都找不到。
+翻了几百条评论、逐张验了图片格式，全是 `image/jpeg` —— **动图根本不在
+`image_list` 里**。
+
+### 根因：动图藏在独立的 `sticker` 字段里
+
+抖音评论的「表情包」是**独立字段 `sticker`**，既不在 `image_list`
+也不在 `video_list`：
+
+```json
+"sticker": {
+  "id": 7667238231015948297, "width": 344, "height": 240,
+  "static_url":  {"uri": "...", "url_list": [...]},
+  "animate_url": {"uri": "...", "url_list": [...]},   ← 动图版
+  "sticker_type": 2,
+  "origin_package_id": -4156610121569672
+}
+```
+
+实测（作品 `7687666222385355867`，210 条评论里 **41 条带 sticker**）：
+
+| 评论 | sticker 类型 | 结果 |
+|---|---|---|
+| peach猹「用别人的小猫火了为啥不艾特原主人」 | `image/gif` | **2133 KB / 344×240 / 123 帧** |
+| 真理「第二张怎么还有海豚叫…」 | `image/png` | 278 KB 静态 |
+| 爱别离「这么多点赞量…」 | `image/jpeg` | 33 KB 静态 |
+| 肆叁.「能不能让卖家多发两个大肥猫」 | `image/webp` | 4.5 KB 静态 |
+
+也就是说**光看字段名判断不出是不是动图**（`static_url` 和 `animate_url`
+实测常常返回同一个 URL），最终还是靠下载后的内容检测。
+
+### 修复
+
+1. `core/douyin_comment.py` 新增 `_sticker_candidates()`：
+   按 `animate_url` → `static_url` 取候选，并把它**并入** `images` 一起返回。
+2. 因为发送端早已是「统一下载 → 检测是否动图 → 分别处理」，
+   所以 **`main.py` 一行没改**：GIF 自动被认成动图、转 mp4、单独成一条；
+   静态 sticker 跟文字同一条（文字在上）。
+
+### 实测效果
+
+```
+--- peach猹 | '用别人的小猫火了为啥不艾特原主人'
+    图1 候选 3 个: .../obj/tos-cn-o-0812/oUZAeCE4...?sc=sticker_heif
+       -> .gif 2133 KB  344×240  帧=123  判定=动图
+         转 mp4: 611 KB  <- 作为一条视频单独发
+```
+
+同批 10 条带图评论：**动图 1 张 / 静态图 9 张**，判定全部正确。
+
+### 测试
+
+`tests/test_comment_image.py` 新增 A2 组（12 项断言）：`animate_url` 优先、
+退回 `static_url`、异常结构不炸、**纯 sticker 评论（无文字无 `image_list`）
+不再被丢**、`image_list` 与 `sticker` 同时存在时两个都收。
+全量 19 个测试文件通过。
+
+> 📌 顺便把 `deploy_rconsole.py` 的部署校验清单补全了（加上
+> `core/douyin_comment.py` / `core/bili_comment.py` / `core/media.py`），
+> 以后改这几个文件也会被 md5 校验覆盖。
+
 ## v1.6.6（2026-09-22）
 
 **新增：评论里的图片可以提取出来了（含作者常发的纯图评论）。**
