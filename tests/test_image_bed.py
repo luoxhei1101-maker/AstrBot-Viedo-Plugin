@@ -94,6 +94,15 @@ def part_a_transfer() -> None:
         'if (key or "").strip():' in BED,
     )
     check_true(
+        "**转存会重试**（实测该接口偶发失败：不返回 / 下载被截断）",
+        "retries: int = 2" in BED and "asyncio.sleep(0.8)" in BED,
+    )
+    check_true("拆出单次实现 _transfer_once（重试包在外面）", "async def _transfer_once" in BED)
+    check_true(
+        "重试全失败时留 warning 日志（方便线上排查降级原因）",
+        "次都没成，降级走图床" in BED,
+    )
+    check_true(
         "docstring 记了实测结论（国内节点 + 内容固定 + 为什么 iili.io 不行）",
         "113.96.129" in BED and "ESA" in BED and "图片加载失败" in BED,
     )

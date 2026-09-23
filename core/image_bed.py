@@ -30,6 +30,8 @@ sm.ms 匿名接口          ❌          空响应（需 token）
 
 from __future__ import annotations
 
+import asyncio
+
 import aiohttp
 from astrbot.api import logger
 
@@ -117,21 +119,8 @@ async def upload_image(
 CZOSS_API = "https://api.czcn.xyz/api/czoss"
 
 
-async def transfer_url(src: str, *, key: str = "", timeout: float = 45.0) -> str:
-    """把 ``src`` 交给 czoss 转存，返回**固定直链**；失败返回空串。
-
-    :param src: 源图片地址。可以直接是**随机图 API 的地址**（每次吐另一张图）——
-        转存后 URL 固定、内容固定，尺寸才量得准；而且 URL 每次不同，
-        不会被客户端缓存（菜单图就不会永远是同一张）。
-    :param key: 可选 API key（``plugin.czossKey``）。实测不带也能用。
-    :param timeout: 转存要它去下载再落盘，给宽一点。
-
-    全程**不抛异常**（转存挂了不该拖垮菜单），失败交给调用方降级。
-    """
-    src = (src or "").strip()
-    if not src.startswith("http"):
-        return ""
-
+async def _transfer_once(src: str, *, key: str, timeout: float) -> str:
+    """转存一次（不重试）。失败返回空串。"""
     params: dict[str, str] = {"url": src}
     if (key or "").strip():
         params["key"] = key.strip()
@@ -142,11 +131,11 @@ async def transfer_url(src: str, *, key: str = "", timeout: float = 45.0) -> str
             CZOSS_API, params=params, timeout=aiohttp.ClientTimeout(total=timeout)
         ) as resp:
             if resp.status != 200:
-                logger.debug(f"[R插件][转存] HTTP {resp.status}，跳过")
+                logger.debug(f"[R插件][转存] HTTP {resp.status}")
                 return ""
             payload = await resp.json(content_type=None)
     except Exception as exc:  # noqa: BLE001
-        logger.debug(f"[R插件][转存] 失败: {type(exc).__name__}: {exc}")
+        logger.debug(f"[R插件][转存] 请求失败: {type(exc).__name__}: {exc}")
         return ""
 
     if not isinstance(payload, dict) or payload.get("status") != "success":
@@ -170,3 +159,38 @@ async def transfer_url(src: str, *, key: str = "", timeout: float = 45.0) -> str
 
     logger.debug(f"[R插件][转存] OK {data.get('file_size_kb')}KB {mime} -> {url}")
     return url
+
+
+async def transfer_url(
+    src: str, *, key: str = "", timeout: float = 45.0, retries: int = 2
+) -> str:
+    """把 ``src`` 交给 czoss 转存，返回**固定直链**；失败返回空串。
+
+    :param src: 源图片地址。可以直接是**随机图 API 的地址**（每次吐另一张图）——
+        转存后 URL 固定、内容固定，尺寸才量得准；而且 URL 每次不同，
+        不会被客户端缓存（菜单图就不会永远是同一张）。
+    :param key: 可选 API key（``plugin.czossKey``）。**要用官机菜单图就该填**，
+        不填也能跑但更容易被限流。
+    :param timeout: 单次转存要它去下载再落盘，给宽一点。
+    :param retries: **重试次数**。实测这个接口**偶发失败** ——
+        有时干脆不返回，有时下载被截断（只拿到几十 KB）。隔 0.8 秒重试一次
+        基本就好。全失败才返回空串，调用方降级走图床。
+
+    全程**不抛异常**（转存挂了不该拖垮菜单）。
+    """
+    src = (src or "").strip()
+    if not src.startswith("http"):
+        return ""
+
+    for attempt in range(retries + 1):
+        url = await _transfer_once(src, key=key, timeout=timeout)
+        if url:
+            return url
+        if attempt < retries:
+            logger.debug(f"[R插件][转存] 第 {attempt + 1} 次没成，重试")
+            await asyncio.sleep(0.8)
+
+    logger.warning(
+        f"[R插件][转存] 试了 {retries + 1} 次都没成，降级走图床（源={src[:70]}）"
+    )
+    return ""
