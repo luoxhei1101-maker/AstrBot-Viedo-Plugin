@@ -93,3 +93,80 @@ async def upload_image(
         logger.debug(f"[R插件][图床] 返回里没有可用 url: {str(payload)[:160]}")
         return ""
     return url
+
+
+
+# ======================================================================
+# 国内转存（主路径）
+# ======================================================================
+#
+#: czcn 的「URL 转存」接口：给一个图片地址，它下载后落到**自己的国内 OSS**，
+#: 返回一个**内容固定**的直链。
+#:
+#: 为什么它是首选（2026-09-23 实测）：
+#:
+#: * **节点在国内** —— ``czoss.czcn.xyz`` 解析到 ``113.96.129.5/7/8``（广州电信），
+#:   响应头 ``Server: ESA``（阿里云边缘安全加速）；
+#: * **内容固定** —— 同一个直链连读两次，字节数完全一致（408680B / 408680B），
+#:   所以先转存、再量尺寸，不会像直接嵌随机图 API 那样量到另一张图；
+#: * **能直接吃随机图 API 的地址** —— 连「下载字节 + 上传图床」两步都省了。
+#:
+#: 对比：freeimage.host（``iili.io``）在 Cloudflare 上，实测**广州本地读得到**，
+#: 但放进 QQ 官机的 markdown 后客户端报「图片加载失败」—— 官机的图是
+#: **腾讯服务器去下载转存**的，海外/CDN 那边取不到就白搭。国内节点才稳。
+CZOSS_API = "https://api.czcn.xyz/api/czoss"
+
+
+async def transfer_url(src: str, *, key: str = "", timeout: float = 45.0) -> str:
+    """把 ``src`` 交给 czoss 转存，返回**固定直链**；失败返回空串。
+
+    :param src: 源图片地址。可以直接是**随机图 API 的地址**（每次吐另一张图）——
+        转存后 URL 固定、内容固定，尺寸才量得准；而且 URL 每次不同，
+        不会被客户端缓存（菜单图就不会永远是同一张）。
+    :param key: 可选 API key（``plugin.czossKey``）。实测不带也能用。
+    :param timeout: 转存要它去下载再落盘，给宽一点。
+
+    全程**不抛异常**（转存挂了不该拖垮菜单），失败交给调用方降级。
+    """
+    src = (src or "").strip()
+    if not src.startswith("http"):
+        return ""
+
+    params: dict[str, str] = {"url": src}
+    if (key or "").strip():
+        params["key"] = key.strip()
+
+    try:
+        session = get_session()
+        async with session.get(
+            CZOSS_API, params=params, timeout=aiohttp.ClientTimeout(total=timeout)
+        ) as resp:
+            if resp.status != 200:
+                logger.debug(f"[R插件][转存] HTTP {resp.status}，跳过")
+                return ""
+            payload = await resp.json(content_type=None)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[R插件][转存] 失败: {type(exc).__name__}: {exc}")
+        return ""
+
+    if not isinstance(payload, dict) or payload.get("status") != "success":
+        logger.debug(f"[R插件][转存] 返回不正常: {str(payload)[:160]}")
+        return ""
+
+    data = payload.get("data") or {}
+    url = str(data.get("direct_url") or "").strip()
+    if not url.startswith("http"):
+        logger.debug(f"[R插件][转存] 没有 direct_url: {str(payload)[:160]}")
+        return ""
+
+    # 它默认回 http:// —— markdown 内嵌图实测必须 https 才认。
+    if url.startswith("http://"):
+        url = "https://" + url[len("http://"):]
+
+    mime = str(data.get("detected_mime") or "")
+    if mime and not mime.startswith("image/"):
+        logger.debug(f"[R插件][转存] 转存回来的不是图片（{mime}），丢弃")
+        return ""
+
+    logger.debug(f"[R插件][转存] OK {data.get('file_size_kb')}KB {mime} -> {url}")
+    return url

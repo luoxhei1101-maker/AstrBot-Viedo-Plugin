@@ -193,13 +193,19 @@
         "description": "菜单随机图 API（官机）",
         "type": "string",
         "default": "https://api.elaina.cat/random/mobile",
-        "hint": "QQ 官方机器人发 `#R菜单` 时用的随机图。插件会**先取图、读真实尺寸、再上传图床拿一个唯一链接**，最后拼进 markdown —— 所以每次图都不同、也不会变形。默认用竖屏档（比例更稳）。留空 = 不发图，退回纯文字菜单。"
+        "hint": "QQ 官方机器人发 `#R菜单` 时用的随机图。插件会**先把它转存到国内 OSS、读出真实尺寸、再拼进 markdown** —— 所以每次图都不同、也不会变形。默认用竖屏档（比例更稳）。\n\n**这张图需要先在下面的 czossKey 填好自己创建的 key**（见该选项说明）。留空 = 不发图，退回纯文字菜单。"
       },
       "imageBedKey": {
         "description": "图床 API Key（可选）",
         "type": "string",
         "default": "",
-        "hint": "留空则用 freeimage.host 的公开测试 key。免费注册一个账号后可以把自己的 key 填这里，更稳定（公开 key 被限流时会自动降级）。"
+        "hint": "**兜底路径**用的图床 key（主路径是国内转存，见上一个选项）。**发行版不内置 key** —— 到 freeimage.host 注册一个免费账号，把 key 填这里更稳；留空时插件会用官方文档里的公开测试 key 兜底，被限流就自动降级。"
+      },
+      "czossKey": {
+        "description": "CZ API Key（**官机菜单图必填**）",
+        "type": "string",
+        "default": "",
+        "hint": "**要用官机菜单图（#R菜单 的那张随机图），请先去 Czapi 创建自己的 key** —— 打开 https://api.czcn.xyz 的 API 详情页（apidata?id=51）拿到 key，填到这里（WebUI → 插件配置 → R插件；或直接编辑 `data/config/astrbot_plugin_rconsole_config.json` 里的 `plugin.czossKey`）。\n\n为什么需要它：官机的图是**腾讯服务器下载转存**的，所以插件会先把随机图经 api.czcn.xyz **转存到国内 OSS** 再嵌进 markdown（放海外 CDN 上会报「图片加载失败」）。\n\n没填 key 时插件仍会尝试不带 key 转存（可能被限流），失败就降级成纯文字菜单。"
       },
       "bili_quality_when_logged_in": {
         "description": "B站登录后请求的画质",

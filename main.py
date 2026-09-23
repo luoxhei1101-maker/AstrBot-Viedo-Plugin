@@ -88,7 +88,7 @@ from .core.downloader import (
 )
 from .core.external import describe_environment, find_tool, run
 from .core.http import HttpError, close_session as close_http_session
-from .core.image_bed import upload_image
+from .core.image_bed import transfer_url, upload_image
 from .core.media import (
     MergeError,
     animated_to_mp4,
@@ -3227,18 +3227,46 @@ class Main(Star):
     async def _menu_image_md(self, event: AstrMessageEvent) -> str:
         """（官机）菜单的 markdown：**一张随机图，不配文字**（用户指定）。
 
-        每一步都有原因（详见 ``core/image_bed`` 的模块说明）：
+        四步，每步都有原因：
 
-        1. 取图 —— 用 ``plugin.menuImageApi``（默认 elaina 的**竖屏**档，
-           实测比例极差 0.10，比 ``/random/`` 的 1.08 稳得多）；
-        2. **本地读真实尺寸** —— markdown 内嵌图不带尺寸时手机 QQ 只渲染 ``[alt]``；
-        3. **传图床拿唯一 URL** —— 同一个 URL 会被缓存，菜单图就永远一张了。
+        1. 取图 —— ``plugin.menuImageApi``（默认 elaina 的**竖屏**档）；
+        2. **交给 czoss 转存** —— 换成国内节点、**内容固定**的直链。
+           这一步是关键：官机 markdown 的图是**腾讯服务器下载转存**的，
+           图放在 Cloudflare（freeimage.host → ``iili.io``）上实测客户端报
+           「图片加载失败」，换到国内 OSS 才通。顺带 URL 每次不同，
+           不会被客户端缓存（否则菜单图永远是同一张）；
+        3. **量真实尺寸** —— markdown 内嵌图不带尺寸时手机 QQ 只渲染 ``[alt]``；
+        4. 拼 MD。
 
-        任一步失败返回空串，调用方按降级链处理。
+        转存不通就退回老路径（① 下载随机图 → ② 传图床 → ③ 拼 MD），
+        再不行返回空串，调用方走纯文字菜单降级。
         """
         api = self._menu_image_api()
         if not api:
             return ""
+
+        url = await transfer_url(api, key=self._czoss_key())
+        if url:
+            size = await self._probe_image_size(url)
+            if size:
+                logger.info(
+                    f"[R插件][菜单] 随机图转存就位 {size[0]}x{size[1]} -> {url}"
+                )
+                return self._md_image(
+                    url, size, alt="菜单", max_width=self._md_image_width(event)
+                )
+            logger.debug("[R插件][菜单] 转存直链量不到尺寸，退回图床路径")
+
+        return await self._menu_image_md_by_bed(event, api)
+
+    async def _menu_image_md_by_bed(
+        self, event: AstrMessageEvent, api: str
+    ) -> str:
+        """降级路径：下载随机图 → 传图床 → 拼 MD。
+
+        图床在 Cloudflare 上，腾讯侧**可能取不到**（这就是当初「图片加载失败」
+        的根因），所以只当兜底 —— 转存接口通了就轮不到这里。
+        """
         try:
             from io import BytesIO
 
@@ -3269,12 +3297,13 @@ class Main(Star):
             return ""
 
         logger.info(
-            f"[R插件][菜单] 随机图就位 {size[0]}x{size[1]} "
+            f"[R插件][菜单] 随机图就位（图床兜底）{size[0]}x{size[1]} "
             f"({len(body) // 1024}KB) -> {url}"
         )
         return self._md_image(
             url, size, alt="菜单", max_width=self._md_image_width(event)
         )
+
 
     def _menu_image_api(self) -> str:
         """菜单随机图 API（``plugin.menuImageApi``）。
@@ -3299,6 +3328,11 @@ class Main(Star):
     def _image_bed_key(self) -> str:
         """图床 API key（``plugin.imageBedKey``）；留空则用公开测试 key。"""
         return str(self.conf_get("plugin.imageBedKey", "") or "").strip()
+
+    def _czoss_key(self) -> str:
+        """转存接口的 API key（``plugin.czossKey``）—— 实测留空也能用。"""
+        return str(self.conf_get("plugin.czossKey", "") or "").strip()
+
 
     async def cmd_no_at(self, event: AstrMessageEvent):
         """``#R免艾特`` —— 教用户开启「群内全量消息」（官机专属）。

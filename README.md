@@ -9,7 +9,7 @@
 >
 > 原项目 README 的声明同样适用：素材来源于网络，仅供交流学习使用，**严禁用于任何商业用途和非法行为**。
 
-**当前版本：v1.6.11** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
+**当前版本：v1.6.12** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
 
 <p align="center">
   <img src="https://q1.qlogo.cn/g?b=qq&nk=2593504303&s=640" width="104" height="104" alt="NaiLuo" />
@@ -209,24 +209,41 @@ markdown，`Comp.Image`（media 段）又和 markdown 互斥。所以走三步�
 
 ```
 取随机图（plugin.menuImageApi，默认竖屏档）
-   ↓  本地读出真实尺寸
-上传图床拿一个**唯一链接**（plugin.imageBedKey 可换自己的 key）
+   ↓  交给 api.czcn.xyz 转存到**国内 OSS**（plugin.czossKey 可选）
+拿固定 https 直链，读出真实尺寸
    ↓
-![菜单 #300px #424px](https://iili.io/xxx.jpg)  +  按钮
+![菜单 #300px #424px](https://czoss.czcn.xyz/upload/xxx.jpg)  +  按钮
 ```
 
-**为什么要绕图床这趟**：
+**为什么必须转存一趟**：
 
+* 官机 markdown 的图是**腾讯服务器下载转存**的（官方文档原话）—— 所以图必须放在
+  **国内能取到**的地方。实测海外图床（Cloudflare 上的 `iili.io`）本地 curl 全通，
+  放进 markdown 却报「图片加载失败」；
 * markdown 内嵌图**必须带尺寸**，而随机图 API 每次给的是**另一张**图 —— 直接
   塞进 MD，尺寸对不上就会变形（实测 `/random/` 的比例极差有 **1.08**，
-  `/random/mobile` 只有 0.10，所以默认用竖屏档）；
-* 同一个 URL 会被客户端**缓存**，菜单图就永远是同一张了。
+  `/random/mobile` 只有 0.10，所以默认用竖屏档）。转存后 URL 内容固定，尺寸就量得准；
+* 同一个 URL 会被客户端**缓存**，菜单图就永远是同一张了。转存每次生成新地址。
 
-先落地（读真实尺寸）再上传拿唯一地址，两个问题一起解决。
-
-**图床挂了会降级**：随机图 → 纯文字菜单 → 本地渲染的功能图，不会什么都不发。
+**挂了会降级**：转存 → 图床 → 纯文字菜单 → 本地渲染的功能图，不会什么都不发。
 
 > 想换菜单图风格：把 `menuImageApi` 改成别的随机图 API（留空则不发图）。
+
+**⚠️ 要用官机菜单图，先配一个 key**
+
+发行版**不内置任何 key**，官机的菜单图需要你自己去创建一个：
+
+1. 打开 <https://api.czcn.xyz> 的 API 详情页
+   （[`apidata?id=51`](https://api.czcn.xyz/apidata?id=51)），创建 / 查看自己的 key；
+2. 把它填进插件配置的 **`czossKey`**：
+   * **WebUI**：插件配置 → R插件 → 「CZ API Key（官机菜单图必填）」；
+   * **配置文件**：`data/config/astrbot_plugin_rconsole_config.json` 里的
+     `plugin.czossKey`，改完重载插件。
+
+没填 key 时菜单**不会坏** —— 插件仍会试着不带 key 转存，失败就自动降级成
+纯文字菜单（按钮照旧）。**只是那张随机图很可能显示不出来。**
+
+兜底图床（正常用不到）留了个 `imageBedKey`：到 freeimage.host 注册免费账号即可。
 
 ### 三个图片命令
 
@@ -810,7 +827,7 @@ python tests/test_qq_buttons.py                 # 官机按钮 / markdown 内联
 python tests/test_qq_voice.py                   # 官机语音：silk 编码 + 自控上传（真跑 pysilk）
 python tests/test_album_md.py                   # 官机图集：MD 内嵌多图 + 尺寸兜底
 python tests/test_md_layout.py                  # 官机 markdown 排版（代码框 / 空行 / 标题）
-python tests/test_image_bed.py                  # 菜单图床（随机图 → 唯一链）
+python tests/test_image_bed.py                  # 菜单配图（国内转存 + 图床兜底）
 python tests/test_music_link.py                 # 点歌降级链接（优先音频直链，不是详情页）
 python tests/test_music_sign_proxy.py           # 音乐卡片签名代理
 python tests/test_music_url_guard.py            # 音频直链可用性校验
