@@ -9,7 +9,7 @@
 >
 > 原项目 README 的声明同样适用：素材来源于网络，仅供交流学习使用，**严禁用于任何商业用途和非法行为**。
 
-**当前版本：v1.6.9** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
+**当前版本：v1.6.10** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
 
 <p align="center">
   <img src="https://q1.qlogo.cn/g?b=qq&nk=2593504303&s=640" width="104" height="104" alt="NaiLuo" />
@@ -610,7 +610,7 @@ profiles
 | AcFun | ✅ | ajaxpipe 抠 JSON → m3u8 |
 | 哔哩哔哩 | ✅ 主干 | WBI 签名 + Cookie + DASH + ffmpeg 合并；**扫码登录**；评论（合并转发，**含评论图片**，v1.6.6）；**超时长会给出作品链接**（v1.6.4）；BBDown / 番剧 / 直播未移植 |
 | AI 总结 / 翻译 | ✅ | 复用 AstrBot 自带的 LLM |
-| 抖音 | ✅ 主干 | 主接口（a-bogus，配 Cookie）优先 + SSR 免登录兜底；动图/静态图逐项分流；**图集取原图不取压缩预览 + 多 CDN 候选回退**（v1.6.2）；评论（需 Cookie / node，**含评论图片与动图**，v1.6.6） |
+| 抖音 | ✅ 主干 | 主接口（a-bogus，配 Cookie）优先 + SSR 免登录兜底；动图/静态图逐项分流；**图集取原图不取压缩预览 + 多 CDN 候选回退**（v1.6.2）；评论（需 Cookie / node，**含评论图片与动图**，v1.6.6）；官机图集走 **MD 内嵌多图**（v1.6.10） |
 | 网易云 / QQ音乐 | ✅ 含点歌 | 链接解析 + **`#点歌` 搜索 / 取直链 / 音乐卡片**；网易云**扫码登录**。歌单未移植 |
 | 小黑盒 | 🟡 | 帖子解析（含 hkey 签名）；游戏页未移植 |
 | 米游社 / 微视 | 🟡 | 主干已移植 |
@@ -780,6 +780,7 @@ python tests/test_platform_caps.py              # 协议端能力表（合并转
 python tests/test_platform_profiles.py          # 分协议端配置（含 schema 一致性）
 python tests/test_qq_buttons.py                 # 官机按钮 / markdown 内联指令
 python tests/test_qq_voice.py                   # 官机语音：silk 编码 + 自控上传（真跑 pysilk）
+python tests/test_album_md.py                   # 官机图集：MD 内嵌多图 + 尺寸兜底
 python tests/test_music_sign_proxy.py           # 音乐卡片签名代理
 python tests/test_music_url_guard.py            # 音频直链可用性校验
 python tests/test_panels.py                     # 三个图片命令

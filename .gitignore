@@ -34,3 +34,6 @@ Thumbs.db
 *.bak
 *.bak-*
 *.orig
+
+# 测试用的临时工作目录（tests/_tmp_comment_img 等）
+tests/_tmp_*/

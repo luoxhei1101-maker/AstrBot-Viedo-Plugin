@@ -126,6 +126,7 @@ async def resolve_douyin(link: str, ctx: ResolverContext) -> ResolveResult:
 
         images: list[str] = []
         image_candidates: list[str] = []
+        image_sizes: list[tuple[int, int] | None] = []
         videos: list[str] = []
         video_candidates: list[list[str]] = []
         for it in items:
@@ -135,6 +136,9 @@ async def resolve_douyin(link: str, ctx: ResolverContext) -> ResolveResult:
             else:
                 images.append(it["image_url"])
                 image_candidates.append(it["image_candidates"])
+                # 与 `images` 一一对应。官机要拼 markdown 内嵌图，
+                # 而内嵌图**必须带尺寸**（不然手机端只显示 [alt]）。
+                image_sizes.append(it.get("size"))
 
         animated = any(it["kind"] == "animated" for it in items)
 
@@ -144,6 +148,8 @@ async def resolve_douyin(link: str, ctx: ResolverContext) -> ResolveResult:
         extra["album_kinds"] = [it["kind"] for it in items]
         if image_candidates:
             extra["image_candidates"] = image_candidates
+        if image_sizes:
+            extra["image_sizes"] = image_sizes
         if animated:
             # 动图按视频发，播放地址顺序与作品一致
             extra["animated_videos"] = videos

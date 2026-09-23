@@ -304,6 +304,37 @@ _ORIGINAL_IMAGE_SUFFIXES = (".jpeg", ".jpg", ".png", ".heic", ".avif")
 _COMPRESSED_IMAGE_SUFFIXES = (".webp", ".gif")
 
 
+def _positive_int(value: Any) -> int | None:
+    """转成正整数；转不动或 <=0 返回 None。"""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def image_size(image: dict[str, Any]) -> tuple[int, int] | None:
+    """取作品图集里某一项的**原图尺寸** ``(宽, 高)``；取不到返回 ``None``。
+
+    **为什么需要它**：QQ 官方机器人的 markdown 内嵌图**必须带尺寸**
+    （``![图1 #300px #400px](url)``）—— 不带时电脑端照常显示，
+    **手机端只渲染 ``[alt]``**（v1.6.7 实测踩过这个坑）。
+
+    好消息是**不用额外请求**：抖音在 ``images[i]`` 顶层就给了
+    ``width`` / ``height``（实测 4 张图全部命中）。这里按
+    「顶层 -> origin_url」的顺序兜底，只在都取不到时才放弃。
+    """
+    nodes: list[Any] = [image, image.get("origin_url")]
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        width = _positive_int(node.get("width"))
+        height = _positive_int(node.get("height"))
+        if width and height:
+            return (width, height)
+    return None
+
+
 def _image_kind_rank(url: str) -> int:
     """图片候选的优先级：越小越优先。
 
@@ -414,6 +445,7 @@ def album_items(aweme: dict[str, Any]) -> list[dict[str, Any]]:
                 "kind": "still" | "animated",
                 "image_url": "首个图片直链",          # 动图时为空
                 "image_candidates": [...],            # 动图时为空；已按原图优先排序
+                "size": (宽, 高) 或 None,             # 静态图的原图尺寸，官机 MD 内嵌要用
                 "video_uri": "视频轨 uri",            # 静态图时为空
                 "video_url": "拼好的播放地址",         # 静态图时为空
                 "video_candidates": [...],            # 静态图时为空；多个播放直链候选
@@ -472,6 +504,9 @@ def album_items(aweme: dict[str, Any]) -> list[dict[str, Any]]:
                     "kind": "still",
                     "image_url": candidates[0],
                     "image_candidates": candidates,
+                    # 原图尺寸。官机的 markdown 内嵌图**必须带** ——
+                    # 不带时手机 QQ 只渲染 [alt]（v1.6.7 踩过）。
+                    "size": image_size(image),
                     "video_uri": "",
                     "video_url": "",
                 }

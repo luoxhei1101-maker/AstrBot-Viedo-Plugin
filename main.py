@@ -2024,6 +2024,36 @@ class Main(Star):
                 paths.append(None)
         return paths
 
+    def _album_md_text(
+        self, event: AstrMessageEvent, result: ResolveResult
+    ) -> str | None:
+        """（官机）把**纯静态图集**拼成一条 markdown 文本；不满足条件返回 ``None``。
+
+        **尺寸是硬要求**：内嵌图写成 ``![图1 #300px #400px](url)``，不带尺寸时
+        电脑 QQ 照常显示、**手机 QQ 只渲染 `[alt]`**（v1.6.7 实测踩过）。
+        尺寸由解析层带来（抖音 ``images[i]`` 顶层自带 ``width``/``height``，
+        零额外请求），**任意一张缺尺寸就整体放弃** —— 宁可退回逐条发送，
+        也不要发一条手机上全是 ``[alt]`` 的消息。
+        """
+        urls = list(result.images)
+        if not urls:
+            return None
+
+        sizes = result.extra.get("image_sizes") or []
+        max_width = self._md_image_width(event)
+        blocks: list[str] = []
+        for i, url in enumerate(urls, 1):
+            size = sizes[i - 1] if i - 1 < len(sizes) else None
+            if not size:
+                return None
+            blocks.append(self._md_image(url, size, alt=f"图{i}", max_width=max_width))
+
+        lines = [f"# {result.title or '图集'}", ""]
+        if result.author:
+            lines += [f"> {result.author}", ""]
+        lines += blocks
+        return "\n".join(lines)
+
     async def _send_album(self, event: AstrMessageEvent, result: ResolveResult):
         """发送抖音图集 —— **静态图当图片发，动图当视频发，顺序按作品原样**。
 
@@ -2057,6 +2087,31 @@ class Main(Star):
             f"[R插件][抖音] 发送图集：静态图 {n_still} 张，动图 {n_anim} 个，"
             f"发送模式={'合并转发' if len(kinds) > limit else '直发'}"
         )
+
+        # ---- 官机专属：一条 **markdown 内嵌多图** ----
+        #
+        # 为什么官机走这条，而不是「下载到本地再逐条发」：
+        #
+        # 1. markdown 内嵌图是**腾讯服务器**去下载的 —— 我们完全不用下，
+        #    于是**绕开了本机对抖音图的 403**。实测同一批图在本机恒定 403
+        #    （去 ~tplv 后缀 / 换 p3→p9→p6 节点 / 加 Referer / 带 1449 字符
+        #    的 Cookie，全是 403），但交给腾讯去取就有机会成功；
+        # 2. 官机没有合并转发，N 张图逐条发等于刷屏；
+        # 3. 用户明确要这个形态。
+        #
+        # **只处理纯静态图集** —— markdown 里塞不进视频，含动图的仍走原路径。
+        if self._caps(event).markdown and all(k == "still" for k in kinds):
+            md = self._album_md_text(event, result)
+            if md:
+                chain = event.chain_result([Comp.Plain(md)])
+                if hasattr(chain, "use_markdown"):
+                    chain.use_markdown(True)
+                yield chain
+                return
+            logger.info(
+                "[R插件][抖音] 图集缺尺寸，退回逐条发送"
+                "（markdown 内嵌图不带尺寸时手机端只显示 [alt]）"
+            )
 
         # ---- 分两路下载（静态图并发 + 带候选回退，动图串行）----
         still_paths = await self._download_album_stills(event, result, still_images)
