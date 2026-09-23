@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import io
 import sys
 import types
 from pathlib import Path

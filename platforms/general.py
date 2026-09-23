@@ -13,9 +13,9 @@ import re
 
 from astrbot.api import logger
 
-from ..core.constants import GENERAL_PLATFORM_KEYS, PARSE_ENDPOINTS, ParseEndpoint
+from ..core.constants import PARSE_ENDPOINTS, ParseEndpoint
 from ..core.general_adapter import GeneralLinkAdapter
-from .base import ResolveResult, ResolverContext, not_ported, register
+from .base import ResolveResult, ResolverContext, register
 
 # 具体是哪个平台交给 core/general_adapter 的归一化函数判断，
 # 这里只负责把链接归到对应的 rule_key。

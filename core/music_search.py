@@ -56,11 +56,10 @@ from .constants import (
     NETEASE_SONG_URL_API,
     NETEASE_URL_COOKIE,
     QQ_MUSIC_BODY_TEMPLATE,
-    QQ_MUSIC_SEARCH_API,
     QQ_MUSIC_SONG_PAGE,
     QQ_MUSIC_VKEY_API,
 )
-from .http import HttpError, fetch, fetch_json
+from .http import HttpError
 
 # 一次搜索返回的最大条数
 MAX_RESULTS = 10
@@ -769,8 +768,6 @@ async def _post_form(
     ``core/http.py`` 只有 ``post_json``（发 JSON 体）；网易云这两个接口
     收的是 ``application/x-www-form-urlencoded``，所以在这里单独实现。
     """
-    import json as _json
-
     from .http import get_session
 
     merged = {

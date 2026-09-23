@@ -46,7 +46,6 @@ if "astrbot" not in sys.modules:
 
 from core.downloader import (  # noqa: E402
     _stream_one,
-    download_many_candidates,
 )
 
 _FAILED: list[str] = []

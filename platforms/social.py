@@ -22,7 +22,6 @@ from ..core.constants import (
     MIYOUSHE_ARTICLE,
     WEISHI_VIDEO_INFO,
     XHH_BBS_LINK,
-    XHH_GAME_LINK,
     XHH_SALT,
 )
 from ..core.http import HttpError, fetch, fetch_json

@@ -24,7 +24,6 @@
 from __future__ import annotations
 
 import sys
-import types
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent

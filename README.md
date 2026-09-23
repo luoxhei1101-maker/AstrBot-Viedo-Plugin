@@ -9,7 +9,7 @@
 >
 > 原项目 README 的声明同样适用：素材来源于网络，仅供交流学习使用，**严禁用于任何商业用途和非法行为**。
 
-**当前版本：v1.6.8** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
+**当前版本：v1.6.9** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
 
 <p align="center">
   <img src="https://q1.qlogo.cn/g?b=qq&nk=2593504303&s=640" width="104" height="104" alt="NaiLuo" />
@@ -405,9 +405,19 @@ QQ点歌 晴天          → 强制走 QQ 音乐
 #### 关于「语音条」的限制（重要）
 
 语音条会被转成**未压缩音频**再传输，体积很大，一首正常长度的歌协议端收不下。
-所以语音条只适合**短音频**（插件内置 90 秒上限，超了会提示并改用链接）。
+所以语音条只适合**短音频**，超了会提示并改用链接。**上限按协议端分档**：
+
+| 协议端 | 上限 | 说明 |
+|---|---|---|
+| OneBot v11 | 90 秒 | 音频要经 HTTP body 传（base64 后约 117KB/秒） |
+| QQ 官方机器人 | **300 秒** | 走官方富媒体接口，插件本地转 silk 后体积只有约 1.5KB/秒 |
 
 **想发整首请选「音频文件」或「音乐卡片」** —— 这两个不受此限制。
+
+> **官机的语音是插件自己转、自己传的**（v1.6.9 起）：本地用 `pysilk` 转成 silk
+> 再走官方接口上传。这样做的原因是适配器那条路**上传超时不可控** —— botpy 的
+> 超时是实例级属性、失败后还会重试 3 次，腾讯接口一抖用户就要干等 90 秒以上。
+> 自己走之后超时 25 秒、失败立刻降级发链接（详见 CHANGELOG v1.6.9）。
 
 ### 扫码登录
 
@@ -769,6 +779,7 @@ python tests/test_comment_image.py              # 评论图片 / 动图提取（
 python tests/test_platform_caps.py              # 协议端能力表（合并转发 / 卡片 / MD / 按钮）
 python tests/test_platform_profiles.py          # 分协议端配置（含 schema 一致性）
 python tests/test_qq_buttons.py                 # 官机按钮 / markdown 内联指令
+python tests/test_qq_voice.py                   # 官机语音：silk 编码 + 自控上传（真跑 pysilk）
 python tests/test_music_sign_proxy.py           # 音乐卡片签名代理
 python tests/test_music_url_guard.py            # 音频直链可用性校验
 python tests/test_panels.py                     # 三个图片命令

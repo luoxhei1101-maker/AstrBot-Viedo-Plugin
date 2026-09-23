@@ -136,6 +136,9 @@ from .core.qq_buttons import button as qq_button
 from .core.qq_buttons import inline_cmd as qq_inline_cmd
 from .core.qq_buttons import keyboard as qq_keyboard
 from .core.qq_buttons import link_button as qq_link_button
+from .core.qq_voice import VOICE_FILE_TYPE as QQ_VOICE_FILE_TYPE
+from .core.qq_voice import encode_silk as qq_encode_silk
+from .core.qq_voice import silk_available as qq_silk_available
 from .core.service_status import (
     collect_system,
     fetch_avatar,
@@ -377,6 +380,22 @@ _MD_IMAGE_TEST_URL = (
 )
 # 一次最多嵌几张（QQ markdown 消息体有长度上限，别把 URL 堆爆）
 _MD_IMAGE_TEST_MAX = 6
+
+# 官机语音上传的超时（秒）。实测（2026-09-23，414KB silk）：
+#
+#     静置 150 秒后首次上传    8.28s   ✅
+#     紧接着 20 秒后再传一次   46.36s  ✅   ← 被腾讯侧排队
+#
+# 而且耗时**与体积无关**（561KB 6.52s / 293KB 44.83s / 250KB 35.59s）。
+# 用户点歌是零散的，所以正常命中「首次」那一档 —— 8 秒左右。
+# 25 秒给了三倍余量；再长就等于让用户干等（botpy 默认 15 秒配 3 次重试是 94 秒）。
+_QQ_UPLOAD_TIMEOUT = 25.0
+
+# 低于这个耗时就算「秒失败」，值得重试一次。
+#
+# 区分两种失败：**秒失败**多半是瞬时错误（重试有效）；**耗满超时**则是被
+# 腾讯侧排队了（重试只会更慢，还可能加剧排队）。所以只对前者重试。
+_QQ_UPLOAD_FAST_FAIL = 6.0
 
 # 需要 event / Context 才能干活、不走 resolver 注册表的命令。
 # 值是对应的方法名（用 getattr 取，避免类还没定义完就互相引用）。
@@ -2276,7 +2295,8 @@ class Main(Star):
 
         nodes = []
         skipped = 0
-        for url, path in zip(urls, paths):
+        # 只关心本地路径：`urls` 只是用来保持与 `paths` 一一对应
+        for _, path in zip(urls, paths):
             if path is None:
                 # 下载失败（防盗链 / 链接过期等）直接跳过，不要用 URL 塞进 Node——
                 # Node 转 base64 时会再下载一次，那张图再失败会拖垮整条合并转发。
@@ -3064,6 +3084,151 @@ class Main(Star):
             logger.warning(f"[R插件][上传] 接口没返回 file_info: {str(result)[:200]}")
         return file_info
 
+    # ==================================================================
+    # 官机语音：自己转 silk、自己上传 —— **超时和重试都由插件决定**
+    # ==================================================================
+    #
+    # 走适配器那条路（Record → to_path(tencent_silk) → upload_group_and_c2c_media）
+    # 有个要命的地方：botpy 的 BotHttp.timeout 是**实例级**属性，超时后 request()
+    # 直接返回 None，被 APIReturnNoneError 接住交给 tenacity 重试 3 次（退避 2/4/8s）。
+    # 腾讯接口一抖，用户就要干等 90+ 秒才被告知失败 —— 实测日志：
+    #
+    #     15:28:46 语音预转码完成 → 15:29:21 首次失败 → 15:30:12 第三次重试
+    #
+    # 自己走这条路，失败能在 30 秒内暴露并降级成链接。
+
+    async def _upload_qq_media(
+        self,
+        event: AstrMessageEvent,
+        data: bytes,
+        file_type: int,
+        *,
+        timeout: float = _QQ_UPLOAD_TIMEOUT,
+    ) -> str:
+        """（官机专属）上传富媒体，拿 ``file_info``；**超时由插件自己定**。
+
+        :param timeout: 上传超时（秒）。默认见 ``_QQ_UPLOAD_TIMEOUT`` ——
+            实测「冷却后首次上传」约 8 秒，25 秒留了三倍余量；而 botpy 的默认
+            15 秒配上 tenacity 重试 3 次会让用户干等 90+ 秒。
+        :return: ``file_info``；失败返回空串。**绝不抛异常**。
+        """
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        bot = getattr(event, "bot", None)
+        if raw is None or bot is None:
+            return ""
+        try:
+            from botpy.http import Route
+        except ImportError:
+            return ""
+
+        group_openid = getattr(raw, "group_openid", None)
+        openid = getattr(getattr(raw, "author", None), "user_openid", None)
+        body = {
+            "file_data": base64.b64encode(data).decode("ascii"),
+            "file_type": file_type,
+            "srv_send_msg": False,  # 只上传；发送由 _send_qq_payload 负责
+        }
+        if group_openid:
+            body["group_openid"] = group_openid
+            route = Route(
+                "POST", "/v2/groups/{group_openid}/files", group_openid=group_openid
+            )
+        elif openid:
+            body["openid"] = openid
+            route = Route("POST", "/v2/users/{openid}/files", openid=openid)
+        else:
+            return ""
+
+        http = getattr(getattr(bot, "api", None), "_http", None)
+        if http is None:
+            return ""
+
+        # botpy 的 timeout 没有 per-request 参数，只能临时改实例属性、用完恢复。
+        # 官机上传是低频操作（一次点歌一次），撞车概率可忽略。
+        saved = getattr(http, "timeout", None)
+        try:
+            http.timeout = timeout
+            result = await http.request(route, json=body)
+        except Exception as exc:  # noqa: BLE001
+            logger.info(f"[R插件][语音] 上传异常: {type(exc).__name__}: {exc}")
+            return ""
+        finally:
+            if saved is not None:
+                http.timeout = saved
+
+        if isinstance(result, dict):
+            return str(result.get("file_info") or "")
+        logger.info(f"[R插件][语音] 上传没返回 dict: {str(result)[:120]}")
+        return ""
+
+    async def _send_qq_voice(self, event: AstrMessageEvent, wav_path) -> bool:
+        """（官机专属）本地转 silk → 上传 → 发语音条。
+
+        :param wav_path: **16kHz 单声道 16bit** 的 wav（``_music_to_voice_wav``
+            的产物）。格式不符会直接返回 False —— 不在热路径上偷偷重采样。
+        :return: 是否成功。**失败时调用方必须降级发链接**，别让用户空等。
+        """
+        if not qq_silk_available():
+            logger.debug("[R插件][语音] 环境没有 pysilk，退回适配器路径")
+            return False
+
+        try:
+            # pysilk 是同步 C 调用，一首 4 分半的歌要跑 20 秒 ——
+            # 放主线程会把整个 event loop 堵死（这正是我们要绕开的坑）。
+            silk = await asyncio.to_thread(qq_encode_silk, str(wav_path))
+        except Exception as exc:  # noqa: BLE001
+            logger.info(f"[R插件][语音] silk 编码异常: {type(exc).__name__}: {exc}")
+            return False
+        if not silk:
+            logger.info("[R插件][语音] silk 编码失败（格式不符或无 pysilk），退回适配器路径")
+            return False
+        try:
+            src_kb = Path(wav_path).stat().st_size // 1024
+        except OSError:  # 文件刚好被清掉也不该让日志把这次发送带崩
+            src_kb = 0
+        logger.info(
+            f"[R插件][语音] silk 编码完成: {len(silk) // 1024}KB（源 wav {src_kb}KB）"
+        )
+
+        t0 = time.monotonic()
+        # 实测（2026-09-23，414KB silk）：静置后首次上传 **8.28 秒**；
+        # 紧接着再传一次则是 46.36 秒 —— 腾讯侧对连续上传会**排队**，而且
+        # 耗时与体积无关（561KB 反而比 293KB 快）。
+        # 用户点歌是零散的，正常命中「首次」那一档，所以 25 秒足够从容。
+        file_info = await self._upload_qq_media(event, silk, QQ_VOICE_FILE_TYPE)
+        elapsed = time.monotonic() - t0
+
+        # 只对「秒失败」重试：那多半是瞬时错误。耗满超时的说明被排队了，
+        # 再试一次只会更慢，还会让别人排得更久。
+        if not file_info and elapsed < _QQ_UPLOAD_FAST_FAIL:
+            logger.info(
+                f"[R插件][语音] 秒失败（{elapsed:.1f}s），1.5 秒后重试一次"
+            )
+            await asyncio.sleep(1.5)
+            t0 = time.monotonic()
+            file_info = await self._upload_qq_media(event, silk, QQ_VOICE_FILE_TYPE)
+            elapsed = time.monotonic() - t0
+
+        if not file_info:
+            logger.info(
+                f"[R插件][语音] 上传失败（{elapsed:.1f}s），降级发链接"
+            )
+            return False
+        logger.info(
+            f"[R插件][语音] 上传成功（{elapsed:.1f}s）file_info={file_info[:18]}…"
+        )
+
+        # content=None 是照着适配器抄的：它发富媒体时一定会带这个字段，
+        # 缺了服务端可能把这条判成无效（表现是客户端「加载失败」）。
+        return await self._send_qq_payload(
+            event,
+            {
+                "msg_type": 7,
+                "media": {"file_info": file_info},
+                "content": None,
+            },
+        )
+
     async def _send_qq_image_only(
         self, event: AstrMessageEvent, png: bytes
     ) -> bool:
@@ -3836,7 +4001,14 @@ class Main(Star):
                 )
 
         fields = parse_cookie_keys(value)
-        tail = "" if force else ""
+        # 强制写入时没有走 `check_cookie`，回执里必须说清楚 ——
+        # 否则用户以为「保存成功 = 凭据没问题」，之后用不了会一头雾水。
+        tail = (
+            "\n⚠️ 这次是**强制写入**（跳过了字段检查）。如果之后用不了，"
+            "先怀疑这串凭据本身。"
+            if force
+            else ""
+        )
         return (
             f"✅ {label} 的 Cookie 已保存：{len(value)} 字符 / {len(fields)} 个字段{cleared}\n"
             f"发 `#cookie状态` 可以校验它现在是否有效。{tail}"
@@ -4830,10 +5002,11 @@ class Main(Star):
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[R插件] 语音预转码异常: {type(exc).__name__}: {exc}")
             return None
-        if result.ok and out.exists() and out.stat().st_size > 0:
+        out_size = out.stat().st_size if out.exists() else 0
+        if result.ok and out_size > 0:
             logger.info(
                 f"[R插件] 语音预转码: {src.stat().st_size // 1024}KB -> "
-                f"{out.stat().st_size // 1024}KB（16k 单声道，框架将跳过二次转码）"
+                f"{out_size // 1024}KB（16k 单声道，框架将跳过二次转码）"
             )
             return out
         logger.debug("[R插件] 语音预转码失败（ffmpeg 非 0），退回原文件")
@@ -4902,6 +5075,21 @@ class Main(Star):
             event.track_temporary_local_file(str(path))
         except Exception:  # noqa: BLE001 - 老版本可能没这个方法
             pass
+
+        # 官机：自己转 silk + 自己上传发送。走适配器的话，腾讯上传接口一抖就要
+        # 重试 3 次、用户干等 90 秒才被告知失败（详见 _send_qq_voice 的说明）。
+        # 预转失败（small is None）时不走这条 —— 非 16k 单声道的输入不在
+        # encode_silk 的处理范围内，硬走只会白折腾。
+        if caps.key == "qqofficial" and small is not None and qq_silk_available():
+            if await self._send_qq_voice(event, path):
+                event.stop_event()
+                return
+            yield event.plain_result(
+                f"🎵「{song.label}」语音上传超时（QQ 接口不稳），先给链接：\n"
+                f"{song.page_url}\n（过一会儿再点一次通常就好了）"
+            )
+            event.stop_event()
+            return
 
         try:
             comp = Comp.Record.fromFileSystem(str(path))
