@@ -139,12 +139,21 @@ def _install_astrbot_stubs() -> None:
 
 
 class _Event:
-    def __init__(self, text="", umo="test:GroupMessage:100"):
+    def __init__(self, text="", umo="test:GroupMessage:100", platform="aiocqhttp"):
         self._text = text
         self.unified_msg_origin = umo
+        self._platform = platform
         self.out: list = []
         self.tracked: list = []
         self.stopped = False
+
+    # v1.6.8 起发送形态要按平台能力决策，事件必须能报自己是什么协议端。
+    # 默认给 aiocqhttp（OneBot v11）—— 它能用合并转发，是本文件测的形态。
+    def get_platform_name(self) -> str:
+        return self._platform
+
+    def get_platform_id(self) -> str:
+        return "test_instance"
 
     def get_message_str(self) -> str:
         return self._text
@@ -338,6 +347,31 @@ def behavior_checks() -> None:
     check_true("转发：没有单独发「识别成功」提示",
                all(k != "plain" for k, _ in out))
 
+    # ---- v1.6.8：官方机器人即使开了转发，也必须回落直发 ----
+    # 官方（botpy）没有合并转发消息段，硬走会让整条消息链发送失败，
+    # 用户看到的是「什么都没发出来」—— 所以能力表优先级高于配置开关。
+    plugin = FakePlugin({
+        "plugin.show_desc": True,
+        "plugin.send_as_forward": True,
+    })
+    check("官机：_forward_enabled 被能力表短路为 False（关键）",
+          plugin._forward_enabled(_Event(platform="qqofficial")), False)
+    check("OneBot：同一份配置下仍然允许转发",
+          plugin._forward_enabled(_Event()), True)
+    check("未知协议端：保守回落，不发转发",
+          plugin._forward_enabled(_Event(platform="some_new_platform")), False)
+
+    out = asyncio.run(
+        _collect(plugin._render(_Event(platform="qqofficial"), result))
+    )
+    check_true("官机：产出多条消息（没有塌成一条合并转发）",
+               len(out) >= 2, str([k for k, _ in out]))
+    check_true("官机：没有任何合并转发消息",
+               all(_node_count(i) < 0 for i in out if i[0] == "chain"),
+               str([k for k, _ in out]))
+    check_true("官机：媒体仍然是单独一条 chain_result",
+               any(k == "chain" for k, _ in out))
+
     # ---- show_desc 关闭 ----
     plugin = FakePlugin({
         "plugin.show_desc": False,
@@ -461,10 +495,17 @@ def source_checks() -> None:
                "_render_body" in render_body)
     body_fn = _fn("_render_body")
     body_src = ast.get_source_segment(src, body_fn) if body_fn else ""
-    check_true("_render_body 里判断了 _forward_enabled()",
-               "_forward_enabled()" in body_src)
+    check_true("_render_body 里判断了 _forward_enabled(带 event)",
+               "_forward_enabled(event)" in body_src)
     check_true("_render_body 会调用 _render_forward", "_render_forward" in body_src)
     check_true("_render_body 会调用 _render_direct", "_render_direct" in body_src)
+
+    # v1.6.8：合并转发要受「平台能力」管 —— QQ 官方机器人没有合并转发消息段，
+    # 配置开着也不能走，否则整条消息链发送失败（用户看到「什么都没发出来」）
+    fwd = _fn("_forward_enabled")
+    fwd_src = ast.get_source_segment(src, fwd) if fwd else ""
+    check_true("_forward_enabled 会查平台能力", "_caps(event)" in fwd_src)
+    check_true("_forward_enabled 对官方机器人短路", "not self._caps(event).forward" in fwd_src)
 
 
 def main() -> int:

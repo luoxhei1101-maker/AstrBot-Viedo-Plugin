@@ -340,15 +340,25 @@ class _Conf(dict):
 
 
 class _Event:
-    def __init__(self, text, umo="test:PrivateMessage:100", private=True):
+    def __init__(
+        self, text, umo="test:PrivateMessage:100", private=True, platform="aiocqhttp"
+    ):
         self._text = text
         self.unified_msg_origin = umo
         self._private = private
+        self._platform = platform
         self.out: list = []
         self.stopped = False
 
     def get_message_str(self) -> str:
         return self._text
+
+    def get_platform_name(self) -> str:
+        """协议端名 —— 分协议端配置就靠它分流。"""
+        return self._platform
+
+    def get_platform_id(self) -> str:
+        return f"test_{self._platform}"
 
     def get_sender_id(self) -> str:
         return "2593504303"
@@ -395,8 +405,9 @@ def behavior_checks() -> None:
             self.conf_data = _Conf(data or {})
             self._cookie_pending = {}
 
-    def send(plugin, text, private=True, umo="test:PrivateMessage:100"):
-        ev = _Event(text, umo=umo, private=private)
+    def send(plugin, text, private=True, umo="test:PrivateMessage:100",
+             platform="aiocqhttp"):
+        ev = _Event(text, umo=umo, private=private, platform=platform)
         return asyncio.run(_collect(plugin.cmd_r_config(ev))), ev
 
     # ---------------- 平台开关 ----------------
@@ -432,20 +443,54 @@ def behavior_checks() -> None:
     # ---------------- 发送形式 ----------------
     print("-- 发送形式 --")
     plugin = FakePlugin()
-    check("默认直发（关闭转发）", plugin._forward_enabled(), False)
+    _, ev0 = send(plugin, "#R配置 形式")
+    check("默认直发（关闭转发）", plugin._forward_enabled(ev0), False)
 
     _, ev = send(plugin, "#R配置 形式 聊天记录")
-    check("切到聊天记录转发", plugin.conf_data["plugin"]["send_as_forward"], True)
-    check("_forward_enabled 跟随", plugin._forward_enabled(), True)
+    # ★ 关键：分协议端模式下，写入必须重定向到当前协议端那一份。
+    # 写进旧键的话「命令回了成功但行为没变」，是最难查的一类 bug。
+    check("切到聊天记录转发 → 写进当前协议端那份",
+          plugin.conf_data["profiles"]["onebot"]["send_as_forward"], True)
+    check("分协议端模式下不动旧键",
+          plugin.conf_data.get("plugin", {}).get("send_as_forward"), None)
+    check("_forward_enabled 跟随", plugin._forward_enabled(ev), True)
 
     _, ev = send(plugin, "#R配置 形式 直发")
-    check("切回直发", plugin.conf_data["plugin"]["send_as_forward"], False)
+    check("切回直发", plugin.conf_data["profiles"]["onebot"]["send_as_forward"], False)
 
     _, ev = send(plugin, "#R配置 形式")
     check_true("不带值显示当前状态", "直发" in _texts(ev), _texts(ev)[:60])
 
     _, ev = send(plugin, "#R配置 形式 随便")
     check_true("非法值有提示", "只认「聊天记录」或「直发」" in _texts(ev), _texts(ev)[:80])
+
+    # 官机没有合并转发消息段：要说清楚，且不能把配置写脏
+    qo = FakePlugin()
+    _, ev = send(qo, "#R配置 形式 聊天记录", platform="qqofficial")
+    check_true("官机上切转发 → 明确说明不支持", "没有合并转发" in _texts(ev),
+               _texts(ev)[:80])
+    check("官机上不写这份配置",
+          qo.conf_data.get("profiles", {}).get("qqofficial", {}).get("send_as_forward"),
+          None)
+
+    # 「通用」配置来源时回到旧键
+    shared = FakePlugin({"profiles": {"mode": "shared"}})
+    send(shared, "#R配置 形式 聊天记录")
+    check("通用模式下写旧键", shared.conf_data["plugin"]["send_as_forward"], True)
+
+    # 两份配置互不干扰：官机上执行命令，不该碰到 OneBot 那份
+    both = FakePlugin()
+    send(both, "#R配置 形式 聊天记录", platform="aiocqhttp")
+    send(both, "#R配置 形式 直发", platform="qqofficial")
+    check("OneBot 那份开着了",
+          both.conf_data["profiles"]["onebot"]["send_as_forward"], True)
+    check("官机那份没被写（官机不支持转发，命令被拒）",
+          both.conf_data["profiles"].get("qqofficial"), None)
+
+    # 查看当前协议端这份配置
+    _, ev = send(plugin, "#R配置 协议端")
+    check_true("#R配置 协议端 → 显示配置来源与协议端",
+               "配置来源" in _texts(ev) and "OneBot" in _texts(ev), _texts(ev)[:90])
 
     # ---------------- 点歌 ----------------
     print("-- 点歌设置 --")
@@ -462,13 +507,35 @@ def behavior_checks() -> None:
     _, ev = send(plugin, "#R配置 点歌 数量 abc")
     check_true("数量非数字被拦", "不是数字" in _texts(ev), _texts(ev)[:60])
 
+    # 发送方式 / 点歌方式属于「发送形态」，只改当前协议端那份
     send(plugin, "#R配置 点歌 发送 卡片")
-    check("发送方式 -> sendMode", plugin.conf_data["music"]["sendMode"], "card")
+    check("发送方式 → 当前协议端那份",
+          plugin.conf_data["profiles"]["onebot"]["music_send_mode"], "card")
+    check("分协议端模式下不动 music.sendMode",
+          plugin.conf_data.get("music", {}).get("sendMode"), None)
     _, ev = send(plugin, "#R配置 点歌 发送 空投")
     check_true("非法发送方式被拦", "只认" in _texts(ev), _texts(ev)[:60])
 
     send(plugin, "#R配置 点歌 方式 直接")
-    check("方式 -> searchMode", plugin.conf_data["music"]["searchMode"], "direct")
+    check("方式 → 当前协议端那份",
+          plugin.conf_data["profiles"]["onebot"]["music_search_mode"], "direct")
+    check("分协议端模式下不动 music.searchMode",
+          plugin.conf_data.get("music", {}).get("searchMode"), None)
+
+    # 官机那份默认是 voice（它没有音乐卡片消息段）
+    qo2 = FakePlugin()
+    _, ev = send(qo2, "#R配置 点歌")
+    check_true("官机点歌默认显示语音", "voice" in _texts(ev), _texts(ev)[:120])
+    _, ev = send(qo2, "#R配置 点歌 发送 卡片", platform="qqofficial")
+    check_true("官机设卡片会提示降级成语音", "降级成语音" in _texts(ev), _texts(ev)[:120])
+
+    # 只在本协议端互不影响
+    mixed = FakePlugin()
+    send(mixed, "#R配置 点歌 发送 链接", platform="qqofficial")
+    check("官机那份改了",
+          mixed.conf_data["profiles"]["qqofficial"]["music_send_mode"], "link")
+    check("OneBot 那份没被碰",
+          mixed.conf_data["profiles"].get("onebot"), None)
 
     send(plugin, "#R配置 点歌 开关 开")
     check("开关 -> music.enable", plugin.conf_data["music"]["enable"], True)

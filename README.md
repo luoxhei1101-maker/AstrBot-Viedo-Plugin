@@ -9,7 +9,7 @@
 >
 > 原项目 README 的声明同样适用：素材来源于网络，仅供交流学习使用，**严禁用于任何商业用途和非法行为**。
 
-**当前版本：v1.6.7** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
+**当前版本：v1.6.8** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
 
 <p align="center">
   <img src="https://q1.qlogo.cn/g?b=qq&nk=2593504303&s=640" width="104" height="104" alt="NaiLuo" />
@@ -28,6 +28,8 @@
 - **扫码登录**：`#RNQ` 网易云、`#RBQ` B站，扫码后 Cookie 自动写进配置
 - **三个状态图**：`#R菜单` 功能菜单、`#cookie状态` 一眼看清哪些 Cookie 失效、`#服务状态` 服务器负载
 - **聊天里改配置**：`#R配置` 开关某个平台的解析、私信设置 Cookie、把解析内容切成「聊天记录」——不用开网页
+- **OneBot v11 与 QQ 官方机器人各一份配置**：合并转发 / 音乐卡片 / markdown 按钮按协议端自动分流，
+  官机上不会出现「配了却发不出去」的选项（详见[分协议端配置](#分协议端配置一个机器人一套)）
 - **部署形态不受限**：AstrBot 与协议端是否同容器都能发视频（详见[推荐部署环境](#推荐部署环境)）
 
 ---
@@ -431,6 +433,7 @@ QQ点歌 晴天          → 强制走 QQ 音乐
 | 分组 | 内容 |
 |---|---|
 | `plugin` | 移植版自己的开关：总开关、启用平台、图片背景 API、发送方式、下载并发… |
+| **`profiles`** | **分协议端配置**：OneBot v11 / QQ 官方机器人 / 其它，各一份（见下节） |
 | `global` | 全局黑名单、转发阈值、代理、视频编码、识别前缀 |
 | `bili` | SESSDATA、画质、下载方式、显示项、评论 |
 | `douyin` | Cookie、时长、压缩、评论、背景音乐 |
@@ -458,10 +461,76 @@ QQ点歌 晴天          → 强制走 QQ 音乐
 | `music.enableSignProxy` | 开 | 音乐卡片签名代理 |
 | `music.signProxyPort` | 18888 | 代理端口（与协议端 `musicSignUrl` 要一致） |
 
+> ⚠️ **上表中带「发送形态」性质的项**（`send_mode`、`send_as_forward`、`max_images`、
+> `album_forward_when_exceed`、`music.sendMode`、`music.searchMode`、`download_concurrency`、
+> `mdImageWidth`、`qqButtons`、`enableSignProxy`）在 **v1.6.8 起改为按协议端分开配置** ——
+> 见下面的「[分协议端配置](#分协议端配置一个机器人一套)」。那几项在这里的值只在
+> `profiles.mode = 通用` 时生效；默认（分协议端）模式下读的是 `profiles.<协议端>` 那一份。
+> 想让某个平台的旧值继续生效，把 `profiles.mode` 改成「通用」即可。
+
 > **改过配置项位置的历史**：v1.3.0 起点歌从 `netease` 分组独立成 `music` 分组，并删掉
 > 一批从未生效的遗留项（网易云自建 API / 云盘 / 发语音开关 / 全部酷狗配置）。
 > 若从旧版升级，插件会**自动把旧位置的 Cookie 搬过来**；旧的 `netease` 分组会保留
 > 一小段时间用于搬运（描述里标了「已废弃，可忽略」）。
+
+### 分协议端配置（一个机器人一套）
+
+同一份配置里，OneBot v11 和 QQ 官方机器人的**发送能力根本不是一回事**：
+
+| | OneBot v11 | QQ 官方机器人 |
+|---|---|---|
+| 合并转发（聊天记录） | ✅ | ❌（适配器没有这个消息段） |
+| 音乐卡片 | ✅ | ❌ |
+| 原生 markdown | ❌ | ✅（还能挂消息按钮） |
+
+所以「用聊天记录发送」「点歌发送方式=音乐卡片」这类选项，在官机上**怎么调都发不出去**。
+v1.6.8 起把它们拆成**每个协议端一份**，放在 `profiles` 分组：
+
+```
+profiles
+├── mode            ← 配置来源：分协议端（默认）/ 通用
+├── onebot          ← OneBot v11 专用（12 项）
+├── qqofficial      ← QQ 官方机器人专用（11 项）
+└── fallback        ← 其它协议端（微信 / 钉钉 / Telegram…，9 项）
+```
+
+**AstrBot 的面板没有「选项卡」控件**（插件 schema 只支持
+`bool/int/string/text/list/object/template_list`），所以这里用**可折叠分组**代替 ——
+展开哪一组就改哪一组，效果等价。
+
+**各组的默认值就是该平台最合理的值**，开箱即用：
+
+| 配置 | OneBot | 官机 | 说明 |
+|---|---|---|---|
+| `send_as_forward` | 关 | — | 官机没有这一项（配了也不生效） |
+| `album_forward_when_exceed` | 开 | 关 | 官机没有合并转发 |
+| `music_send_mode` | `link` | **`voice`** | 官机没音乐卡片，语音是唯一能「听到歌」的形态 |
+| `download_concurrency` | 8 | 4 | 官方接口对并发更敏感 |
+| `md_image_width` | — | 300 | 官机专属：markdown 内嵌图宽度 |
+| `qq_buttons` | — | 开 | 官机专属：菜单/列表下挂按钮 |
+| `enable_sign_proxy` | 开 | — | OneBot 专属：音乐卡片签名代理 |
+
+#### 三个要知道的点
+
+1. **`mode` 选「通用」就回到升级前的行为** —— 所有值都从 `plugin.*` / `music.*`
+   里的旧位置读。老配置不想动的话选它。
+
+2. **升级不会改变你现有的行为。** 取值优先级是「面板里显式改过的 → 你改过的旧配置
+   → 该协议端默认值」。所以以前设的 `plugin.send_as_forward=true` 照样生效，
+   不会被新分组的默认值顶掉。
+
+3. **能力高于偏好。** 官机上就算把 `music_send_mode` 设成 `card`，
+   插件也会自动降级成 `voice` —— 不然就是发一条必然失败的消息。
+
+#### 怎么查当前生效的是哪一份
+
+```
+#R配置 协议端      ← 按你说话的这个机器人回答，列出它这份的全部取值
+#R平台            ← 简版：能力 + 配置来源
+```
+
+`#R配置 形式` 和 `#R配置 点歌 发送` 这类命令**只改当前协议端那份**，
+回执里也会写明「只影响 XXX 这份配置」。
 
 ---
 
@@ -697,6 +766,9 @@ python tests/test_music_config.py               # 配置迁移
 python tests/test_music_pick.py                 # 序号点播
 python tests/test_music_card_image_perf.py      # 点歌列表图出图性能（小图 URL / 缓存 / 线程池）
 python tests/test_comment_image.py              # 评论图片 / 动图提取（纯图评论不再被丢）
+python tests/test_platform_caps.py              # 协议端能力表（合并转发 / 卡片 / MD / 按钮）
+python tests/test_platform_profiles.py          # 分协议端配置（含 schema 一致性）
+python tests/test_qq_buttons.py                 # 官机按钮 / markdown 内联指令
 python tests/test_music_sign_proxy.py           # 音乐卡片签名代理
 python tests/test_music_url_guard.py            # 音频直链可用性校验
 python tests/test_panels.py                     # 三个图片命令
@@ -710,6 +782,12 @@ python tests/test_card_link.py                  # 分享卡片链接提取
 AstrBot 会在插件代码执行前**按 schema 裁剪配置**，schema 里没有的键写进去当时有效、
 下次启动就被删掉（v1.3.0 丢过一整套 Cookie）。以后新增可写配置项，这条断言会
 直接把漏改 schema 的情况拦下来。
+
+`test_platform_profiles.py` 把同一条守得更死：**代码里的每个 `profiles.*` 字段
+都必须能在 schema 里找到**，而且两边默认值要一致 —— 不一致的后果是
+**面板显示一个值、插件实际用另一个值**，用户怎么调都调不对。
+它还比对了 `SHARED_DEFAULTS` 与 schema 里旧键的默认值（不一致会让
+「用户改没改过」的判断失准）。
 
 几个测试做了**环境自适应**：本机自动桩出最小 AstrBot API，容器里则用真实 AstrBot。
 所以同一份文件可以直接丢进容器跑，**验证的是已部署的那份代码**：

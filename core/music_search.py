@@ -578,7 +578,12 @@ async def get_play_url(
 ) -> str:
     """按需取音频直链。取不到返回空串（调用方落回 ``page_url``）。"""
     if song.platform == "netease":
-        return await netease_play_url(song, netease_cookie, DEFAULT_LEVEL)
+        # high=False 走标准音质（128k）。下载体积只有 exhigh 的约 1/3，而语音条
+        # 最终会被协议端转成窄带 silk —— 听感没差别，白等下载才是亏。
+        # （之前这里恒传 DEFAULT_LEVEL，所以 high 参数对网易云是失效的。）
+        return await netease_play_url(
+            song, netease_cookie, DEFAULT_LEVEL if high else "standard"
+        )
     if song.platform == "qqmusic":
         return await qqmusic_play_url(song, qq_cookie, high)
     return ""
@@ -908,7 +913,7 @@ async def _post_qqm(
                 logger.warning(f"[R插件] {tag} 请求异常: {type(exc).__name__}: {exc}")
                 _QQM_LAST = loop.time()
                 if attempt < retries:
-                    await asyncio.sleep(1.0 * (attempt + 1))
+                    await asyncio.sleep(0.6 * (attempt + 1))
                     continue
                 return None
 
@@ -928,6 +933,9 @@ async def _post_qqm(
                 logger.info(
                     f"[R插件] {tag} 被限流（code=2001），重试 {attempt + 1}/{retries}"
                 )
+                # ⚠️ 退避**别缩太短**。试过 0.8s 起步，实测三次重试**全部被拒**
+                # （间隔太短＝连续打同一个节点，更容易触发限流），反而比原来的
+                # 1.5s 更慢。2001 虽然是随机拒绝，但「等一下再换节点」确实有用。
                 await asyncio.sleep(1.5 * (attempt + 1))
             else:
                 logger.warning(f"[R插件] {tag} 重试 {retries} 次仍被限流，放弃")

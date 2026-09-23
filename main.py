@@ -44,9 +44,12 @@ Yunzai                        AstrBot
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import platform as _platform
+import random
 import re
+import tempfile
 import time
 from pathlib import Path
 
@@ -83,7 +86,7 @@ from .core.downloader import (
     download_many,
     download_many_candidates,
 )
-from .core.external import describe_environment, find_tool
+from .core.external import describe_environment, find_tool, run
 from .core.http import HttpError, close_session as close_http_session
 from .core.media import (
     MergeError,
@@ -116,6 +119,23 @@ from .core.panels import (
     render_menu,
     render_service_status,
 )
+from .core.platform_caps import (
+    PlatformCaps,
+    caps_for,
+    describe as describe_caps,
+    platform_id as caps_platform_id,
+)
+from .core.platform_profiles import (
+    describe as describe_profiles,
+    group_for as profile_group,
+    is_shared as profiles_is_shared,
+    save_path as profile_save_path,
+    value as profile_value,
+)
+from .core.qq_buttons import button as qq_button
+from .core.qq_buttons import inline_cmd as qq_inline_cmd
+from .core.qq_buttons import keyboard as qq_keyboard
+from .core.qq_buttons import link_button as qq_link_button
 from .core.service_status import (
     collect_system,
     fetch_avatar,
@@ -350,11 +370,28 @@ class BiliMiniappFilter(CustomFilter):
         return False
 
 
+# 「多图 MD」自检用的内置图。腾讯官方文档自己的 CDN 图 —— 公网必然可达，
+# 用它当基线才能区分「语法不通」和「你的图拉不到」这两种失败。
+_MD_IMAGE_TEST_URL = (
+    "https://qq-ai.cdn-go.cn/web/bot-docs/-/v1.32.0/assets/img/image-send.35813305.jpg"
+)
+# 一次最多嵌几张（QQ markdown 消息体有长度上限，别把 URL 堆爆）
+_MD_IMAGE_TEST_MAX = 6
+
 # 需要 event / Context 才能干活、不走 resolver 注册表的命令。
 # 值是对应的方法名（用 getattr 取，避免类还没定义完就互相引用）。
 _LOCAL_COMMAND_METHODS: dict[str, str] = {
     "bili_scan": "cmd_bili_scan",
     "bili_state": "cmd_bili_state",
+    # 平台能力：要看 event 才知道是哪个协议端
+    "platform_caps": "cmd_platform_caps",
+    "platform_test": "cmd_platform_test",
+    # 多图 MD 自检：要按 event 判断协议端是否有原生 markdown
+    "md_image": "cmd_md_image",
+    # 官机专属：按钮自检 / 免艾特指引 / 解析说明
+    "buttons_test": "cmd_buttons_test",
+    "no_at": "cmd_no_at",
+    "resolve_help": "cmd_resolve_help",
     # 点歌搜索：要读配置里的 Cookie + 按平台搜索，不适合走「链接 -> 媒体」
     # 那套 resolver 接口（resolver 的入参是 URL，而这里是关键词）。
     "music_search": "cmd_music_search",
@@ -631,13 +668,26 @@ class Main(Star):
             "也可以在 WebUI 插件配置里勾选"
         )
 
+    def _sign_proxy_enabled(self) -> bool:
+        """音乐卡片签名代理的开关（``profiles.onebot.enable_sign_proxy``）。
+
+        **固定按 OneBot 读，不按事件**：签名代理是插件启动时起的常驻服务
+        （那时还没有消息事件），而且它只服务 OneBot 协议端 ——
+        官方机器人根本不发音乐卡片。选「通用」配置来源时自动读
+        ``music.enableSignProxy``。
+        """
+        return bool(profile_value(
+            self._platform_profiles(), "aiocqhttp", "enable_sign_proxy",
+            self.conf_get, True,
+        ))
+
     async def _start_sign_proxy(self) -> None:
         """按配置启动音乐卡片签名代理。
 
         关掉它只影响「音乐卡片」这一种发送方式（voice/file/link 都不依赖
         签名服务，因为那些不走 lightApp 卡片）。
         """
-        if not self.conf_get("music.enableSignProxy", True):
+        if not self._sign_proxy_enabled():
             logger.info("[R插件] 音乐卡片签名代理已在配置里关闭")
             return
         port = int(self.conf_get("music.signProxyPort", 18888) or 18888)
@@ -834,13 +884,88 @@ class Main(Star):
             return set()
         return {str(x) for x in raw}
 
-    def _forward_enabled(self) -> bool:
+    # ==================================================================
+    # 平台能力（OneBot v11 / QQ 官方机器人 …）
+    # ==================================================================
+
+    def _platform_profiles(self) -> dict:
+        """配置里的「分协议端配置」分组（``profiles``）。
+
+        形态见 ``core/platform_profiles.py``::
+
+            {"mode": "per_platform",
+             "onebot": {...}, "qqofficial": {...}, "fallback": {...}}
+
+        ``mode=per_platform``（默认）时按事件来自哪个协议端取对应那一组；
+        ``mode=shared`` 时全部回到 ``plugin.*`` / ``music.*`` 里的旧值。
+
+        ⚠️ **这个键必须存在 ``_conf_schema.json`` 里**：AstrBot 会在插件代码
+        执行前按 schema 裁剪配置，schema 里没有的键读出来永远是空的
+        （v1.6.7 的 ``plugin.platformProfiles`` 就是这么变成死代码的）。
+        """
+        raw = self.conf_get("profiles", None)
+        return raw if isinstance(raw, dict) else {}
+
+    def _caps_key(self, event: AstrMessageEvent | None) -> str:
+        """当前事件的协议端 key（``aiocqhttp`` / ``qqofficial`` …）。"""
+        if event is None:
+            return ""
+        try:
+            return self._caps(event).key
+        except Exception as exc:  # noqa: BLE001 - 探测失败按未知处理
+            logger.debug(f"[R插件] 协议端探测失败: {exc}")
+            return ""
+
+    def conf_plat(self, event: AstrMessageEvent | None, field: str, default=None):
+        """读「发送形态」配置 —— **按当前协议端各读各的**。
+
+        为什么要有这一层：OneBot 能发合并转发和音乐卡片，QQ 官方机器人
+        两样都没有，但能发原生 markdown。把两边的偏好混在一个配置里，
+        官机用户看到「用聊天记录」这种选项只能一脸问号。
+
+        取值的完整优先级见 ``core/platform_profiles.value()``：
+        分协议端模式下读 ``profiles.<组>.<字段>``，缺失才落到该组默认值。
+
+        Args:
+            event: 当前消息事件。传 ``None``（后台任务、配置面板）时按
+                「未知协议端」处理 —— 落在 ``fallback`` 组，取保守值。
+            field: 字段名（见 ``core/platform_profiles.FIELDS``）。
+        """
+        return profile_value(
+            self._platform_profiles(),
+            self._caps_key(event),
+            field,
+            self.conf_get,
+            default,
+        )
+
+    def _caps(self, event: AstrMessageEvent | None) -> PlatformCaps:
+        """当前事件所属协议端的能力表。
+
+        所有「能不能发合并转发 / 音乐卡片 / 原生 MD」的判断都走这里。
+        QQ 官方机器人不支持前两者，配置里开着也不该走 —— 硬发会让
+        **整条消息链失败**（用户看到的是「什么都没发出来」）。
+        """
+        try:
+            return caps_for(event)
+        except Exception as exc:  # noqa: BLE001 - 探测失败不能拖垮发送
+            logger.debug(f"[R插件] 平台能力探测失败，按最保守能力处理: {exc}")
+            return caps_for(None)
+
+    def _forward_enabled(self, event: AstrMessageEvent | None = None) -> bool:
         """解析内容是否用「聊天记录（合并转发）」发送。
 
-        由 ``plugin.send_as_forward`` 控制；聊天里可用
+        由 ``profiles.<协议端>.send_as_forward`` 控制（选「通用」配置来源时
+        读 ``plugin.send_as_forward``）；聊天里可用
         ``#R配置 形式 聊天记录`` / ``#R配置 形式 直发`` 随时切换。
+
+        **但平台能力优先**：QQ 官方机器人（botpy）没有合并转发消息段，
+        配置开着也会整条发送失败，所以这里强制回落到直发。
+        ``event`` 为 None（配置面板展示等场景）时只看配置开关。
         """
-        return bool(self.conf_get("plugin.send_as_forward", False))
+        if event is not None and not self._caps(event).forward:
+            return False
+        return bool(self.conf_plat(event, "send_as_forward", False))
 
     # ==================================================================
     # 入口一：自动识别分享链接
@@ -1004,7 +1129,7 @@ class Main(Star):
         if not self.conf_get("plugin.enable", True):
             return
 
-        if self.conf_get("plugin.only_group", False) and event.is_private_chat():
+        if self.conf_plat(event, "only_group", False) and event.is_private_chat():
             return
 
         urls = extract_urls(text)
@@ -1079,7 +1204,7 @@ class Main(Star):
                             yield item
                     else:
                         logger.warning(f"[R插件] {result.platform} 解析失败: {result.error}")
-                        if result.error and self.conf_get("plugin.reply_on_error", False):
+                        if result.error and self.conf_plat(event, "reply_on_error", False):
                             yield event.plain_result(f"❌ {result.platform}：{result.error}")
                 else:
                     # 拿到了信息但没有媒体（比如 B 站限流拿不到直链），把文字情报发出去
@@ -1165,7 +1290,7 @@ class Main(Star):
         """
         # 识别前缀沿用原 Guoba 面板配置；原版默认空串，这里给个更直观的兜底
         prefix = str(self.conf_get("global.identifyPrefix", "") or "").strip() or "🔗 识别："
-        show_desc = bool(self.conf_get("plugin.show_desc", True))
+        show_desc = bool(self.conf_plat(event, "show_desc", True))
 
         # ---- 纯文本类结果（AI 总结 / 翻译）----
         # 这类结果本身没有媒体，包成聊天记录只会多一层翻页，永远直发
@@ -1173,7 +1298,7 @@ class Main(Star):
             yield event.plain_result(f"{prefix}{result.platform}\n{result.desc}")
             return
 
-        if self._forward_enabled():
+        if self._forward_enabled(event):
             async for item in self._render_forward(event, result, prefix, show_desc):
                 yield item
         else:
@@ -1258,7 +1383,7 @@ class Main(Star):
 
         # ---- 视频直链 ----
         if result.videos and not skip_videos:
-            send_mode = self.conf_get("plugin.send_mode", "url")
+            send_mode = self.conf_plat(event, "send_mode", "url")
             local_path: str | None = None
             if send_mode == "download":
                 local_path, oversize_msg = await self._download_video(result)
@@ -1279,7 +1404,7 @@ class Main(Star):
                     logger.warning(f"[R插件] 发送下载后的视频失败: {exc}")
 
             if not sent_media:
-                chain = self._build_video_chain(result)
+                chain = self._build_video_chain(event, result)
                 if chain:
                     try:
                         yield event.chain_result(chain)
@@ -1399,7 +1524,7 @@ class Main(Star):
         failed_album = 0
         if result.extra.get("album_kinds"):
             kinds = result.extra.get("album_kinds") or []
-            still_paths = await self._download_album_stills(result, list(result.images))
+            still_paths = await self._download_album_stills(event, result, list(result.images))
             anim_paths = await self._download_album_videos(result, list(result.videos))
 
             vi = 0
@@ -1438,7 +1563,7 @@ class Main(Star):
 
         # ---- 视频直链 ----
         if result.videos and not skip_videos:
-            send_mode = self.conf_get("plugin.send_mode", "url")
+            send_mode = self.conf_plat(event, "send_mode", "url")
             added = False
             oversize = False
             if send_mode == "download":
@@ -1459,7 +1584,7 @@ class Main(Star):
 
             if not added and not oversize:
                 # 直链模式，或下载失败——退回把解析出的地址交给发送端（同直发）
-                for comp in self._build_video_chain(result):
+                for comp in self._build_video_chain(event, result):
                     nodes.append(_node([comp]))
                     added = True
                 if not added:
@@ -1490,7 +1615,7 @@ class Main(Star):
         # ---- 图片 ----
         failed_images = 0
         if result.images and not skip_images and not skip_videos:
-            paths = await self._download_images(result, list(result.images))
+            paths = await self._download_images(event, result, list(result.images))
             for path in paths:
                 if path is None:
                     failed_images += 1
@@ -1777,7 +1902,7 @@ class Main(Star):
         return Comp.Video.fromBase64(data)
 
     async def _download_album_stills(
-        self, result: ResolveResult, still_images: list[str]
+        self, event: AstrMessageEvent, result: ResolveResult, still_images: list[str]
     ) -> list[Path | None]:
         """下载图集里的静态图，返回与 ``still_images`` 等长的路径列表。
 
@@ -1807,7 +1932,9 @@ class Main(Star):
         if not still_images:
             return []
 
-        concurrency = max(1, int(self.conf_get("plugin.download_concurrency", 6) or 6))
+        concurrency = max(
+            1, int(self.conf_plat(event, "download_concurrency", 8) or 8)
+        )
         max_mb = int(self.conf_get("global.videoSizeLimit", 70) or 70)
         max_bytes = max_mb * 1024 * 1024
 
@@ -1895,7 +2022,7 @@ class Main(Star):
         - 项数不超过 ``max_images``：一条消息链按顺序发完
         - 超过阈值：静态图/动图都下载到本地后，用合并转发完整发出（顺序不变）
         """
-        limit = max(1, int(self.conf_get("plugin.max_images", 9) or 9))
+        limit = max(1, int(self.conf_plat(event, "max_images", 9) or 9))
         kinds = result.extra.get("album_kinds") or []
         n_still = kinds.count("still")
         n_anim = kinds.count("animated")
@@ -1913,7 +2040,7 @@ class Main(Star):
         )
 
         # ---- 分两路下载（静态图并发 + 带候选回退，动图串行）----
-        still_paths = await self._download_album_stills(result, still_images)
+        still_paths = await self._download_album_stills(event, result, still_images)
         anim_paths = await self._download_album_videos(result, anim_videos)
 
         # 下载成功的才登记给 AstrBot 回收
@@ -1960,7 +2087,7 @@ class Main(Star):
             return
 
         # ---- 第二档：超过阈值 ----
-        if not self.conf_get("plugin.album_forward_when_exceed", True):
+        if not self.conf_plat(event, "album_forward_when_exceed", True):
             # 用户关掉了转发，退回「只发前 limit 项 + 提示」
             chain = []
             vi = 0
@@ -2048,7 +2175,7 @@ class Main(Star):
         yield event.chain_result([Comp.Nodes(nodes)])
 
     async def _download_images(
-        self, result: ResolveResult, urls: list[str]
+        self, event: AstrMessageEvent, result: ResolveResult, urls: list[str]
     ) -> list[Path | None]:
         """下载一组图片，返回与 ``urls`` 等长的路径列表。
 
@@ -2060,7 +2187,9 @@ class Main(Star):
         if not urls:
             return []
 
-        concurrency = max(1, int(self.conf_get("plugin.download_concurrency", 6) or 6))
+        concurrency = max(
+            1, int(self.conf_plat(event, "download_concurrency", 8) or 8)
+        )
         max_mb = int(self.conf_get("global.videoSizeLimit", 70) or 70)
         max_bytes = max_mb * 1024 * 1024
 
@@ -2092,13 +2221,13 @@ class Main(Star):
         发送端会因缺少 Referer / 候选回退而整条失败（详见
         ``_download_album_stills`` 的说明）。
         """
-        limit = max(1, int(self.conf_get("plugin.max_images", 9) or 9))
+        limit = max(1, int(self.conf_plat(event, "max_images", 9) or 9))
         urls = result.images
         total = len(urls)
 
         # ---- 不超过阈值：全部下载到本地，一条消息链按顺序发完 ----
         if total <= limit:
-            paths = await self._download_images(result, urls)
+            paths = await self._download_images(event, result, urls)
             chain = []
             for path in paths:
                 if path is None:
@@ -2120,9 +2249,9 @@ class Main(Star):
             return
 
         # ---- 超过阈值：合并转发完整发出 ----
-        if not self.conf_get("plugin.album_forward_when_exceed", True):
+        if not self.conf_plat(event, "album_forward_when_exceed", True):
             # 用户关掉了转发，退回「只发前 limit 张 + 提示」的旧行为
-            paths = await self._download_images(result, urls[:limit])
+            paths = await self._download_images(event, result, urls[:limit])
             chain = []
             for path in paths:
                 if path is None:
@@ -2139,7 +2268,7 @@ class Main(Star):
 
         # 并发下载所有图片到本地，用本地文件构造转发节点。
         # 好处：并发（快）+ Node 内部转 base64 时不再重复走网络下载。
-        paths = await self._download_images(result, urls)
+        paths = await self._download_images(event, result, urls)
 
         # 合并转发的「发送者」用发起解析的这个用户：昵称 + QQ 号都取发送者
         node_name = (event.get_sender_name() or "").strip() or "解析结果"
@@ -2206,9 +2335,11 @@ class Main(Star):
 
         return None, ""
 
-    def _build_video_chain(self, result: ResolveResult) -> list:
+    def _build_video_chain(
+        self, event: AstrMessageEvent, result: ResolveResult
+    ) -> list:
         """把视频直链拼成消息链。抖音动图会有多条，一次发出去。"""
-        limit = max(1, int(self.conf_get("plugin.max_videos", 9) or 9))
+        limit = max(1, int(self.conf_plat(event, "max_videos", 9) or 9))
         chain = []
         for url in result.videos[:limit]:
             try:
@@ -2373,6 +2504,422 @@ class Main(Star):
         await self._notify(umo, "\n".join(lines))
 
     # ==================================================================
+    # 平台能力：#R平台 / #R平台测试
+    # ==================================================================
+
+    async def cmd_platform_caps(self, event: AstrMessageEvent):
+        """``#R平台`` —— 说明「本机器人能发什么」。
+
+        排查「消息没发出来」的第一站。QQ 官方机器人没有合并转发和音乐卡片，
+        用户遇到发不出去时第一反应往往是「插件坏了」，先把能力摆出来能省
+        一整轮来回。
+        """
+        caps = self._caps(event)
+        pid = caps_platform_id(event)
+
+        lines = [
+            "🔌 当前协议端能力",
+            f"实例 ID：{pid or '（取不到）'}",
+            describe_caps(caps),
+            "",
+        ]
+        if not caps.forward:
+            lines.append("· 不支持合并转发 → 插件自动改用直发（多条消息）")
+        else:
+            lines.append("· 支持合并转发（聊天记录）")
+        if not caps.music_card:
+            lines.append("· 不支持音乐卡片 → 点歌自动改用语音发送")
+        else:
+            lines.append("· 支持音乐卡片")
+        if not caps.markdown:
+            lines.append("· 无原生 markdown → 用普通文本发送")
+        # 顺手把「这次读的是哪份配置」说清楚：配置面板里是几组并列的，
+        # 用户常常不确定当前生效的是哪一组
+        lines.append(
+            "· 配置来源：" + ("通用（跟随 plugin / music 里的旧值）"
+                          if profiles_is_shared(self._platform_profiles())
+                          else f"分协议端 → {profile_group(caps.key)} 这一组")
+        )
+        lines.append("　看完整一份：`#R配置 协议端`")
+
+        yield event.plain_result("\n".join(lines))
+
+    async def _test_image(self) -> Path | None:
+        """给平台自检造一张测试图（640×360，带文字）。"""
+        try:
+            from PIL import Image as PILImage, ImageDraw
+        except ImportError:
+            return None
+        try:
+            tmp = Path(tempfile.gettempdir()) / "astrbot_plugin_rconsole" / "qo_test"
+            tmp.mkdir(parents=True, exist_ok=True)
+            path = tmp / "caps_test.png"
+            im = PILImage.new("RGB", (640, 360), (28, 32, 48))
+            d = ImageDraw.Draw(im)
+            d.rectangle([16, 16, 624, 344], outline=(120, 200, 255), width=4)
+            d.text((40, 150), "R-Console platform self-test", fill=(255, 255, 255))
+            d.text((40, 180), time.strftime("%Y-%m-%d %H:%M:%S"), fill=(150, 200, 255))
+            im.save(path)
+            return path
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[R插件][平台自检] 造测试图失败: {exc}")
+            return None
+
+    async def _test_audio(self) -> Path | None:
+        """给平台自检造一段 1.5 秒正弦波（mp3），用来测语音发送。"""
+        ffmpeg = find_tool("ffmpeg")
+        if not ffmpeg:
+            return None
+        try:
+            tmp = Path(tempfile.gettempdir()) / "astrbot_plugin_rconsole" / "qo_test"
+            tmp.mkdir(parents=True, exist_ok=True)
+            path = tmp / "caps_test.mp3"
+            result = await run(
+                ffmpeg,
+                "-y", "-loglevel", "error",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=1.5",
+                "-ar", "24000", "-ac", "1", "-b:a", "32k",
+                str(path),
+                timeout=60,
+            )
+            if result.ok and path.exists() and path.stat().st_size > 0:
+                return path
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[R插件][平台自检] 造测试音频失败: {exc}")
+        return None
+
+    async def cmd_platform_test(self, event: AstrMessageEvent):
+        """``#R平台测试``（管理员）—— 实测本协议端各种发送形态。
+
+        依次发这几条，每条单独回报成败：
+
+        1. 纯文本（content 模式，``use_markdown(False)``）
+        2. 原生 markdown（``use_markdown(True)`` + 标题/粗体/引用）
+        3. 图片
+        4. 语音
+        5. **markdown + 图片**（同一条链）
+
+        第 5 条是关键：AstrBot 的官方适配器在**有媒体时会摘掉 markdown**
+        （``payload.pop("markdown")``），所以「多图 MD」不能指望一条消息搞定，
+        得拆成「MD 文本一条 + 图片若干条」。
+        """
+        caps = self._caps(event)
+        yield event.plain_result(
+            f"🧪 平台自检开始（{caps.label}）\n"
+            f"会依次发 5 条，请逐条看是否收到。"
+        )
+
+        results: list[str] = []
+
+        # ---- 1) 纯文本 ----
+        try:
+            chain = event.chain_result([Comp.Plain("【1/5】纯文本模式 ✅")])
+            if hasattr(chain, "use_markdown"):
+                chain.use_markdown(False)
+            yield chain
+            results.append("1 纯文本 ✅")
+        except Exception as exc:  # noqa: BLE001
+            results.append(f"1 纯文本 ❌ {type(exc).__name__}")
+
+        await asyncio.sleep(1.2)
+
+        # ---- 2) 原生 markdown ----
+        md = (
+            "# 【2/5】原生 Markdown\n\n"
+            "**粗体** / *斜体* / `代码`\n\n"
+            "> 引用行：如果这条没渲染成标题+粗体，说明本端没有 MD 权限。\n\n"
+            "- 列表项 A\n- 列表项 B"
+        )
+        try:
+            chain = event.chain_result([Comp.Plain(md)])
+            if hasattr(chain, "use_markdown"):
+                chain.use_markdown(True)
+            yield chain
+            results.append("2 原生MD ✅")
+        except Exception as exc:  # noqa: BLE001
+            results.append(f"2 原生MD ❌ {type(exc).__name__}")
+
+        await asyncio.sleep(1.2)
+
+        # ---- 3) 图片 ----
+        img = await self._test_image()
+        if img is None:
+            results.append("3 图片 ⏭ 造图失败")
+        else:
+            try:
+                yield event.chain_result([Comp.Image.fromFileSystem(str(img))])
+                results.append("3 图片 ✅")
+            except Exception as exc:  # noqa: BLE001
+                results.append(f"3 图片 ❌ {type(exc).__name__}")
+
+        await asyncio.sleep(1.2)
+
+        # ---- 4) 语音 ----
+        audio = await self._test_audio()
+        if audio is None:
+            results.append("4 语音 ⏭ 无 ffmpeg/造音频失败")
+        else:
+            try:
+                yield event.chain_result([Comp.Record.fromFileSystem(str(audio))])
+                results.append("4 语音 ✅")
+            except Exception as exc:  # noqa: BLE001
+                results.append(f"4 语音 ❌ {type(exc).__name__}")
+
+        await asyncio.sleep(1.2)
+
+        # ---- 5) MD + 图片（验证互斥）----
+        if img is None:
+            results.append("5 MD+图片 ⏭ 造图失败")
+        else:
+            try:
+                chain = event.chain_result([
+                    Comp.Plain("# 【5/5】MD + 图片\n\n这条同时带了 markdown 和图片。"),
+                    Comp.Image.fromFileSystem(str(img)),
+                ])
+                if hasattr(chain, "use_markdown"):
+                    chain.use_markdown(True)
+                yield chain
+                results.append("5 MD+图片 ✅")
+            except Exception as exc:  # noqa: BLE001
+                results.append(f"5 MD+图片 ❌ {type(exc).__name__}")
+
+        await asyncio.sleep(1.2)
+        yield event.plain_result("🧪 自检完毕：\n" + "\n".join(results))
+
+    def _md_image_width(self, event: AstrMessageEvent | None = None) -> int:
+        """MD 内嵌图的显示宽度（px）。
+
+        配置 ``plugin.mdImageWidth``。夹在 100~800 之间 —— 太小看不清、太大
+        在手机 MD 框里会撑满一屏。图片按**真实宽高等比**缩放，而 URL 没变，
+        所以**点开 / 保存拿到的仍是原图**。
+        """
+        try:
+            w = int(self.conf_plat(event, "md_image_width", 300) or 300)
+        except (TypeError, ValueError):
+            w = 300
+        return max(100, min(800, w))
+
+    def _qq_buttons_enabled(self, event: AstrMessageEvent | None = None) -> bool:
+        """官机菜单按钮的总开关（配置 ``plugin.qqButtons``）。
+
+        为什么留个开关：**自定义按钮在官方文档里标着「内邀开通」**，有些机器人
+        可能压根发不出来。留个开关，用户能一键回到「只有图片菜单」的状态。
+        """
+        return bool(self.conf_plat(event, "qq_buttons", True))
+
+    async def _probe_image_size(self, url: str) -> tuple[int, int] | None:
+        """拿图片的「宽×高」—— 只读前 64KB，够 Pillow 解析 header 了。
+
+        **为什么一定要拿尺寸**：QQ markdown 的图片语法是
+        ``![alt #宽px #高px](url)``，**尺寸不能省** —— 省了之后手机 QQ
+        只渲染成 ``[alt]``（电脑端宽容，照样把图显示出来）。两端表现不一致，
+        所以这个坑特别容易漏掉。
+
+        为什么不整张下载：图集动辄十来张 1~2MB 的图，只为量个尺寸不值。
+        大多 CDN 支持 Range；不支持就退回全量（也不亏），再失败返回 None，
+        调用方退回「不带尺寸」的写法。
+        """
+        from io import BytesIO
+
+        from .core.http import get_session
+
+        try:
+            session = get_session()
+            async with session.get(
+                url, headers={"Range": "bytes=0-65535"}, timeout=20
+            ) as resp:
+                if resp.status not in (200, 206):
+                    return None
+                data = await resp.read()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[R插件][MD图] 取尺寸失败 {url[:60]}: {exc}")
+            return None
+        try:
+            from PIL import Image as PILImage
+
+            with PILImage.open(BytesIO(data)) as im:
+                return im.size
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[R插件][MD图] 解析尺寸失败: {exc}")
+            return None
+
+    @staticmethod
+    def _md_image(
+        url: str,
+        size: tuple[int, int] | None,
+        *,
+        alt: str = "图",
+        max_width: int = 300,
+    ) -> str:
+        """拼一张「MD 内嵌图」。
+
+        **尺寸不能省**（原因见 ``_probe_image_size``）。参数顺序是
+        **先宽后高**（实测官方两个示例图都是这个顺序）：
+
+        ==============  ===========  ==================
+        图              真实尺寸      官方示例参数
+        ==============  ===========  ==================
+        building.png    415×640      ``#208px #320px``
+        mkd_img.png     928×374      ``#618px #249px``
+        ==============  ===========  ==================
+
+        两组比例都吻合到小数点后三位，所以是「宽 高」而不是「高 宽」。
+        另外参数值**可以等比缩放**（官方示例本身就是缩过的），所以我们统一
+        缩到 ``max_width`` 宽 —— 免得大图在 MD 框里撑满一屏。
+
+        拿不到尺寸时退回不带尺寸的写法（电脑端能看，手机端不显示）——
+        有总比没有强，而且用户至少还能看到 alt 文本。
+        """
+        if not size or size[0] <= 0 or size[1] <= 0:
+            return f"![{alt}]({url})"
+        w, h = size
+        if w > max_width:
+            h = max(1, round(h * max_width / w))
+            w = max_width
+        return f"![{alt} #{w}px #{h}px]({url})"
+
+    async def cmd_md_image(self, event: AstrMessageEvent):
+        """``#RMD图 [图片URL ...]``（管理员）—— 自检「一条 MD 里嵌多张图」。
+
+        为什么单独一条命令：**这是 QQ 官方机器人特有的能力**。它的 markdown
+        消息支持内嵌图片 —— 官方文档原文：
+
+            对于 markdown 消息内的图片资源，请使用可在公网访问的资源 url，
+            开放平台会下载转存该资源。
+
+        所以「标题在上、图片在下、全部在同一个 MD 框里」是能一条发出来的，
+        **不需要**退化成「MD 一条 + 图片 N 条」。
+
+        但它和 `Comp.Image` **互斥**：AstrBot 的 qqofficial 适配器一看到
+        media 段就 `payload.pop("markdown")` 并改成 `msg_type=7`，整条退化成
+        富媒体消息（这就是 `#R平台测试` 第 5 条的现象）。要让图片进 MD，
+        只能把 `![](url)` **拼进 Plain 文本**里。
+
+        参数（可选）：直接贴图片 URL，用来验证「平台能不能拉到你的图」。
+        带签名的 CDN（抖音 / B站）有时拉不动，这条命令就是用来确认这件事的。
+
+        **图片必须带尺寸**（v1.6.9 实测才发现的坑）：官方语法是
+        ``![alt #宽px #高px](url)``，省掉尺寸时**电脑 QQ 照样把图显示出来、
+        手机 QQ 只显示 `[alt]`**。两端不一致，所以特别容易漏 —— 别只看电脑端。
+        """
+        caps = self._caps(event)
+        raw = (event.get_message_str() or "").strip()
+        args = [
+            w for w in raw.split()
+            if w.lower().startswith(("http://", "https://"))
+        ]
+        urls = args[:_MD_IMAGE_TEST_MAX] or [_MD_IMAGE_TEST_URL]
+
+        if not caps.markdown:
+            yield event.plain_result(
+                f"⚠️ 当前协议端（{caps.label}）没有原生 markdown，"
+                "这条自检只在 QQ 官方机器人上有意义 —— 照发一遍给你看降级效果。"
+            )
+            await asyncio.sleep(1.0)
+
+        results: list[str] = []
+
+        # ---- 0) 先量每张图的真实尺寸（拼 MD 必需，见 _probe_image_size）----
+        sizes = [await self._probe_image_size(u) for u in urls]
+        yield event.plain_result(
+            f"🔍 尺寸探测（{caps.label}）：\n"
+            + "\n".join(
+                f"  {i}. {u[:52]}…  " + (f"{s[0]}×{s[1]}" if s else "取不到")
+                for i, (u, s) in enumerate(zip(urls, sizes), 1)
+            )
+        )
+        await asyncio.sleep(1.2)
+
+        # ---- 1) 不带尺寸：反面教材（手机端只剩 [alt]）----
+        md1 = (
+            "# 【1/4】不带尺寸（反面教材）\n\n"
+            "这条**故意省掉尺寸**。电脑能看图、手机上应该只有 `[测试图]`。\n\n"
+            f"![测试图]({urls[0]})"
+        )
+        try:
+            chain = event.chain_result([Comp.Plain(md1)])
+            if hasattr(chain, "use_markdown"):
+                chain.use_markdown(True)
+            yield chain
+            results.append("1 不带尺寸 ✅ 已发出")
+        except Exception as exc:  # noqa: BLE001
+            results.append(f"1 不带尺寸 ❌ {type(exc).__name__}: {exc}")
+
+        await asyncio.sleep(1.5)
+
+        # ---- 2) 带尺寸：正确写法 ----
+        md2 = (
+            "# 【2/4】带尺寸（正确写法）\n\n"
+            "语法 `![alt #宽px #高px](url)`，这条按真实比例缩到 300px 宽。\n\n"
+            + self._md_image(
+                urls[0], sizes[0], alt="测试图", max_width=self._md_image_width(event)
+            )
+        )
+        try:
+            chain = event.chain_result([Comp.Plain(md2)])
+            if hasattr(chain, "use_markdown"):
+                chain.use_markdown(True)
+            yield chain
+            results.append("2 带尺寸 ✅ 已发出")
+        except Exception as exc:  # noqa: BLE001
+            results.append(f"2 带尺寸 ❌ {type(exc).__name__}: {exc}")
+
+        await asyncio.sleep(1.5)
+
+        # ---- 3) 多图带尺寸：目标形态 ----
+        many = urls if len(urls) > 1 else [urls[0], urls[0]]
+        msizes = sizes if len(urls) > 1 else [sizes[0], sizes[0]]
+        md3 = (
+            f"# 【3/4】多图 + 尺寸（{len(many)} 张）\n\n"
+            + "\n".join(
+                self._md_image(u, s, alt=f"图{i}", max_width=self._md_image_width(event))
+                for i, (u, s) in enumerate(zip(many, msizes), 1)
+            )
+            + "\n\n全部图片都在**同一条消息**里。"
+        )
+        try:
+            chain = event.chain_result([Comp.Plain(md3)])
+            if hasattr(chain, "use_markdown"):
+                chain.use_markdown(True)
+            yield chain
+            results.append(f"3 多图+尺寸 ✅ 已发出（{len(many)} 张）")
+        except Exception as exc:  # noqa: BLE001
+            results.append(f"3 多图+尺寸 ❌ {type(exc).__name__}: {exc}")
+
+        await asyncio.sleep(1.5)
+
+        # ---- 4) 对照：MD + 图片段（预期退化成富媒体）----
+        img = await self._test_image()
+        if img is None:
+            results.append("3 对照 ⏭ 造图失败")
+        else:
+            try:
+                chain = event.chain_result([
+                    Comp.Plain(
+                        "# 【4/4】对照：MD + 图片段\n\n"
+                        "这条带了 `Comp.Image`，预期**没有 MD 框**（退化成普通图片消息）。"
+                    ),
+                    Comp.Image.fromFileSystem(str(img)),
+                ])
+                if hasattr(chain, "use_markdown"):
+                    chain.use_markdown(True)
+                yield chain
+                results.append("4 对照（MD+图片段）✅ 已发出")
+            except Exception as exc:  # noqa: BLE001
+                results.append(f"3 对照 ❌ {type(exc).__name__}")
+
+        await asyncio.sleep(1.2)
+
+        used = "内置测试图" if not args else f"你给的 {len(urls)} 个 URL"
+        yield event.plain_result(
+            "🧪 MD 多图自检（{}）：\n".format(caps.label)
+            + "\n".join(results)
+            + f"\n\n图片来源：{used}"
+            + "\n\n对比重点：**手机上 2 和 3 能看到图 = 成了**；"
+            "1 只剩 `[测试图]`、4 没有 MD 框，都是预期内的反面教材。"
+        )
+
+    # ==================================================================
     # 图片命令：#R菜单 / #cookie状态 / #服务状态
     # ==================================================================
     #
@@ -2380,22 +2927,454 @@ class Main(Star):
     # Cookie 校验约 1-3 秒。所以统一做法是**先起 task 并行**，最后再一起收，
     # 而不是顺序 await —— 否则用户要等十几秒。
 
+    # ------------------------------------------------------------------
+    # QQ 官方机器人：按钮（keyboard）
+    # ------------------------------------------------------------------
+    #
+    # 适配器不认 keyboard，所以只能绕过它自己打接口 —— 见 _send_qq_payload。
+
+    async def _send_qq_payload(self, event: AstrMessageEvent, payload: dict) -> bool:
+        """（官机专属）绕过 AstrBot 适配器，直接给 QQ 发原始 payload。
+
+        **为什么必须绕过**：
+
+        1. 适配器**不认 keyboard** —— ``_parse_to_qqofficial`` 只处理
+           ``Plain / Image / Record / Video / File``，按钮组件会被静默丢弃；
+        2. 它一看到图片就 ``payload.pop("markdown")``（``msg_type`` 改成 7），
+           所以「MD + 图片段」永远退化。
+
+        按钮这类适配器没覆盖的形态，只能自己打 HTTP 接口。
+
+        :return: 是否发送成功。**失败时调用方要退回普通路径** ——
+            不能因为按钮发不出去就让用户什么都收不到。
+        """
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        bot = getattr(event, "bot", None)
+        if raw is None or bot is None:
+            logger.debug("[R插件][按钮] 拿不到 raw_message / bot，跳过")
+            return False
+        try:
+            from botpy.http import Route
+        except ImportError:
+            logger.debug("[R插件][按钮] 当前环境没有 botpy，跳过")
+            return False
+
+        group_openid = getattr(raw, "group_openid", None)
+        openid = getattr(getattr(raw, "author", None), "user_openid", None)
+        if group_openid:
+            route = Route(
+                "POST",
+                "/v2/groups/{group_openid}/messages",
+                group_openid=group_openid,
+            )
+        elif openid:
+            route = Route("POST", "/v2/users/{openid}/messages", openid=openid)
+        else:
+            logger.debug("[R插件][按钮] 既没有 group_openid 也没有 openid，跳过")
+            return False
+
+        body = dict(payload)
+        # msg_id = 被动回复（5 分钟内有效、同一个 msg_id 最多回 5 条）；
+        # msg_seq 在同一 msg_id 下必须互不相同，否则会被判重丢掉。
+        msg_id = getattr(event.message_obj, "message_id", None)
+        if msg_id:
+            body["msg_id"] = msg_id
+        body["msg_seq"] = random.randint(1, 10000)
+
+        try:
+            result = await bot.api._http.request(route, json=body)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[R插件][按钮] 发送失败: {type(exc).__name__}: {exc}")
+            return False
+        if result is None:
+            logger.warning("[R插件][按钮] 接口返回 None —— 可能没有自定义按钮权限")
+            return False
+        return True
+
+    async def _send_md_with_buttons(
+        self, event: AstrMessageEvent, markdown: str, rows: list
+    ) -> bool:
+        """（官机专属）发一条「markdown + 底部按钮」。
+
+        按钮**必须挂在 markdown 消息上**（官方原话：「在 markdown 消息的
+        基础上，支持消息最底部挂载按钮」），而且一条消息只能挂一个 keyboard。
+        """
+        kb = qq_keyboard(*rows)
+        if kb is None:
+            return False
+        return await self._send_qq_payload(
+            event,
+            {"msg_type": 2, "markdown": {"content": markdown}, "keyboard": kb},
+        )
+
+    async def _upload_qq_image(self, event: AstrMessageEvent, png: bytes) -> str:
+        """（官机专属）把一张图上传成 QQ 的 ``file_info``。
+
+        为什么要它：官方规定按钮只能挂 markdown 消息，而菜单图是**本地渲染的
+        PNG**、没有公网 URL 可以塞进 markdown。上传拿到 ``file_info`` 之后，
+        才有机会把「图 + 按钮」并进同一条消息。
+
+        走的是官方富媒体上传接口，和适配器 ``upload_group_and_c2c_image``
+        同一套：``POST /v2/{groups,users}/.../files``，``file_data`` 传 base64、
+        ``srv_send_msg=false``（只上传，不直接发）。
+
+        失败返回空串 —— 上传失败不该影响主流程。
+        """
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        bot = getattr(event, "bot", None)
+        if raw is None or bot is None:
+            return ""
+        try:
+            from botpy.http import Route
+        except ImportError:
+            return ""
+
+        group_openid = getattr(raw, "group_openid", None)
+        openid = getattr(getattr(raw, "author", None), "user_openid", None)
+        body = {
+            "file_data": base64.b64encode(png).decode("ascii"),
+            "file_type": 1,         # 1 = 图片
+            "srv_send_msg": False,  # 只上传，拿 file_info
+        }
+        if group_openid:
+            body["group_openid"] = group_openid
+            route = Route(
+                "POST", "/v2/groups/{group_openid}/files", group_openid=group_openid
+            )
+        elif openid:
+            body["openid"] = openid
+            route = Route("POST", "/v2/users/{openid}/files", openid=openid)
+        else:
+            return ""
+
+        try:
+            result = await bot.api._http.request(route, json=body)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[R插件][上传] 图片上传失败: {type(exc).__name__}: {exc}")
+            return ""
+        if not isinstance(result, dict):
+            return ""
+        file_info = str(result.get("file_info") or "")
+        if file_info:
+            logger.info(
+                f"[R插件][上传] 图片上传成功 file_info={file_info[:20]}… "
+                f"ttl={result.get('ttl')} 大小={len(png) // 1024}KB"
+            )
+        else:
+            logger.warning(f"[R插件][上传] 接口没返回 file_info: {str(result)[:200]}")
+        return file_info
+
+    async def _send_qq_image_only(
+        self, event: AstrMessageEvent, png: bytes
+    ) -> bool:
+        """（官机专属）**只发图、不带按钮** —— 对照实验用。
+
+        存在的意义是把「图 + 按钮同一条失败」的原因切开：
+
+        * 这条**也**失败 → 是**上传 / 发送链路**的问题（图片压根没发出去）
+        * 这条正常、带按钮那条失败 → 是 **media 与 keyboard 不能共存**
+        """
+        file_info = await self._upload_qq_image(event, png)
+        if not file_info:
+            return False
+        return await self._send_qq_payload(
+            event,
+            {"msg_type": 7, "media": {"file_info": file_info}, "content": ""},
+        )
+
+    async def _send_qq_image_with_buttons(
+        self, event: AstrMessageEvent, png: bytes, rows: list
+    ) -> bool:
+        """（官机专属）**形态 A**：把「图片 + 按钮」发成一条消息。
+
+        官方文档只写了「按钮挂在 markdown 消息上」，而菜单图是本地 PNG、
+        没有公网 URL。这条路径让图走 **media**（``msg_type=7``）、按钮挂在
+        同一条 —— media 和 keyboard 各自都是官方支持的字段，只是「组合」
+        没写进文档，**所以必须实测**。
+
+        注意 ``content``：适配器发富媒体时会顺手设 ``payload["content"]``，
+        所以这里也补齐 —— 服务端可能要求这个字段存在，缺了会判成无效消息
+        （实测现象就是**客户端提示「图片加载失败」**）。
+
+        :return: 是否成功。**失败时调用方要退回「图一条 + 按钮一条」**，
+            不能让用户什么都收不到。
+        """
+        file_info = await self._upload_qq_image(event, png)
+        if not file_info:
+            return False
+        kb = qq_keyboard(*rows)
+        if kb is None:
+            return False
+        return await self._send_qq_payload(
+            event,
+            {
+                "msg_type": 7,
+                "media": {"file_info": file_info},
+                "keyboard": kb,
+                "content": "",
+            },
+        )
+
+    async def _send_qq_embed_image_with_buttons(
+        self, event: AstrMessageEvent, png: bytes, markdown: str, rows: list
+    ) -> bool:
+        """（官机专属）**形态 B**：markdown 内嵌图 + 按钮，也是同一条。
+
+        把上传拿到的 ``file_info`` 直接当 markdown 图片的 URL 用。文档说
+        markdown 图片要「可在公网访问的资源 url」，所以这条**更可能失败** ——
+        留着是为了让 ``#R按钮`` 一次把两条路都试掉，省得来回改代码。
+        """
+        file_info = await self._upload_qq_image(event, png)
+        if not file_info:
+            return False
+        try:
+            from io import BytesIO
+
+            from PIL import Image as PILImage
+
+            with PILImage.open(BytesIO(png)) as im:
+                size = im.size
+        except Exception:  # noqa: BLE001
+            size = None
+        md = (
+            f"{markdown}\n\n"
+            + self._md_image(
+                file_info, size, alt="菜单", max_width=self._md_image_width(event)
+            )
+        )
+        return await self._send_md_with_buttons(event, md, rows)
+
+    def _menu_button_rows(self) -> list:
+        """菜单按钮的行列设计。
+
+        「点歌」故意用 ``enter=False``：点击后只把 ``点歌 `` **填进输入框**，
+        等用户补歌名再发 —— 这正是「添加参数再发送」的用法。
+        其余按钮 ``enter=True``（单聊直接发；群里会插进输入框，同样能用）。
+        """
+        return [
+            [
+                qq_button("R菜单", "#R菜单", enter=True),
+                qq_button("视频解析", "#R解析"),
+                qq_button("点歌", "点歌 ", enter=False),
+            ],
+            [
+                qq_button("R配置", "#R配置", enter=True, style=0),
+                qq_button("状态", "#cookie状态", style=0),
+                qq_button("免艾特", "#R免艾特", style=0),
+            ],
+        ]
+
+    def _menu_markdown(self, bot_name: str = "") -> str:
+        """官机版菜单：**纯 markdown**，不发图片。
+
+        为什么官机不发菜单图：图是**本地渲染的 PNG**，没有公网 URL，塞不进
+        markdown；而按钮只能挂 markdown 消息。实测「media + 按钮」的组合也不
+        成立（客户端报「图片加载失败」）—— 所以官机干脆用 MD 排版，
+        功能说明一点不少，还能带按钮。
+        """
+        names = "、".join(r.name for r in AUTO_RULES if r.enabled)
+        lines = [
+            "# 🎵 R插件 · 功能菜单",
+            "",
+            "## 🔗 链接解析",
+            "发链接即触发，不用加命令",
+            names,
+            "",
+            "## 🎵 点歌",
+            "`点歌 歌名` · `网易云点歌 歌名` · `QQ点歌 歌名`",
+            "搜到后**点下面的按钮**，或直接回序号",
+            "",
+            "## 🔍 查询",
+            "`#cookie状态`　Cookie 失效 + 会员等级",
+            "`#服务状态`　　服务器负载与 Bot 信息",
+            "`#R平台`　　　 本协议端能发什么",
+            "",
+            "## ⚙️ 管理员",
+            "`#R配置` 全部配置项（平台 / 形式 / Cookie / 点歌）",
+            "`#RNQ` 网易云扫码 · `#RBQ` B站扫码 · `#RBS` B站状态",
+        ]
+        if bot_name:
+            lines += ["", f"— {bot_name}"]
+        return "\n".join(lines)
+
     async def cmd_r_menu(self, event: AstrMessageEvent):
-        """``#R菜单`` —— 图片版功能菜单（指令 + 使用教程）。"""
-        bg_api = self._panel_bg_api()
-        bg_task = asyncio.create_task(render_image.fetch_background(bg_api))
+        """``#R菜单`` —— 功能菜单。
+
+        * **官机**：直接发**纯 MD 菜单 + 按钮**（不发图片）。菜单图是本地 PNG、
+          没有公网 URL，塞不进 markdown，而按钮只能挂 markdown；「media + 按钮」
+          实测也不成立。所以官机走 MD —— 顺带省掉一次随机背景下载（约 2.5 秒）。
+        * **其它协议端 / MD 发送失败**：原来的图片菜单（``render_menu`` 现画），
+          画不出来再退回文字菜单。
+        """
+        caps = self._caps(event)
         name_task = asyncio.create_task(fetch_bot_name(event))
         bot_name = await name_task
+
+        if caps.keyboard and self._qq_buttons_enabled(event):
+            if await self._send_md_with_buttons(
+                event, self._menu_markdown(bot_name), self._menu_button_rows()
+            ):
+                return
+            logger.info("[R插件][菜单] MD 菜单发送失败，退回图片菜单")
+
+        bg_api = self._panel_bg_api()
+        bg_task = asyncio.create_task(render_image.fetch_background(bg_api))
         await bg_task
 
         png = await render_menu(self._plugin_version(), bot_name, bg_api)
-        if png:
+        if png is None:
+            yield event.plain_result(self._menu_text(bot_name, event))
+        else:
             yield event.chain_result([Comp.Image.fromBytes(png)])
-            return
-        yield event.plain_result(self._menu_text(bot_name))
 
-    def _menu_text(self, bot_name: str = "") -> str:
-        """图片渲染不可用时的文字菜单兜底。"""
+    # ------------------------------------------------------------------
+    # 官机专属：按钮自检 / 免艾特指引 / 链接解析说明
+    # ------------------------------------------------------------------
+
+    async def cmd_buttons_test(self, event: AstrMessageEvent):
+        """``#R按钮``（管理员）—— 自检 QQ 官方机器人的「自定义按钮」。
+
+        **为什么要自检**：官方文档把按钮分成两种，开放程度不一样 ——
+
+        * 按钮**模版**：标「【申请使用】」
+        * **自定义按钮**：标「【内邀开通】」
+
+        所以自定义按钮不一定能用。一次发 4 条，一眼看出本机器人有没有这个能力，
+        以及**「图和按钮能不能塞进同一条」**：
+
+        1. 纯 markdown + 两个指令按钮（``enter`` 真 / 假各一）—— 前提条件
+        2. **形态 A**：图走 media + 按钮挂同一条（``msg_type=7``）
+        3. **形态 B**：markdown 内嵌 ``file_info`` 当图片 + 按钮，也是同一条
+        4. 图一条 + 按钮一条（保底，菜单降级时用这个）
+        """
+        caps = self._caps(event)
+        if not caps.keyboard:
+            yield event.plain_result(
+                f"⚠️ 当前是 {caps.label}，按钮是 QQ 官方机器人专属能力，"
+                "这条自检在别的协议端没有意义。"
+            )
+            return
+
+        results: list[str] = []
+        img = await self._test_image()
+        png = img.read_bytes() if img is not None else b""
+        one_btn = [[qq_button("R菜单", "#R菜单", enter=True)]]
+
+        # ---- 1) 纯 markdown + 自定义按钮（前提）----
+        ok = await self._send_md_with_buttons(
+            event,
+            "# 【1/4】自定义按钮\n\n"
+            "**「直接发送」**点了会自动发出 `#R菜单`；"
+            "**「填入输入框」**点了只把 `点歌 ` 填进去，等你补歌名。",
+            [[
+                qq_button("直接发送", "#R菜单", enter=True),
+                qq_button("填入输入框", "点歌 ", enter=False, style=0),
+            ]],
+        )
+        results.append("1 自定义按钮 " + ("✅" if ok else "❌"))
+
+        await asyncio.sleep(1.5)
+
+        # ---- 2) 只发图、不带按钮（对照：验证上传+发送链路本身）----
+        if not png:
+            results.append("2 只发图 ⏭ 造图失败")
+        else:
+            ok = await self._send_qq_image_only(event, png)
+            results.append("2 只发图（无按钮）" + ("✅" if ok else "❌"))
+
+        await asyncio.sleep(1.5)
+
+        # ---- 3) 形态 A：media + 按钮，同一条 ----
+        if not png:
+            results.append("3 形态A ⏭ 造图失败")
+        else:
+            ok = await self._send_qq_image_with_buttons(event, png, one_btn)
+            results.append("3 图+按钮同条（media）" + ("✅" if ok else "❌"))
+
+        await asyncio.sleep(1.5)
+
+        # ---- 4) 形态 B：file_info 当 markdown 图片 URL，同一条 ----
+        if not png:
+            results.append("4 形态B ⏭ 造图失败")
+        else:
+            ok = await self._send_qq_embed_image_with_buttons(
+                event, png, "# 【4/4】图+按钮同条（markdown 内嵌）", one_btn
+            )
+            results.append("4 图+按钮同条（内嵌）" + ("✅" if ok else "❌"))
+
+        await asyncio.sleep(1.2)
+        yield event.plain_result(
+            "🧪 按钮自检：\n"
+            + "\n".join(results)
+            + "\n\n**第 2 条是分水岭**：\n"
+            "· 2 也失败 → 图根本没发出去（上传/发送链路问题）\n"
+            "· 2 正常、3 失败 → media 和按钮**不能共存**\n"
+            "· 2、3 都正常 → 图 + 按钮一条就成了\n"
+            "· 4 失败是预期的（file_info 不是公网 URL）"
+        )
+
+    async def cmd_no_at(self, event: AstrMessageEvent):
+        """``#R免艾特`` —— 教用户开启「群内全量消息」（官机专属）。
+
+        为什么会需要这条：QQ 官方机器人在群里**默认只收 @ 到自己的消息**，
+        用户很容易以为「插件坏了 / 不响应」。实际那是手机 QQ 里的一个开关，
+        **机器人自己改不了、也读不到**，只能把路径讲清楚。
+
+        为什么限定官机：OneBot 系列（NapCat 等）本来就能收到群内全部消息，
+        对它讲这个只会误导。
+
+        文案来源：用户提供的另一个机器人的实际输出（步进式 + 版本要求），
+        按用户要求**去掉了「备选：点击这里输入群号」那条**。
+        """
+        caps = self._caps(event)
+        if caps.key != "qqofficial":
+            yield event.plain_result(
+                f"ℹ️ 当前是 {caps.label} —— 它没有「群消息范围」这道限制，不用设置。"
+            )
+            return
+
+        text = (
+            "📢 群里「不用 @ 也能用」怎么开\n\n"
+            "1. 请群主**点击我的头像** →\n"
+            "2. 点击**右上角齿轮**（设置）→\n"
+            "3. 把「可获取的群聊消息范围」设为「**获取群内全部消息**」→\n"
+            "4. 勾选「**主动在群聊内发言**」即可\n\n"
+            "> 授权后无需 @ 机器人也可以使用\n"
+            "> 需要在 **9.2.90 以上版本 QQ** 里设置"
+        )
+        chain = event.chain_result([Comp.Plain(text)])
+        if hasattr(chain, "use_markdown"):
+            chain.use_markdown(True)
+        yield chain
+
+    async def cmd_resolve_help(self, event: AstrMessageEvent):
+        """``#R解析`` —— 链接解析怎么用（菜单按钮「视频解析」指向它）。
+
+        单独做一条命令的原因：菜单按钮总得填点什么，而解析本身是「发链接即
+        触发」、没有命令可填 —— 那就让它落到这条说明上，顺便也是「为什么我
+        发的链接没反应」的自查入口。
+        """
+        names = [r.name for r in AUTO_RULES if r.enabled]
+        lines = [
+            "🔗 链接解析",
+            "",
+            "用法：**直接把分享链接发给我**，不用加任何命令。",
+            f"已开启：{'、'.join(names) if names else '（全部关闭）'}",
+            "",
+            "没反应时按这个顺序看：",
+            "· `#R平台` —— 本协议端能发什么（官方机器人没有合并转发 / 音乐卡片）",
+            "· `#R配置` —— 对应平台有没有被关掉",
+        ]
+        yield event.plain_result("\n".join(lines))
+
+    def _menu_text(
+        self, bot_name: str = "", event: AstrMessageEvent | None = None
+    ) -> str:
+        """图片渲染不可用时的文字菜单兜底。
+
+        ``event`` 只用来判断「当前发送形式」；拿不到就按直发算 ——
+        官方机器人本来就只能直发，所以这个默认值是无害的。
+        """
         lines = ["🎵 R插件 · 功能菜单", ""]
         lines.append("【链接解析】发链接即触发")
         lines.append("　" + "、".join(r.name for r in AUTO_RULES if r.enabled))
@@ -2417,8 +3396,10 @@ class Main(Star):
         lines.append("")
         # 配置类命令统一收在 #R配置 一个入口下；这里顺手把「当前发送形式」
         # 和「切到另一个形式」的命令并排显示，省得用户去记当前是哪个
-        form_now = "聊天记录" if self._forward_enabled() else "直发"
-        form_to = "直发" if self._forward_enabled() else "聊天记录"
+        form_now = (
+            "聊天记录" if event is not None and self._forward_enabled(event) else "直发"
+        )
+        form_to = "直发" if form_now == "聊天记录" else "聊天记录"
         lines.append("【管理员配置】发 #R配置 帮助 看全部")
         lines.append("　#R配置 平台 抖音 开|关　　开关某个平台的解析")
         lines.append(f"　#R配置 形式 {form_to}　　　当前：{form_now}")
@@ -2570,18 +3551,20 @@ class Main(Star):
 
         try:
             if not sub:
-                yield event.plain_result(self._cfg_overview())
+                yield event.plain_result(self._cfg_overview(event))
             elif sub in ("帮助", "help", "?", "？", "h"):
                 yield event.plain_result(self._cfg_help())
             elif sub in ("平台", "platform", "pf"):
                 yield event.plain_result(self._cfg_platform(parts[1:]))
+            elif sub in ("协议端", "机器人", "bot", "profile", "档"):
+                yield event.plain_result(self._cfg_profile(event))
             elif sub in ("cookie", "ck"):
                 async for item in self._cfg_cookie(event, tail):
                     yield item
             elif sub in ("点歌", "music", "歌"):
-                yield event.plain_result(self._cfg_music(parts[1:]))
+                yield event.plain_result(self._cfg_music(event, parts[1:]))
             elif sub in ("形式", "发送形式", "转发", "form", "send"):
-                yield event.plain_result(self._cfg_form(parts[1:]))
+                yield event.plain_result(self._cfg_form(event, parts[1:]))
             else:
                 yield event.plain_result(
                     f"❓ 不认识「{parts[0]}」，发「#R配置 帮助」看全部用法。"
@@ -2594,23 +3577,33 @@ class Main(Star):
     # 总览 / 帮助
     # ------------------------------------------------------------------
 
-    def _cfg_overview(self) -> str:
+    def _cfg_overview(self, event: AstrMessageEvent) -> str:
         enabled = [r.name for r in AUTO_RULES if r.key in self._enabled_keys()]
-        mode = "聊天记录（合并转发）" if self._forward_enabled() else "直发（多条消息）"
+        mode = "聊天记录（合并转发）" if self._forward_enabled(event) else "直发（多条消息）"
+        caps = self._caps(event)
 
         music_on = "开" if self.conf_get("music.enable", False) else "关"
         m_platform = self._music_label(str(self.conf_get("music.platform", "netease") or "netease"))
         m_count = self.conf_get("music.maxList", 10)
-        m_send = str(self.conf_get("music.sendMode", "link") or "link")
-        m_search = "列表" if str(self.conf_get("music.searchMode", "list") or "list") == "list" else "直接送"
+        # 发送方式 / 点歌方式是**按协议端**读的：官机没有音乐卡片，那份默认就是语音
+        m_send = str(self.conf_plat(event, "music_send_mode", "link") or "link")
+        m_search = (
+            "列表"
+            if str(self.conf_plat(event, "music_search_mode", "list") or "list") == "list"
+            else "直接送"
+        )
 
         lines = [
             "⚙️ R插件配置总览",
             "",
+            f"🧩 当前协议端：{caps.label}（{caps.key}）",
             f"📤 解析发送形式：**{mode}**",
             f"🧩 自动解析平台：{len(enabled)}/{len(AUTO_RULES)} 个启用",
             f"　　　{_brief_names(enabled)}",
             f"🎵 点歌：{music_on}　默认 {m_platform}　列表 {m_count} 首　{m_search}　发送方式 {m_send}",
+            "",
+            "💡 上面这些值取自**当前协议端**那份配置。"
+            "看完整一份：`#R配置 协议端`",
             "",
             self._cookie_brief(),
             "",
@@ -2618,9 +3611,34 @@ class Main(Star):
         ]
         return "\n".join(lines)
 
+    def _cfg_profile(self, event: AstrMessageEvent) -> str:
+        """``#R配置 协议端`` —— 看**当前协议端**这份配置档的生效值。
+
+        为什么要单独一条：配置面板里是几组并列的，用户在官机里改了值却不确定
+        到底读的哪一份。这条命令按**你说话的这个机器人**回答，不会看错。
+        """
+        caps = self._caps(event)
+        return "\n".join([
+            "🧩 分协议端配置",
+            "",
+            describe_profiles(self._platform_profiles(), caps.key, self.conf_get),
+            "",
+            "为什么分两份：OneBot 能发合并转发和音乐卡片，QQ 官方机器人两样都没有"
+            "（但换来了原生 markdown + 消息按钮）。混在一起改，"
+            "官机上永远有一半选项是无效的。",
+            "",
+            "改值：WebUI → 插件配置 → 分协议端配置",
+            "　　　（也可用 `#R配置 形式` / `#R配置 点歌 发送` 快捷改**当前这份**）",
+        ])
+
     def _cfg_help(self) -> str:
         return "\n".join([
             "⚙️ #R配置 · 用法（仅管理员，带 # 或 / 前缀）",
+            "",
+            "【协议端】",
+            "　#R配置 协议端　　　　　　看**当前机器人**这份配置（OneBot / 官机各一份）",
+            "　#R配置 形式 聊天记录|直发　只改当前协议端那份",
+            "　#R配置 点歌 发送 <值>　　　只改当前协议端那份",
             "",
             "【解析】",
             "　#R配置 平台　　　　　　　列出所有平台的开关状态",
@@ -2907,23 +3925,28 @@ class Main(Star):
     def _music_label(self, key: str) -> str:
         return self._MUSIC_LABELS.get(key, key)
 
-    def _cfg_music(self, args: list[str]) -> str:
+    def _cfg_music(self, event: AstrMessageEvent, args: list[str]) -> str:
+        caps = self._caps(event)
         if not args:
             on = "开" if self.conf_get("music.enable", False) else "关"
             platform = self._music_label(str(self.conf_get("music.platform", "netease") or "netease"))
             count = self.conf_get("music.maxList", 10)
-            send = str(self.conf_get("music.sendMode", "link") or "link")
-            search = str(self.conf_get("music.searchMode", "list") or "list")
+            # 这两项按协议端读：官机那份默认是「语音」
+            send = str(self.conf_plat(event, "music_send_mode", "link") or "link")
+            search = str(self.conf_plat(event, "music_search_mode", "list") or "list")
             return "\n".join([
                 "🎵 点歌设置",
                 "",
+                f"（当前协议端：{caps.label}）",
                 f"点歌开关：{on}",
                 f"默认平台：{platform}",
                 f"列表长度：{count} 首",
-                f"发送方式：{send}（link/card/voice/file）",
+                f"发送方式：{send}（link/card/voice）"
+                + ("　⚠️ 本协议端不支持音乐卡片" if not caps.music_card else ""),
                 f"点歌方式：{'列表（发列表图，回序号播放）' if search == 'list' else '直接送（直接发第一首）'}",
                 "",
                 "改：#R配置 点歌 平台|数量|发送|方式|开关 <值>",
+                "（发送方式与点歌方式**只改当前协议端这份**）",
             ])
 
         if len(args) < 2:
@@ -2968,23 +3991,32 @@ class Main(Star):
             value = self._MUSIC_SEND_ALIAS.get(word)
             if not value:
                 return f"❓ 发送方式只认 链接｜卡片｜语音｜文件，收到「{raw}」。"
-            err = self._save_conf("music.sendMode", value)
+            err = self._save_conf("music.sendMode", value, event)
             if err:
                 return f"❌ 保存失败：{err}"
             extra = ""
-            if value == "card" and not self.conf_get("music.enableSignProxy", True):
+            if value == "card" and not caps.music_card:
+                extra = f"\n⚠️ {caps.label} 没有音乐卡片消息段，实际会降级成语音。"
+            elif value == "card" and not self._sign_proxy_enabled():
                 extra = "\n⚠️ 签名代理是关的，音乐卡片不会显示，建议先打开它。"
-            return f"✅ 点歌发送方式已改为 **{value}**{extra}"
+            return (
+                f"✅ 点歌发送方式已改为 **{value}**{extra}"
+                f"\n（只影响 {caps.label} 这份配置）"
+            )
 
         # ---- 列表 / 直接送 ----
         if field_key in ("方式", "模式", "searchmode"):
             value = self._MUSIC_SEARCH_ALIAS.get(word)
             if not value:
                 return f"❓ 点歌方式只认 列表｜直接，收到「{raw}」。"
-            err = self._save_conf("music.searchMode", value)
+            err = self._save_conf("music.searchMode", value, event)
             if err:
                 return f"❌ 保存失败：{err}"
-            return f"✅ 点歌方式已改为 **{value}**（{'发列表图后回序号' if value == 'list' else '直接发第一首'}）"
+            return (
+                f"✅ 点歌方式已改为 **{value}**"
+                f"（{'发列表图后回序号' if value == 'list' else '直接发第一首'}）"
+                f"\n（只影响 {caps.label} 这份配置）"
+            )
 
         # ---- 总开关 ----
         if field_key in ("开关", "enable"):
@@ -3005,12 +4037,20 @@ class Main(Star):
     # 发送形式
     # ------------------------------------------------------------------
 
-    def _cfg_form(self, args: list[str]) -> str:
-        now = "聊天记录（合并转发）" if self._forward_enabled() else "直发（多条消息）"
+    def _cfg_form(self, event: AstrMessageEvent, args: list[str]) -> str:
+        caps = self._caps(event)
+        now = "聊天记录（合并转发）" if self._forward_enabled(event) else "直发（多条消息）"
+        # 这条命令改的是**当前协议端**那份配置（见 core/platform_profiles.py）
+        scope = (
+            "⚠️ 当前协议端不支持合并转发，只能直发。"
+            if not caps.forward
+            else f"（只影响 {caps.label} 这份配置）"
+        )
 
         if not args:
             return "\n".join([
                 f"📤 解析内容发送形式：**{now}**",
+                scope,
                 "",
                 "· 聊天记录：每次解析打包成一条合并转发，简介和全部图片/视频都在里面，",
                 "　不再单独发「识别成功」那条提示 —— 内容多的时候不刷屏。",
@@ -3019,15 +4059,21 @@ class Main(Star):
                 "切换：#R配置 形式 聊天记录｜直发",
             ])
 
+        if not caps.forward:
+            return (
+                f"⚠️ {caps.label} 没有合并转发消息段，只能直发。\n"
+                "想在官机上收拢内容，用「#R平台」看它支持什么。"
+            )
+
         word = "".join(args).lower()
         if word in ("聊天记录", "聊天", "转发", "合并转发", "forward", "chat"):
-            err = self._save_conf("plugin.send_as_forward", True)
+            err = self._save_conf("plugin.send_as_forward", True, event)
             if err:
                 return f"❌ 保存失败：{err}"
             return "✅ 已改为 **聊天记录（合并转发）**，下一条链接就按这个形式发。"
 
         if word in ("直发", "普通", "分开", "direct", "normal", "off"):
-            err = self._save_conf("plugin.send_as_forward", False)
+            err = self._save_conf("plugin.send_as_forward", False, event)
             if err:
                 return f"❌ 保存失败：{err}"
             return "✅ 已改回 **直发（多条消息）**。"
@@ -3038,14 +4084,27 @@ class Main(Star):
     # 写配置
     # ------------------------------------------------------------------
 
-    def _save_conf(self, path: str, value) -> str:
+    def _save_conf(
+        self, path: str, value, event: AstrMessageEvent | None = None
+    ) -> str:
         """把 ``a.b.c`` 路径上的值写进插件配置并落盘，返回错误说明（空串=成功）。
 
         ⚠️ **路径对应的键必须已经写在 ``_conf_schema.json`` 里**：AstrBot 在
         插件代码跑起来之前会按 schema 裁剪配置，schema 里没有的键写进去当时
         有效、下次启动就被删掉（v1.3.0 的 Cookie 就是这么丢的）。这里只负责写，
         不负责补 schema —— 新增可写配置时记得两边一起加。
+
+        **传了 ``event`` 时会按协议端重定向**：像 ``plugin.send_as_forward``
+        这种属于「发送形态」的路径，在分协议端模式下要写到
+        ``profiles.<协议端>.<字段>``。否则用户在官机里发
+        ``#R配置 形式 直发``，改的却是 OneBot 那份 —— 表现为「命令回了成功，
+        但行为没变」，非常难查。
         """
+        if event is not None:
+            path = profile_save_path(
+                self._platform_profiles(), self._caps_key(event), path
+            )
+
         parts = [p for p in str(path).split(".") if p]
         if not parts:
             return "配置路径为空"
@@ -3118,6 +4177,10 @@ class Main(Star):
     # 所以按估算体积提前拦住并明确降级，而不是发出去卡死。
     _MUSIC_VOICE_MAX_SECONDS = 90        # 90 秒 ≈ 10.5MB payload
     _MUSIC_VOICE_BYTES_PER_SEC = 117_000  # base64 后的近似字符数/秒
+    # 官机的上限能放宽很多：它**不走跨容器的 base64 HTTP**（AstrBot 内部处理完
+    # 直连 QQ 接口），而且适配器会先把音频转成 **silk** 再上传（体积约 1/30），
+    # 所以几分钟的歌也能整条发成语音，不用退化成链接。
+    _MUSIC_VOICE_MAX_SECONDS_QQ = 300
 
     def _music_target_platform(self) -> str:
         """配置里选的默认点歌平台。"""
@@ -3126,13 +4189,15 @@ class Main(Star):
             raw, "netease"
         )
 
-    def _music_search_mode(self) -> str:
+    def _music_search_mode(self, event: AstrMessageEvent | None = None) -> str:
         """搜索后的呈现方式。
 
         - ``list``（默认）：发列表图，60 秒内回序号点播 —— 「搜索点歌」
         - ``direct``：直接按 ``sendMode`` 送出第一首 —— 保留原来的「指定点歌」
         """
-        raw = str(self.conf_get("music.searchMode", "list") or "list").strip().lower()
+        raw = str(
+            self.conf_plat(event, "music_search_mode", "list") or "list"
+        ).strip().lower()
         return raw if raw in ("list", "direct") else "list"
 
     # ------------------------------------------------------------------
@@ -3182,23 +4247,77 @@ class Main(Star):
         """
         self._music_sessions.pop(event.unified_msg_origin, None)
 
-    def _music_send_mode(self) -> str:
-        """配置里选的发送方式。认不出的一律回退到最稳的 link。"""
-        mode = str(self.conf_get("music.sendMode", "link") or "link").strip().lower()
-        return mode if mode in self._MUSIC_SEND_LIMIT else "link"
+    def _music_send_mode(self, event: AstrMessageEvent | None = None) -> str:
+        """配置里选的发送方式，并**按协议端能力兜底**。
 
-    async def _music_resolve_url(self, song) -> str:
-        """取音频直链（自动带上配置里对应平台的 Cookie）。"""
+        两道兜底，顺序不能反：
+
+        1. 认不出的值（改配置手滑）→ 最稳的 ``link``；
+        2. **配置选的能力本协议端没有** → 降级。最典型的是 ``card``
+           （音乐卡片）在 QQ 官方机器人上不存在 —— 那边只有 ``msg_type``
+           里没有 music 段，硬发就是整条失败。这时降级成 **``voice``**
+           （用户要的「用语音代替音乐卡片」）。
+
+        ⭐ 为什么能力兜底放这么靠前：**偏好不能盖过能力**。
+        ``conf_plat`` 有一条「面板还是默认值时继承旧键」的兼容规则，
+        所以用户以前设的 ``music.sendMode=card`` 会被带到官机那份配置里；
+        没有这道兜底，官机就会拿着 ``card`` 去发一个它做不到的形态。
+        """
+        mode = str(
+            self.conf_plat(event, "music_send_mode", "link") or "link"
+        ).strip().lower()
+        if mode not in self._MUSIC_SEND_LIMIT:
+            return "link"
+
+        if mode == "card" and event is not None and not self._caps(event).music_card:
+            logger.debug(
+                f"[R插件] {self._caps(event).label} 没有音乐卡片消息段，"
+                "点歌发送方式降级为语音"
+            )
+            return "voice"
+        return mode
+
+    async def _music_resolve_url(self, song, *, high: bool = True) -> str:
+        """取音频直链（自动带上配置里对应平台的 Cookie）。
+
+        ``high=False`` 走**标准音质** —— 官机发语音时用这个：适配器最终会把音频
+        转成 **silk** 再上传，高音质白白多花几倍下载时间，还更容易失败。
+        """
         try:
             return await music_get_play_url(
                 song,
                 netease_cookie=self.cookie_for("netease"),
                 qq_cookie=self.cookie_for("qqmusic"),
-                high=True,
+                high=high,
             )
         except Exception as exc:  # noqa: BLE001 - 取直链失败不该让整条命令崩
             logger.warning(f"[R插件] 点歌取直链失败: {type(exc).__name__}: {exc}")
             return ""
+
+    @staticmethod
+    def _music_fail_reason(platform: str) -> str:
+        """取直链失败时**按平台说清原因**，别丢一句「可能没配 Cookie」。
+
+        两个平台的失败原因完全不同（都是实测结论）：
+
+        * **QQ音乐**：``result=104003`` ＝ **登录态过期**。``qqmusic_key``
+          只有约 12 小时有效期，过期后搜索照常、但取直链恒失败 ——
+          含糊的提示会让人以为插件坏了，然后反复重试。
+        * **网易云**：直链为空一般是 ``fee=1/4``（VIP / 需购买），
+          光有 Cookie 也不够，换版本比换 Cookie 有用。
+        """
+        if platform == "qqmusic":
+            return (
+                "QQ音乐的登录态过期了（`qqmusic_key` 约 12 小时有效期，"
+                "过期后搜索正常但取不到播放地址）。\n"
+                "重新抓一次 Cookie 发给我就能恢复：`#R配置 cookie QQ音乐`"
+            )
+        if platform == "netease":
+            return "这首歌可能需要会员（或已下架），换个版本试试"
+        return "音频地址取不到"
+
+    def _music_fail_hint(self, song) -> str:
+        return f"🎵 {self._music_fail_reason(song.platform)}\n\n先给链接：\n{song.page_url}"
 
     @staticmethod
     def _music_card(song) -> Comp.Music | None:
@@ -3344,13 +4463,19 @@ class Main(Star):
             return
 
         label = PLATFORM_LABELS.get(used, used)
-        mode = self._music_send_mode()
+        caps = self._caps(event)
+        mode = self._music_send_mode(event)
+        if mode == "card" and not caps.music_card:
+            # 官方机器人**没有 Comp.Music 这个段**，卡片必定发不出去 ——
+            # 按「音乐卡片改用语音代替」自动降级，而不是让用户空等一条失败。
+            logger.info("[R插件] 本协议端不支持音乐卡片，发送方式自动降级为语音")
+            mode = "voice"
         logger.info(f"[R插件] 点歌「{keyword}」-> {label} {len(songs)} 首，发送方式={mode}")
 
         # 「搜索点歌」（默认）：发一张列表图，并记下候选列表，
         # 用户 60 秒内回序号即点播 —— 与「指定点歌」（searchMode=direct，直接送）
         # 并存，由配置切换。
-        if self._music_search_mode() == "list":
+        if self._music_search_mode(event) == "list":
             async for item in self._music_render_list_image(
                 event, songs, used, label, keyword
             ):
@@ -3411,17 +4536,45 @@ class Main(Star):
         if not sent:
             # 兜底：所有目标都没成功，至少把链接给出去，别让用户空等
             yield event.plain_result(
-                "🎵 音频准备失败（可能是没配 Cookie 或接口限流），先给链接：\n"
+                f"🎵 {self._music_fail_reason(used)}\n\n先给这几首的链接：\n"
                 + "\n".join(f"· {s.label}\n  {s.page_url}" for s in songs[:3])
             )
+
+    async def _send_music_list_md(
+        self, event, songs, keyword: str, label: str, used: str
+    ) -> bool:
+        """（官机）点歌搜索结果：**一条 MD 列表，歌名文字本身可点**。
+
+        ⭐ 用的是 QQ 官方的**内联指令**（``mqqapi://aio/inlinecmd``）：
+        每行写成链接样式，**点一下就把序号填进输入框**，用户直接发送即点播 ——
+        所以**不需要底部按钮**，列表看起来就是普通文字列表（正是要的效果）。
+
+        没用「回车指令」（``enter=true`` 点了直接发送）的原因：官方注明
+        **群聊不支持**那个能力，而群聊恰恰是主要场景，所以统一走参数指令。
+        """
+        lines = [f"# 🎵 {label} · 点歌「{keyword}」", ""]
+        for i, song in enumerate(songs, 1):
+            lines.append(qq_inline_cmd(f"{i}. {song.label}", str(i)))
+        lines += [
+            "",
+            f"> 点歌名即可，序号会自动填进输入框"
+            f"（{int(self._MUSIC_PICK_TTL)} 秒内有效）",
+        ]
+        if used == "qqmusic" and not self.cookie_for("qqmusic"):
+            lines.append("> ⚠️ 未配 QQ音乐 Cookie，可能只能试听")
+        return await self._send_qq_payload(
+            event, {"msg_type": 2, "markdown": {"content": "\n".join(lines)}}
+        )
 
     async def _music_render_list_image(
         self, event, songs, used: str, label: str, keyword: str
     ):
-        """``searchMode=list``：发一张点歌列表图，并记下候选列表供序号点播。
+        """``searchMode=list``：发点歌列表，并记下候选列表供序号点播。
 
-        图是 Pillow 现画的（无二维码，见 ``core/music_card_image.py``）。
-        画图不可用（缺 Pillow / 字体）时退回文字列表，不影响功能。
+        * **官机**：列表图是**本地渲染的 PNG**（没有公网 URL、塞不进 markdown，
+          而按钮只能挂 markdown）→ 改用「MD 列表 + 每首歌一个按钮」，
+          见 ``_send_music_list_md``。
+        * **其它协议端**：Pillow 现画一张列表图（无二维码）；画不出来退回文字列表。
 
         ⚠️ 用 ``Comp.Image.fromBytes`` 而不是 ``fromFileSystem``：
         后者只存路径，真正读文件发生在**发送阶段**的 ``convert_to_base64()``，
@@ -3430,6 +4583,12 @@ class Main(Star):
         shown = songs[: self._MUSIC_LIST_IMAGE_MAX]
         self._remember_music_pick(event, keyword, used, label, shown)
         hint = f"回复 1-{len(shown)} 播放（{int(self._MUSIC_PICK_TTL)} 秒内有效）"
+
+        caps = self._caps(event)
+        if caps.keyboard and self._qq_buttons_enabled(event):
+            if await self._send_music_list_md(event, shown, keyword, label, used):
+                return
+            logger.info("[R插件] MD 点歌列表发送失败，退回文字列表")
 
         png = await render_song_list(shown, keyword, label, used, hint)
         if png:
@@ -3442,6 +4601,80 @@ class Main(Star):
         async for item in self._music_render_link(event, songs, used, label, keyword):
             yield item
 
+    @staticmethod
+    def _music_cover_url(cover: str, *, size: int = 500) -> str:
+        """把封面 URL 规整成「**https + 合适尺寸**」，供 markdown 内嵌用。
+
+        ⚠️ 两个必须处理的点（2026-09-23 实测）：
+
+        1. **网易云给的是 ``http://``** —— QQ 的 markdown 图片只认 https，
+           原样塞进去手机上就是「图片加载失败」；
+        2. **尺寸**：网易云给的是原图（实测 118KB ~ 929KB，太大），
+           QQ音乐给 ``T002R150x150M``（150×150，当专辑图会糊）。
+           两边的 URL 都能改：
+           网易云加 ``?param=WyH``、QQ音乐把 ``R150x150`` 换成 ``R{size}x{size}``。
+
+        认不出的域名原样返回（只把 http 升成 https），不改结构。
+        """
+        if not cover:
+            return ""
+        url = cover
+        if url.startswith("http://"):
+            url = "https://" + url[len("http://"):]
+        if "music.126.net" in url:
+            return f"{url.split('?', 1)[0]}?param={size}y{size}"
+        if "gtimg.cn" in url:
+            return re.sub(r"R\d+x\d+M", f"R{size}x{size}M", url)
+        return url
+
+    async def _send_music_detail_md(self, event, song, label: str) -> bool:
+        """（官机）点播结果：**一条 MD** —— 专辑图 + 小字歌曲信息 + 「歌曲详情」跳转按钮。
+
+        **专辑图是公网 CDN 的 URL**（网易云 / QQ音乐封面），能直接 markdown 内嵌 ——
+        这也是官机上唯一能让「图片 + 按钮」出现在同一条的路子（本地渲染的图没有
+        公网 URL，而按钮只能挂 markdown）。
+
+        两处细节：
+
+        * 「小字」：markdown 没有字号控制，用**引用块**（``>``）表达「次要信息」，
+          视觉上就是图下面那行浅色小字；
+        * 跳转按钮用 ``action.type=0``，目标是**歌曲详情页**（``page_url``），
+          **不是 mp3 直链** —— 直链在手机上点开多半放不了。
+
+        成功后调用方紧接着**单独**发语音（用户要的就是「MD 图文一条 + 语音一条」）。
+        """
+        cover = self._music_cover_url(song.cover)
+        size = await self._probe_image_size(cover) if cover else None
+
+        lines = [f"# {song.name}"]
+        if cover:
+            lines += [
+                "",
+                self._md_image(
+                    cover, size, alt="专辑图", max_width=self._md_image_width(event)
+                ),
+            ]
+        meta: list[str] = []
+        if song.artist:
+            meta.append(song.artist)
+        if song.album:
+            meta.append(f"《{song.album}》")
+        if song.duration:
+            meta.append(f"{song.duration // 60}:{song.duration % 60:02d}")
+        if meta:
+            lines += ["", "> " + " · ".join(meta)]
+        if label:
+            lines.append(f"> 来自 {label}")
+        md = "\n".join(lines)
+
+        if song.page_url:
+            return await self._send_md_with_buttons(
+                event, md, [[qq_link_button("歌曲详情", song.page_url, style=1)]]
+            )
+        return await self._send_qq_payload(
+            event, {"msg_type": 2, "markdown": {"content": md}}
+        )
+
     async def cmd_music_pick(self, event: AstrMessageEvent):
         """``<序号>`` —— 点歌列表发出后 60 秒内回数字即播放对应歌曲。
 
@@ -3453,7 +4686,7 @@ class Main(Star):
         """
         if not self.conf_get("music.enable", False):
             return
-        if self._music_search_mode() != "list":
+        if self._music_search_mode(event) != "list":
             return
 
         text = event.get_message_str().strip()
@@ -3478,7 +4711,47 @@ class Main(Star):
         self._forget_music_pick(event)
         logger.info(f"[R插件] 序号点播「{keyword}」#{index} -> {song.label}")
 
-        mode = self._music_send_mode()
+        # 官机：一条 **MD 图文**（专辑图 + 小字信息 + 「歌曲详情」跳转按钮），
+        # 再**单独**一条语音 —— 用户要的就是这个形态。
+        caps = self._caps(event)
+        if caps.keyboard and self._qq_buttons_enabled(event):
+            # 标准音质就够：语音最终会被适配器转成 silk，高音质只是白等下载
+            song.play_url = await self._music_resolve_url(song, high=False)
+            if not song.play_url:
+                yield event.plain_result(self._music_fail_hint(song))
+                return
+
+            # **下载和发 MD 并行** —— 两者互不依赖，串起来等于白等一次 2~5 秒
+            # 的下载。这边先把音频下着，MD 一发出就直接接语音。
+            # （不额外调 music_verify_audio：下载失败本身就会抛出来。）
+            dl_task = asyncio.create_task(
+                download_media(song.play_url, prefix="music", timeout=90.0)
+            )
+            md_ok = await self._send_music_detail_md(event, song, label)
+            audio_path = None
+            try:
+                audio_path = await dl_task
+            except (HttpError, MediaTooLarge) as exc:
+                logger.warning(f"[R插件] 点歌音频下载失败: {exc}")
+
+            if md_ok:
+                if audio_path is None:
+                    yield event.plain_result(
+                        f"🎵「{song.label}」音频下载失败，改用链接：\n{song.page_url}"
+                    )
+                    return
+                async for item in self._music_render_voice(
+                    event, song, label, preloaded=audio_path
+                ):
+                    yield item
+                return
+            logger.info("[R插件] MD 点播详情发送失败，退回原发送方式")
+
+        mode = self._music_send_mode(event)
+        if mode == "card" and not caps.music_card:
+            # 官方机器人没有 Comp.Music → 卡片必定失败，降级成语音
+            logger.info("[R插件] 本协议端不支持音乐卡片，发送方式自动降级为语音")
+            mode = "voice"
         if mode == "link":
             async for item in self._music_render_link(event, [song], used, label, keyword):
                 yield item
@@ -3497,10 +4770,7 @@ class Main(Star):
 
         song.play_url = await self._music_resolve_url(song)
         if not song.play_url:
-            yield event.plain_result(
-                f"🎵 取音频失败（可能是没配 Cookie 或接口限流），先给链接：\n"
-                f"{song.page_url}"
-            )
+            yield event.plain_result(self._music_fail_hint(song))
             return
 
         if mode == "voice":
@@ -3523,7 +4793,55 @@ class Main(Star):
             lines.append("💡 未配置 QQ音乐 Cookie，链接点开可能只能试听")
         yield event.plain_result("\n".join(lines))
 
-    async def _music_render_voice(self, event, song, label: str):
+    async def _music_to_voice_wav(self, src: Path) -> Path | None:
+        """把音频转成「语音条友好」的小 wav —— **16kHz 单声道**。
+
+        **这是语音发送最大的一处提速**（实测 268 秒的歌）：
+
+        ====================  ================  ==============
+        格式                  体积               base64 后
+        ====================  ================  ==============
+        44.1k 立体声 wav      60.3 MB           60.3 MB
+        **16k 单声道 wav**    8.6 MB            11.5 MB
+        ====================  ================  ==============
+
+        **为什么这样能生效**：AstrBot 的 ``Record.convert_to_base64()`` 写死了
+        ``to_base64(target_format="wav")``，看起来躲不掉；但底层的
+        ``ensure_wav()`` 有一条：「发现已经是 wav 就**直接返回、跳过转码**」。
+        所以插件抢先转成小 wav 之后，框架那一步就从「转码 5.3 秒 / 60MB」
+        变成「读文件几十毫秒」。
+
+        语音条最终会被协议端转成 silk（本来就是窄带），16kHz 单声道听感没有损失。
+        转码失败返回 ``None``，调用方用原文件（只是慢一点，功能不受影响）。
+        """
+        ffmpeg = find_tool("ffmpeg")
+        if not ffmpeg:
+            return None
+        out = src.with_name(src.stem + ".voice.wav")
+        try:
+            result = await run(
+                ffmpeg, "-y", "-loglevel", "error",
+                "-threads", "0",          # 让 ffmpeg 自己决定线程数
+                "-i", str(src),
+                "-vn", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
+                str(out),
+                timeout=180,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[R插件] 语音预转码异常: {type(exc).__name__}: {exc}")
+            return None
+        if result.ok and out.exists() and out.stat().st_size > 0:
+            logger.info(
+                f"[R插件] 语音预转码: {src.stat().st_size // 1024}KB -> "
+                f"{out.stat().st_size // 1024}KB（16k 单声道，框架将跳过二次转码）"
+            )
+            return out
+        logger.debug("[R插件] 语音预转码失败（ffmpeg 非 0），退回原文件")
+        return None
+
+    async def _music_render_voice(
+        self, event, song, label: str, *, preloaded=None
+    ):
         """``voice`` 模式：下载音频后以语音条发送。
 
         ⚠️ 体积问题：``Comp.Record`` 会把音频转成未压缩 WAV，base64 后
@@ -3531,28 +4849,53 @@ class Main(Star):
         **跨容器**时要在 HTTP body 里塞这么多字符，长歌大概率失败。
         所以先用 ``song.duration`` 估算，超限就明确降级到链接，
         而不是发出去让用户等到超时。
+
+        ``preloaded``：调用方**已经并行下好**的音频路径。传了就不再下载 ——
+        官机的「MD 详情 + 语音」用它把下载和发 MD 重叠起来，省掉一次串行等待。
         """
+        caps = self._caps(event)
+        limit = (
+            self._MUSIC_VOICE_MAX_SECONDS_QQ
+            if caps.key == "qqofficial"
+            else self._MUSIC_VOICE_MAX_SECONDS
+        )
         est = song.duration * self._MUSIC_VOICE_BYTES_PER_SEC
-        if song.duration > self._MUSIC_VOICE_MAX_SECONDS:
+        if song.duration > limit:
+            tip = (
+                "（官方机器人发不了音乐卡片，长歌只能给链接）"
+                if caps.key == "qqofficial"
+                else "（想要整首可听，把「发送方式」改成 **音乐卡片** 或 **音频文件**）"
+            )
             yield event.plain_result(
                 f"🎵「{song.label}」约 {song.duration // 60} 分 {song.duration % 60} 秒，"
                 f"语音条发不下（WAV 体积约 {est / 1024 / 1024:.0f}MB）。\n"
-                "改用链接：\n"
-                f"{song.page_url}\n"
-                "（想要整首可听，把「发送方式」改成 **音乐卡片** 或 **音频文件**）"
+                f"改用链接：\n{song.page_url}\n{tip}"
             )
             return
 
-        try:
-            path = await download_media(
-                song.play_url, prefix="music", timeout=90.0
-            )
-        except (HttpError, MediaTooLarge) as exc:
-            logger.warning(f"[R插件] 点歌音频下载失败: {exc}")
-            yield event.plain_result(
-                f"🎵「{song.label}」音频下载失败，改用链接：\n{song.page_url}"
-            )
-            return
+        if preloaded is not None:
+            path = preloaded
+        else:
+            try:
+                path = await download_media(
+                    song.play_url, prefix="music", timeout=90.0
+                )
+            except (HttpError, MediaTooLarge) as exc:
+                logger.warning(f"[R插件] 点歌音频下载失败: {exc}")
+                yield event.plain_result(
+                    f"🎵「{song.label}」音频下载失败，改用链接：\n{song.page_url}"
+                )
+                return
+
+        # 抢先转成 16kHz 单声道 wav：框架认「已是 wav」就会跳过它自己那次
+        # 5 秒级、60MB 的转码（详见 _music_to_voice_wav 的实测表）。
+        small = await self._music_to_voice_wav(path)
+        if small is not None:
+            try:
+                path.unlink()  # 原文件不再需要
+            except OSError:
+                pass
+            path = small
 
         # 登记给 AstrBot，事件结束后自动回收
         try:

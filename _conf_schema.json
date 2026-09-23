@@ -177,6 +177,18 @@
         "hint": "开启后，每次解析的结果（简介 + 全部图片/视频/音频）打包成一条「合并转发」聊天记录发出来，不再单独刷多条消息、也不再发「识别成功」那条提示。聊天里可用「#R配置 形式 聊天记录」随时切换。",
         "default": false
       },
+      "mdImageWidth": {
+        "description": "官机 MD 内嵌图宽度（px）",
+        "type": "int",
+        "default": 300,
+        "hint": "QQ 官方机器人的 markdown 内嵌图片**必须带尺寸** —— 不带尺寸时电脑端能看到图、手机端只显示 [alt]。这里控制显示宽度，图片按真实比例缩放，**点开/保存仍是原图**。建议 200~400。"
+      },
+      "qqButtons": {
+        "description": "官机在菜单下挂按钮",
+        "type": "bool",
+        "default": true,
+        "hint": "QQ 官方机器人专属。发 #R菜单 时在图片下面补一条带按钮的消息（R菜单 / 视频解析 / 点歌 / 配置 / 状态 / 免艾特）。自定义按钮需要平台开放该能力，发不出去时插件会自动跳过，不影响菜单本身。"
+      },
       "bili_quality_when_logged_in": {
         "description": "B站登录后请求的画质",
         "type": "string",
@@ -215,6 +227,312 @@
         "type": "string",
         "hint": "留空则从系统 PATH 查找。用于 ffmpeg / yt-dlp / BBDown / aria2c / tdl",
         "default": ""
+      }
+    }
+  },
+  "profiles": {
+    "description": "分协议端配置（OneBot v11 / QQ 官方机器人各一份）",
+    "type": "object",
+    "hint": "AstrBot 的面板没有「选项卡」控件，所以这里用可折叠的分组代替 —— 展开哪一组就改哪一组的配置。**这些键必须留在 schema 里**：AstrBot 会在插件代码执行前按 schema 裁剪配置，不在 schema 里的键会被删掉。",
+    "items": {
+      "mode": {
+        "description": "配置来源",
+        "type": "string",
+        "hint": "选「分协议端」时，插件按消息来自哪个协议端去读下面那一组配置 —— OneBot v11 只读 OneBot 那份、QQ 官方机器人只读官方那份，互不干扰。选「通用」则全部回到「插件设置 / 点歌」里的旧选项（升级后想保持原样就选它）。",
+        "default": "per_platform",
+        "options": [
+          "per_platform",
+          "shared"
+        ],
+        "labels": [
+          "分协议端（每台机器人各读自己那份）",
+          "通用（跟随 plugin / music 里的旧设置）"
+        ]
+      },
+      "onebot": {
+        "description": "▶ OneBot v11 / NapCat / Lagrange / go-cqhttp",
+        "type": "object",
+        "hint": "能发合并转发和音乐卡片，所以这两个选项在这里有。改这里的值**只影响** OneBot 协议端。",
+        "items": {
+          "send_mode": {
+            "description": "视频发送方式（原 plugin.send_mode）",
+            "type": "string",
+            "hint": "url=发直链（省流量、对面要点开）；download=先下载再作为文件发出。",
+            "default": "url",
+            "options": [
+              "url",
+              "download"
+            ],
+            "labels": [
+              "直发链接（快）",
+              "先下载再发（稳）"
+            ]
+          },
+          "max_images": {
+            "description": "单条最多图片数（原 plugin.max_images）",
+            "type": "int",
+            "hint": "超出会拆成多条（官方机器人还受平台「一次一张」限制）。",
+            "default": 9
+          },
+          "max_videos": {
+            "description": "单条最多视频数（原 plugin.max_videos）",
+            "type": "int",
+            "default": 9
+          },
+          "send_as_forward": {
+            "description": "用聊天记录（合并转发）发送（原 plugin.send_as_forward）",
+            "type": "bool",
+            "hint": "把简介和媒体打包成一条合并转发。**QQ 官方机器人没有这个能力**，所以只在本组显示。",
+            "default": false
+          },
+          "album_forward_when_exceed": {
+            "description": "图集超限时合并成聊天记录（原 plugin.album_forward_when_exceed）",
+            "type": "bool",
+            "hint": "图片超过上面的上限时，用一条合并转发完整送出，而不是砍掉多余的。",
+            "default": true
+          },
+          "show_desc": {
+            "description": "一起发送文字描述（原 plugin.show_desc）",
+            "type": "bool",
+            "hint": "解析结果里的标题 / 简介要不要跟着媒体发出来。",
+            "default": true
+          },
+          "reply_on_error": {
+            "description": "解析失败时回复提示（原 plugin.reply_on_error）",
+            "type": "bool",
+            "hint": "关掉则失败时静默（群比较吵的时候用）。",
+            "default": false
+          },
+          "only_group": {
+            "description": "只在群聊生效（原 plugin.only_group）",
+            "type": "bool",
+            "default": false
+          },
+          "download_concurrency": {
+            "description": "媒体下载并发数（原 plugin.download_concurrency）",
+            "type": "int",
+            "hint": "官方机器人接口对并发更敏感，默认给得保守一些。",
+            "default": 8
+          },
+          "music_send_mode": {
+            "description": "点歌发送方式（原 music.sendMode）",
+            "type": "string",
+            "hint": "link=链接；card=音乐卡片（**仅 OneBot**）；voice=语音条。官方机器人没有音乐卡片，默认用语音。",
+            "default": "link",
+            "options": [
+              "link",
+              "card",
+              "voice"
+            ],
+            "labels": [
+              "链接",
+              "音乐卡片（仅 OneBot）",
+              "语音条"
+            ]
+          },
+          "music_search_mode": {
+            "description": "点歌方式（原 music.searchMode）",
+            "type": "string",
+            "hint": "list=先出列表、回序号点播；direct=直接送第一首。",
+            "default": "list",
+            "options": [
+              "list",
+              "direct"
+            ],
+            "labels": [
+              "列表（回序号点播）",
+              "直接送第一首"
+            ]
+          },
+          "enable_sign_proxy": {
+            "description": "启用音乐卡片签名代理（原 music.enableSignProxy）",
+            "type": "bool",
+            "hint": "OneBot 专属：协议端发音乐卡片要外部签名服务，而其响应是双重编码的，插件内置代理帮忙展开。官方机器人用不到。",
+            "default": true
+          }
+        }
+      },
+      "qqofficial": {
+        "description": "▶ QQ 官方机器人",
+        "type": "object",
+        "hint": "官方机器人没有合并转发和音乐卡片消息段，所以那两项不在这里（配置了也不会生效）；换来的是原生 markdown 和消息按钮。改这里的值**只影响**官方机器人。",
+        "items": {
+          "send_mode": {
+            "description": "视频发送方式（原 plugin.send_mode）",
+            "type": "string",
+            "hint": "url=发直链（省流量、对面要点开）；download=先下载再作为文件发出。",
+            "default": "url",
+            "options": [
+              "url",
+              "download"
+            ],
+            "labels": [
+              "直发链接（快）",
+              "先下载再发（稳）"
+            ]
+          },
+          "max_images": {
+            "description": "单条最多图片数（原 plugin.max_images）",
+            "type": "int",
+            "hint": "超出会拆成多条（官方机器人还受平台「一次一张」限制）。",
+            "default": 9
+          },
+          "max_videos": {
+            "description": "单条最多视频数（原 plugin.max_videos）",
+            "type": "int",
+            "default": 9
+          },
+          "show_desc": {
+            "description": "一起发送文字描述（原 plugin.show_desc）",
+            "type": "bool",
+            "hint": "解析结果里的标题 / 简介要不要跟着媒体发出来。",
+            "default": true
+          },
+          "reply_on_error": {
+            "description": "解析失败时回复提示（原 plugin.reply_on_error）",
+            "type": "bool",
+            "hint": "关掉则失败时静默（群比较吵的时候用）。",
+            "default": false
+          },
+          "only_group": {
+            "description": "只在群聊生效（原 plugin.only_group）",
+            "type": "bool",
+            "default": false
+          },
+          "download_concurrency": {
+            "description": "媒体下载并发数（原 plugin.download_concurrency）",
+            "type": "int",
+            "hint": "官方机器人接口对并发更敏感，默认给得保守一些。",
+            "default": 4
+          },
+          "music_send_mode": {
+            "description": "点歌发送方式（原 music.sendMode）",
+            "type": "string",
+            "hint": "link=链接；card=音乐卡片（**仅 OneBot**）；voice=语音条。官方机器人没有音乐卡片，默认用语音。",
+            "default": "voice",
+            "options": [
+              "link",
+              "card",
+              "voice"
+            ],
+            "labels": [
+              "链接",
+              "音乐卡片（仅 OneBot）",
+              "语音条"
+            ]
+          },
+          "music_search_mode": {
+            "description": "点歌方式（原 music.searchMode）",
+            "type": "string",
+            "hint": "list=先出列表、回序号点播；direct=直接送第一首。",
+            "default": "list",
+            "options": [
+              "list",
+              "direct"
+            ],
+            "labels": [
+              "列表（回序号点播）",
+              "直接送第一首"
+            ]
+          },
+          "md_image_width": {
+            "description": "MD 内嵌图宽度（px）（原 plugin.mdImageWidth）",
+            "type": "int",
+            "hint": "官方机器人专属。markdown 里的图片**必须带尺寸**，不带时电脑端能看到、手机端只显示 [alt]。图片按真实比例缩放，点开 / 保存仍是原图。建议 200~400。",
+            "default": 300
+          },
+          "qq_buttons": {
+            "description": "菜单 / 列表下挂按钮（原 plugin.qqButtons）",
+            "type": "bool",
+            "hint": "官方机器人专属。自定义按钮需要平台开通该能力，发不出去时插件会自动跳过，不影响内容本身。",
+            "default": true
+          }
+        }
+      },
+      "fallback": {
+        "description": "▶ 其它协议端（微信 / 钉钉 / Telegram…）",
+        "type": "object",
+        "hint": "微信 / 钉钉 / Telegram 等第三方协议端，保守取值：不发合并转发、不发音乐卡片。",
+        "items": {
+          "send_mode": {
+            "description": "视频发送方式（原 plugin.send_mode）",
+            "type": "string",
+            "hint": "url=发直链（省流量、对面要点开）；download=先下载再作为文件发出。",
+            "default": "url",
+            "options": [
+              "url",
+              "download"
+            ],
+            "labels": [
+              "直发链接（快）",
+              "先下载再发（稳）"
+            ]
+          },
+          "max_images": {
+            "description": "单条最多图片数（原 plugin.max_images）",
+            "type": "int",
+            "hint": "超出会拆成多条（官方机器人还受平台「一次一张」限制）。",
+            "default": 9
+          },
+          "max_videos": {
+            "description": "单条最多视频数（原 plugin.max_videos）",
+            "type": "int",
+            "default": 9
+          },
+          "show_desc": {
+            "description": "一起发送文字描述（原 plugin.show_desc）",
+            "type": "bool",
+            "hint": "解析结果里的标题 / 简介要不要跟着媒体发出来。",
+            "default": true
+          },
+          "reply_on_error": {
+            "description": "解析失败时回复提示（原 plugin.reply_on_error）",
+            "type": "bool",
+            "hint": "关掉则失败时静默（群比较吵的时候用）。",
+            "default": false
+          },
+          "only_group": {
+            "description": "只在群聊生效（原 plugin.only_group）",
+            "type": "bool",
+            "default": false
+          },
+          "download_concurrency": {
+            "description": "媒体下载并发数（原 plugin.download_concurrency）",
+            "type": "int",
+            "hint": "官方机器人接口对并发更敏感，默认给得保守一些。",
+            "default": 8
+          },
+          "music_send_mode": {
+            "description": "点歌发送方式（原 music.sendMode）",
+            "type": "string",
+            "hint": "link=链接；card=音乐卡片（**仅 OneBot**）；voice=语音条。官方机器人没有音乐卡片，默认用语音。",
+            "default": "link",
+            "options": [
+              "link",
+              "card",
+              "voice"
+            ],
+            "labels": [
+              "链接",
+              "音乐卡片（仅 OneBot）",
+              "语音条"
+            ]
+          },
+          "music_search_mode": {
+            "description": "点歌方式（原 music.searchMode）",
+            "type": "string",
+            "hint": "list=先出列表、回序号点播；direct=直接送第一首。",
+            "default": "list",
+            "options": [
+              "list",
+              "direct"
+            ],
+            "labels": [
+              "列表（回序号点播）",
+              "直接送第一首"
+            ]
+          }
+        }
       }
     }
   },
