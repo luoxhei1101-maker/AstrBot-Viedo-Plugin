@@ -88,6 +88,7 @@ from .core.downloader import (
 )
 from .core.external import describe_environment, find_tool, run
 from .core.http import HttpError, close_session as close_http_session
+from .core.image_bed import upload_image
 from .core.media import (
     MergeError,
     animated_to_mp4,
@@ -381,6 +382,29 @@ _MD_IMAGE_TEST_URL = (
 # 一次最多嵌几张（QQ markdown 消息体有长度上限，别把 URL 堆爆）
 _MD_IMAGE_TEST_MAX = 6
 
+# 「MD 排版自检」的默认样本 —— 直接抄一条真实的抖音作品文案：
+# 它同时具备两个会引爆 markdown 的特征：**多行** + 每行以 `#话题` 开头。
+# 正常放进正文里，每一行都会被当成标题，整片排版垮掉。
+_MD_LAYOUT_SAMPLE = (
+    "一直说说说。#小猫 #罗小黑 #皇受 #同人 #抽象\n"
+    "#暗区跳舞 #猎奇 #抽象\n"
+    "原声 - 卡卡（反迷你）"
+)
+# 零宽空格：插在 `#` 后面能让 markdown 不把它当标题语法，肉眼看不出来。
+_MD_ZWSP = "\u200b"
+
+# 菜单随机图 API（``plugin.menuImageApi`` 的默认值）—— 用 elaina 的**竖屏**档。
+#
+# 实测三档的比例极差（2026-09-23，各取样 6 张）：
+#
+#     /random/           1.522 ~ 2.604      极差 1.082   ← 横竖混着给，会变形
+#     /random/mobile     0.646 ~ 0.750      极差 0.104   ← 用这个
+#     /random/pc         1.723 ~ 2.604      极差 0.880
+#
+# 尺寸是插件本地读出来再写进 markdown 的（所以最终不会变形），
+# 这里挑竖屏只是因为**菜单图本来就更适合竖着看**。
+_MENU_IMAGE_API_DEFAULT = "https://api.elaina.cat/random/mobile"
+
 # 官机语音上传的超时（秒）。实测（2026-09-23，414KB silk）：
 #
 #     静置 150 秒后首次上传    8.28s   ✅
@@ -402,13 +426,6 @@ _QQ_UPLOAD_FAST_FAIL = 6.0
 _LOCAL_COMMAND_METHODS: dict[str, str] = {
     "bili_scan": "cmd_bili_scan",
     "bili_state": "cmd_bili_state",
-    # 平台能力：要看 event 才知道是哪个协议端
-    "platform_caps": "cmd_platform_caps",
-    "platform_test": "cmd_platform_test",
-    # 多图 MD 自检：要按 event 判断协议端是否有原生 markdown
-    "md_image": "cmd_md_image",
-    # 官机专属：按钮自检 / 免艾特指引 / 解析说明
-    "buttons_test": "cmd_buttons_test",
     "no_at": "cmd_no_at",
     "resolve_help": "cmd_resolve_help",
     # 点歌搜索：要读配置里的 Cookie + 按平台搜索，不适合走「链接 -> 媒体」
@@ -1338,10 +1355,28 @@ class Main(Star):
         而是依次追加。
         """
         # ---- 先发文字简介（类型 + 标题 + 作者）----
-        if show_desc:
+        #
+        # 官机上改走 **markdown**：作品文案放代码框（标记写「标题」）——
+        # 否则文案里的 `#话题` 每一行都会被渲染成大标题。
+        # 别的协议端保持纯文本：那条路没有 markdown，`#` 本来就不会被解析。
+        #
+        # ⚠️ 但**图集 / 多图要跳过** —— 那条路自己会发一条带标题的 MD
+        # （``_gallery_md_text``），不跳会重复两条标题。
+        if show_desc and not self._will_send_gallery_md(event, result):
             intro = self._build_intro(result, prefix)
             if intro:
-                yield event.plain_result(intro)
+                md = (
+                    self._build_intro_md(result)
+                    if self._caps(event).markdown
+                    else None
+                )
+                if md:
+                    chain = event.chain_result([Comp.Plain(md)])
+                    if hasattr(chain, "use_markdown"):
+                        chain.use_markdown(True)
+                    yield chain
+                else:
+                    yield event.plain_result(intro)
 
         sent_media = False
         skip_images = False
@@ -1676,6 +1711,36 @@ class Main(Star):
     # 卡个上限是防止「10 条评论 × 多图」把临时目录撑爆
     _COMMENT_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 
+    def _comment_md_text(self, comments: list[dict], label: str) -> str:
+        """（官机）把评论拼成**一条 markdown**：昵称 / 正文 / 时间都在代码框里。
+
+        **为什么官机走这条**：
+
+        1. 官机**没有合并转发**（``Comp.Nodes`` 那个消息段适配器根本不认），
+           原来的评论路径在官机上等于发不出去；
+        2. 评论正文里什么都有 —— ``#话题`` / ``*强调*`` / ``~~删除~~`` 都会
+           被 markdown 解析，排版立刻垮掉，所以**整条包进代码框**（框内原样）；
+        3. **图片和动图都不带** —— 官机的媒体通道一次只能传一个，
+           几条评论就能把消息刷满屏。用户明确要这个形态。
+
+        代码框的**语言标记位置放评论人昵称** —— 客户端会把它渲染成框的标题，
+        比在正文里再写一遍 ``【昵称】`` 更省版面（用户指定）。
+        昵称里的空白和反引号要清掉，否则语言标记解析不了；正文里的 `` ``` ``
+        也要替换（不然框会被提前闭合）。
+        """
+        blocks: list[str] = []
+        for c in comments:
+            name = str(c.get("nickname") or "").strip()
+            text = str(c.get("text") or "").strip()
+            if not (name or text):
+                continue
+            tag = re.sub(r"[\s`]+", "", name)[:20]
+            safe = text.replace("```", "'''")
+            blocks.append(f"```{tag}\n{safe}\n```")
+        if not blocks:
+            return ""
+        return "\n\n".join([f"# 💬 {label} · 评论（{len(blocks)} 条）", *blocks])
+
     async def _build_comment_nodes(
         self, event: AstrMessageEvent, comments: list[dict]
     ) -> list:
@@ -1782,6 +1847,16 @@ class Main(Star):
         if not comments:
             return
 
+        # ---- 官机：没有合并转发，改发「一条 MD + 代码框」（不带图/动图）----
+        if self._caps(event).markdown:
+            md = self._comment_md_text(comments, "哔哩哔哩")
+            if md:
+                chain = event.chain_result([Comp.Plain(md)])
+                if hasattr(chain, "use_markdown"):
+                    chain.use_markdown(True)
+                yield chain
+            return
+
         nodes = await self._build_comment_nodes(event, comments)
         if not nodes:
             return
@@ -1821,6 +1896,16 @@ class Main(Star):
         if not comments:
             return
 
+        # ---- 官机：没有合并转发，改发「一条 MD + 代码框」（不带图/动图）----
+        if self._caps(event).markdown:
+            md = self._comment_md_text(comments, "抖音")
+            if md:
+                chain = event.chain_result([Comp.Plain(md)])
+                if hasattr(chain, "use_markdown"):
+                    chain.use_markdown(True)
+                yield chain
+            return
+
         nodes = await self._build_comment_nodes(event, comments)
         if not nodes:
             return
@@ -1842,6 +1927,52 @@ class Main(Star):
         if len(lines) == 1:
             return ""
         return "\n".join(lines)
+
+    def _build_intro_md(self, result: ResolveResult) -> str | None:
+        """（官机）简介的 **markdown 版** —— 作品文案放进代码框，标记写「标题」。
+
+        为什么文案必须进代码框：``#`` 是 markdown 的**标题语法**，而作品文案
+        （尤其抖音）几乎全是 ``#话题`` 标签、还常分多行 —— 一旦当正文，
+        **每一行都会变成大标题**，整片排版垮掉（v1.6.10 实测踩过）。
+
+        代码框的**语言标记位置写「标题」** —— 客户端会把它渲染成框的标题，
+        这样一眼能看出框里是作品文案。
+
+        纯文本路径（``_build_intro``）**保持不动** —— 那条路没有 markdown，
+        ``#`` 本来就不会被解析，改了反而多余。
+
+        :return: markdown 文本；类型/标题/作者全空时返回 ``None``（调用方退回纯文本）。
+        """
+        ctype = self._content_type(result)
+        if not (ctype or result.title or result.author):
+            return None
+
+        lines = [f"# {result.platform}" + (f" · {ctype}" if ctype else ""), ""]
+        if result.title:
+            safe = result.title.replace("```", "'''")
+            lines += [f"```标题\n{safe}\n```", ""]
+        if result.author:
+            lines += [f"> {result.author}", ""]
+        return "\n".join(lines).rstrip()
+
+    def _will_send_gallery_md(
+        self, event: AstrMessageEvent, result: ResolveResult
+    ) -> bool:
+        """官机上这条结果会不会**自己发一条带标题的 MD**（图集 / 多图）。
+
+        用来避免「简介 + 图集 MD」两条都带标题。判断条件必须和
+        ``_send_album`` / ``_send_images`` 的官机分支保持一致：
+
+        * ``album_kinds`` 存在（抖音图集）→ ``_send_album`` 会发带标题的 MD；
+        * 图片多于一张 → ``_send_images`` 会走 MD 分支（同样带标题）。
+
+        单张图**不算** —— 那张走逐条发送，没有标题，简介还是要发的。
+        """
+        if not self._caps(event).markdown:
+            return False
+        if result.extra.get("album_kinds"):
+            return True
+        return len(result.images) > 1
 
     def _content_type(self, result: ResolveResult) -> str:
         """根据媒体字段推断作品类型。"""
@@ -2024,35 +2155,88 @@ class Main(Star):
                 paths.append(None)
         return paths
 
-    def _album_md_text(
-        self, event: AstrMessageEvent, result: ResolveResult
+    async def _gallery_md_text(
+        self,
+        event: AstrMessageEvent,
+        result: ResolveResult,
+        urls: list[str],
+        *,
+        sizes: list | None = None,
+        probe_missing: bool = False,
+        limit: int = _MD_IMAGE_TEST_MAX,
+        head: bool = True,
     ) -> str | None:
-        """（官机）把**纯静态图集**拼成一条 markdown 文本；不满足条件返回 ``None``。
+        """（官机）把一组图片拼成**一条 markdown 内嵌多图**；不满足条件返回 ``None``。
 
-        **尺寸是硬要求**：内嵌图写成 ``![图1 #300px #400px](url)``，不带尺寸时
-        电脑 QQ 照常显示、**手机 QQ 只渲染 `[alt]`**（v1.6.7 实测踩过）。
-        尺寸由解析层带来（抖音 ``images[i]`` 顶层自带 ``width``/``height``，
-        零额外请求），**任意一张缺尺寸就整体放弃** —— 宁可退回逐条发送，
-        也不要发一条手机上全是 ``[alt]`` 的消息。
+        为什么官机要走这条：**它没有合并转发**（``Comp.Nodes`` 适配器不认），
+        所以 ``_send_images`` 一旦遇到 ``total > max_images`` 就只能「只发前 N 张」
+        —— 用户实测过「三张图的图集只出来一张」（他的 ``plugin.max_images`` 是 1）。
+        而 markdown 内嵌图**不看那个阈值**，能一条把图全发出来。
+
+        尺寸（**硬要求**，不带尺寸时手机 QQ 只渲染 ``[alt]``）按优先级取：
+
+        1. ``sizes`` 参数 / ``result.extra["image_sizes"]`` —— 抖音 ``images[i]``
+           顶层自带 width/height，**零额外请求**；
+        2. ``probe_missing=True`` 时对缺的那几张并发 ``_probe_image_size``
+           （Range 只取 64KB 读 header，不下载整图）—— 快手这类第三方接口
+           不返回尺寸，只能探。
+
+        **任意一张取不到尺寸就整体放弃** —— 宁可退回逐条发送，也不要发一条
+        手机上全是 ``[alt]`` 的消息（v1.6.7 实测踩过）。
         """
-        urls = list(result.images)
-        if not urls:
+        if not urls or len(urls) > limit:
             return None
 
-        sizes = result.extra.get("image_sizes") or []
+        known: list = list(
+            sizes if sizes is not None else (result.extra.get("image_sizes") or [])
+        )
+        if len(known) < len(urls):
+            known += [None] * (len(urls) - len(known))
+
+        need = [i for i, s in enumerate(known) if not s]
+        if need and probe_missing:
+            probed = await asyncio.gather(
+                *[self._probe_image_size(urls[i]) for i in need]
+            )
+            for i, size in zip(need, probed):
+                known[i] = size
+
         max_width = self._md_image_width(event)
         blocks: list[str] = []
         for i, url in enumerate(urls, 1):
-            size = sizes[i - 1] if i - 1 < len(sizes) else None
+            size = known[i - 1] if i - 1 < len(known) else None
             if not size:
                 return None
             blocks.append(self._md_image(url, size, alt=f"图{i}", max_width=max_width))
 
-        lines = [f"# {result.title or '图集'}", ""]
-        if result.author:
-            lines += [f"> {result.author}", ""]
-        lines += blocks
-        return "\n".join(lines)
+        # ⚠️ **标题只用固定文字，绝不把作品文案拼进来**。
+        #
+        # markdown 的 `#` 是标题语法，而作品文案（尤其抖音）几乎全是
+        # `#话题` 标签、还常分多行 —— 一旦塞进正文，**每一行都会变成标题**
+        # （`# 一直说说说。#小猫 #罗小黑` 这种），整片排版垮掉。
+        # 所以文案单独放，且用**代码框**包住（框内原样显示、不参与解析）。
+        #
+        # ``head=False`` 用于「图片太多、分批发」时的后续几条（5 张以上）——
+        # 那时不重复标题和文案，免得刷屏。
+        lines: list[str] = []
+        if head:
+            ctype = self._content_type(result) or "图片"
+            lines = [f"# {result.platform} · {ctype}", ""]
+            if result.author:
+                lines += [f"> {result.author}", ""]
+            if result.title:
+                # 文案里若有 ``` 会把代码框提前闭合。
+                # 语言标记位置写「标题」—— 客户端会把它渲染成框的标题
+                # （和评论那边用昵称做标记是同一个形态）。
+                safe_title = result.title.replace("```", "'''")
+                lines += [f"```标题\n{safe_title}\n```", ""]
+
+        # ⚠️ **每张图之间必须空行分隔**。官方「换多行」：单换行不产生换行效果，
+        # 三行 `![…]` 紧贴时会被当成同一段文本 —— 手机只渲染第一张。
+        for block in blocks:
+            lines.append(block)
+            lines.append("")
+        return "\n".join(lines).rstrip()
 
     async def _send_album(self, event: AstrMessageEvent, result: ResolveResult):
         """发送抖音图集 —— **静态图当图片发，动图当视频发，顺序按作品原样**。
@@ -2101,7 +2285,7 @@ class Main(Star):
         #
         # **只处理纯静态图集** —— markdown 里塞不进视频，含动图的仍走原路径。
         if self._caps(event).markdown and all(k == "still" for k in kinds):
-            md = self._album_md_text(event, result)
+            md = await self._gallery_md_text(event, result, list(result.images))
             if md:
                 chain = event.chain_result([Comp.Plain(md)])
                 if hasattr(chain, "use_markdown"):
@@ -2298,6 +2482,46 @@ class Main(Star):
         limit = max(1, int(self.conf_plat(event, "max_images", 9) or 9))
         urls = result.images
         total = len(urls)
+
+        # ---- 官机专属：一条（或几条）markdown 内嵌多图 ----
+        #
+        # **必须先试这条**：官机没有合并转发，所以一旦 ``total > limit`` 就只能
+        # 掉进下面的「只发前 N 张」。用户实测过「三张图的图集只出来一张」——
+        # 他的 ``plugin.max_images`` 是 1（官机媒体确实一次只能挂一个）。
+        # markdown 内嵌图**不看那个阈值**，所以能一条把图全发出来。
+        #
+        # 图片超过一条能放下的量时**分批发**（每条 MD 最多 ``_MD_IMAGE_TEST_MAX``
+        # 张），后续几条不带标题与文案 —— 总比「只发前 N 张」强。
+        #
+        # 尺寸：抖音走 ``extra['image_sizes']``（解析层白送）；
+        # 快手等第三方接口不返回尺寸 → ``probe_missing`` 并发探（Range 64KB）。
+        if self._caps(event).markdown and total:
+            chunk_size = _MD_IMAGE_TEST_MAX
+            chunks = [urls[i:i + chunk_size] for i in range(0, total, chunk_size)]
+            mds: list[str] = []
+            for n, chunk in enumerate(chunks):
+                md = await self._gallery_md_text(
+                    event,
+                    result,
+                    chunk,
+                    probe_missing=True,
+                    limit=len(chunk),
+                    head=(n == 0),
+                )
+                if not md:
+                    mds = []
+                    break
+                mds.append(md)
+            if mds:
+                for md in mds:
+                    chain = event.chain_result([Comp.Plain(md)])
+                    if hasattr(chain, "use_markdown"):
+                        chain.use_markdown(True)
+                    yield chain
+                return
+            logger.info(
+                f"[R插件] 官机图片未能拼成 MD（共 {total} 张，可能取不到尺寸），退回逐条发送"
+            )
 
         # ---- 不超过阈值：全部下载到本地，一条消息链按顺序发完 ----
         if total <= limit:
@@ -2578,189 +2802,6 @@ class Main(Star):
         lines.append("现在点歌可以听 VIP 音质了。发 `#cookie状态` 可随时查看。")
         await self._notify(umo, "\n".join(lines))
 
-    # ==================================================================
-    # 平台能力：#R平台 / #R平台测试
-    # ==================================================================
-
-    async def cmd_platform_caps(self, event: AstrMessageEvent):
-        """``#R平台`` —— 说明「本机器人能发什么」。
-
-        排查「消息没发出来」的第一站。QQ 官方机器人没有合并转发和音乐卡片，
-        用户遇到发不出去时第一反应往往是「插件坏了」，先把能力摆出来能省
-        一整轮来回。
-        """
-        caps = self._caps(event)
-        pid = caps_platform_id(event)
-
-        lines = [
-            "🔌 当前协议端能力",
-            f"实例 ID：{pid or '（取不到）'}",
-            describe_caps(caps),
-            "",
-        ]
-        if not caps.forward:
-            lines.append("· 不支持合并转发 → 插件自动改用直发（多条消息）")
-        else:
-            lines.append("· 支持合并转发（聊天记录）")
-        if not caps.music_card:
-            lines.append("· 不支持音乐卡片 → 点歌自动改用语音发送")
-        else:
-            lines.append("· 支持音乐卡片")
-        if not caps.markdown:
-            lines.append("· 无原生 markdown → 用普通文本发送")
-        # 顺手把「这次读的是哪份配置」说清楚：配置面板里是几组并列的，
-        # 用户常常不确定当前生效的是哪一组
-        lines.append(
-            "· 配置来源：" + ("通用（跟随 plugin / music 里的旧值）"
-                          if profiles_is_shared(self._platform_profiles())
-                          else f"分协议端 → {profile_group(caps.key)} 这一组")
-        )
-        lines.append("　看完整一份：`#R配置 协议端`")
-
-        yield event.plain_result("\n".join(lines))
-
-    async def _test_image(self) -> Path | None:
-        """给平台自检造一张测试图（640×360，带文字）。"""
-        try:
-            from PIL import Image as PILImage, ImageDraw
-        except ImportError:
-            return None
-        try:
-            tmp = Path(tempfile.gettempdir()) / "astrbot_plugin_rconsole" / "qo_test"
-            tmp.mkdir(parents=True, exist_ok=True)
-            path = tmp / "caps_test.png"
-            im = PILImage.new("RGB", (640, 360), (28, 32, 48))
-            d = ImageDraw.Draw(im)
-            d.rectangle([16, 16, 624, 344], outline=(120, 200, 255), width=4)
-            d.text((40, 150), "R-Console platform self-test", fill=(255, 255, 255))
-            d.text((40, 180), time.strftime("%Y-%m-%d %H:%M:%S"), fill=(150, 200, 255))
-            im.save(path)
-            return path
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(f"[R插件][平台自检] 造测试图失败: {exc}")
-            return None
-
-    async def _test_audio(self) -> Path | None:
-        """给平台自检造一段 1.5 秒正弦波（mp3），用来测语音发送。"""
-        ffmpeg = find_tool("ffmpeg")
-        if not ffmpeg:
-            return None
-        try:
-            tmp = Path(tempfile.gettempdir()) / "astrbot_plugin_rconsole" / "qo_test"
-            tmp.mkdir(parents=True, exist_ok=True)
-            path = tmp / "caps_test.mp3"
-            result = await run(
-                ffmpeg,
-                "-y", "-loglevel", "error",
-                "-f", "lavfi", "-i", "sine=frequency=440:duration=1.5",
-                "-ar", "24000", "-ac", "1", "-b:a", "32k",
-                str(path),
-                timeout=60,
-            )
-            if result.ok and path.exists() and path.stat().st_size > 0:
-                return path
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(f"[R插件][平台自检] 造测试音频失败: {exc}")
-        return None
-
-    async def cmd_platform_test(self, event: AstrMessageEvent):
-        """``#R平台测试``（管理员）—— 实测本协议端各种发送形态。
-
-        依次发这几条，每条单独回报成败：
-
-        1. 纯文本（content 模式，``use_markdown(False)``）
-        2. 原生 markdown（``use_markdown(True)`` + 标题/粗体/引用）
-        3. 图片
-        4. 语音
-        5. **markdown + 图片**（同一条链）
-
-        第 5 条是关键：AstrBot 的官方适配器在**有媒体时会摘掉 markdown**
-        （``payload.pop("markdown")``），所以「多图 MD」不能指望一条消息搞定，
-        得拆成「MD 文本一条 + 图片若干条」。
-        """
-        caps = self._caps(event)
-        yield event.plain_result(
-            f"🧪 平台自检开始（{caps.label}）\n"
-            f"会依次发 5 条，请逐条看是否收到。"
-        )
-
-        results: list[str] = []
-
-        # ---- 1) 纯文本 ----
-        try:
-            chain = event.chain_result([Comp.Plain("【1/5】纯文本模式 ✅")])
-            if hasattr(chain, "use_markdown"):
-                chain.use_markdown(False)
-            yield chain
-            results.append("1 纯文本 ✅")
-        except Exception as exc:  # noqa: BLE001
-            results.append(f"1 纯文本 ❌ {type(exc).__name__}")
-
-        await asyncio.sleep(1.2)
-
-        # ---- 2) 原生 markdown ----
-        md = (
-            "# 【2/5】原生 Markdown\n\n"
-            "**粗体** / *斜体* / `代码`\n\n"
-            "> 引用行：如果这条没渲染成标题+粗体，说明本端没有 MD 权限。\n\n"
-            "- 列表项 A\n- 列表项 B"
-        )
-        try:
-            chain = event.chain_result([Comp.Plain(md)])
-            if hasattr(chain, "use_markdown"):
-                chain.use_markdown(True)
-            yield chain
-            results.append("2 原生MD ✅")
-        except Exception as exc:  # noqa: BLE001
-            results.append(f"2 原生MD ❌ {type(exc).__name__}")
-
-        await asyncio.sleep(1.2)
-
-        # ---- 3) 图片 ----
-        img = await self._test_image()
-        if img is None:
-            results.append("3 图片 ⏭ 造图失败")
-        else:
-            try:
-                yield event.chain_result([Comp.Image.fromFileSystem(str(img))])
-                results.append("3 图片 ✅")
-            except Exception as exc:  # noqa: BLE001
-                results.append(f"3 图片 ❌ {type(exc).__name__}")
-
-        await asyncio.sleep(1.2)
-
-        # ---- 4) 语音 ----
-        audio = await self._test_audio()
-        if audio is None:
-            results.append("4 语音 ⏭ 无 ffmpeg/造音频失败")
-        else:
-            try:
-                yield event.chain_result([Comp.Record.fromFileSystem(str(audio))])
-                results.append("4 语音 ✅")
-            except Exception as exc:  # noqa: BLE001
-                results.append(f"4 语音 ❌ {type(exc).__name__}")
-
-        await asyncio.sleep(1.2)
-
-        # ---- 5) MD + 图片（验证互斥）----
-        if img is None:
-            results.append("5 MD+图片 ⏭ 造图失败")
-        else:
-            try:
-                chain = event.chain_result([
-                    Comp.Plain("# 【5/5】MD + 图片\n\n这条同时带了 markdown 和图片。"),
-                    Comp.Image.fromFileSystem(str(img)),
-                ])
-                if hasattr(chain, "use_markdown"):
-                    chain.use_markdown(True)
-                yield chain
-                results.append("5 MD+图片 ✅")
-            except Exception as exc:  # noqa: BLE001
-                results.append(f"5 MD+图片 ❌ {type(exc).__name__}")
-
-        await asyncio.sleep(1.2)
-        yield event.plain_result("🧪 自检完毕：\n" + "\n".join(results))
-
     def _md_image_width(self, event: AstrMessageEvent | None = None) -> int:
         """MD 内嵌图的显示宽度（px）。
 
@@ -2853,147 +2894,6 @@ class Main(Star):
             w = max_width
         return f"![{alt} #{w}px #{h}px]({url})"
 
-    async def cmd_md_image(self, event: AstrMessageEvent):
-        """``#RMD图 [图片URL ...]``（管理员）—— 自检「一条 MD 里嵌多张图」。
-
-        为什么单独一条命令：**这是 QQ 官方机器人特有的能力**。它的 markdown
-        消息支持内嵌图片 —— 官方文档原文：
-
-            对于 markdown 消息内的图片资源，请使用可在公网访问的资源 url，
-            开放平台会下载转存该资源。
-
-        所以「标题在上、图片在下、全部在同一个 MD 框里」是能一条发出来的，
-        **不需要**退化成「MD 一条 + 图片 N 条」。
-
-        但它和 `Comp.Image` **互斥**：AstrBot 的 qqofficial 适配器一看到
-        media 段就 `payload.pop("markdown")` 并改成 `msg_type=7`，整条退化成
-        富媒体消息（这就是 `#R平台测试` 第 5 条的现象）。要让图片进 MD，
-        只能把 `![](url)` **拼进 Plain 文本**里。
-
-        参数（可选）：直接贴图片 URL，用来验证「平台能不能拉到你的图」。
-        带签名的 CDN（抖音 / B站）有时拉不动，这条命令就是用来确认这件事的。
-
-        **图片必须带尺寸**（v1.6.9 实测才发现的坑）：官方语法是
-        ``![alt #宽px #高px](url)``，省掉尺寸时**电脑 QQ 照样把图显示出来、
-        手机 QQ 只显示 `[alt]`**。两端不一致，所以特别容易漏 —— 别只看电脑端。
-        """
-        caps = self._caps(event)
-        raw = (event.get_message_str() or "").strip()
-        args = [
-            w for w in raw.split()
-            if w.lower().startswith(("http://", "https://"))
-        ]
-        urls = args[:_MD_IMAGE_TEST_MAX] or [_MD_IMAGE_TEST_URL]
-
-        if not caps.markdown:
-            yield event.plain_result(
-                f"⚠️ 当前协议端（{caps.label}）没有原生 markdown，"
-                "这条自检只在 QQ 官方机器人上有意义 —— 照发一遍给你看降级效果。"
-            )
-            await asyncio.sleep(1.0)
-
-        results: list[str] = []
-
-        # ---- 0) 先量每张图的真实尺寸（拼 MD 必需，见 _probe_image_size）----
-        sizes = [await self._probe_image_size(u) for u in urls]
-        yield event.plain_result(
-            f"🔍 尺寸探测（{caps.label}）：\n"
-            + "\n".join(
-                f"  {i}. {u[:52]}…  " + (f"{s[0]}×{s[1]}" if s else "取不到")
-                for i, (u, s) in enumerate(zip(urls, sizes), 1)
-            )
-        )
-        await asyncio.sleep(1.2)
-
-        # ---- 1) 不带尺寸：反面教材（手机端只剩 [alt]）----
-        md1 = (
-            "# 【1/4】不带尺寸（反面教材）\n\n"
-            "这条**故意省掉尺寸**。电脑能看图、手机上应该只有 `[测试图]`。\n\n"
-            f"![测试图]({urls[0]})"
-        )
-        try:
-            chain = event.chain_result([Comp.Plain(md1)])
-            if hasattr(chain, "use_markdown"):
-                chain.use_markdown(True)
-            yield chain
-            results.append("1 不带尺寸 ✅ 已发出")
-        except Exception as exc:  # noqa: BLE001
-            results.append(f"1 不带尺寸 ❌ {type(exc).__name__}: {exc}")
-
-        await asyncio.sleep(1.5)
-
-        # ---- 2) 带尺寸：正确写法 ----
-        md2 = (
-            "# 【2/4】带尺寸（正确写法）\n\n"
-            "语法 `![alt #宽px #高px](url)`，这条按真实比例缩到 300px 宽。\n\n"
-            + self._md_image(
-                urls[0], sizes[0], alt="测试图", max_width=self._md_image_width(event)
-            )
-        )
-        try:
-            chain = event.chain_result([Comp.Plain(md2)])
-            if hasattr(chain, "use_markdown"):
-                chain.use_markdown(True)
-            yield chain
-            results.append("2 带尺寸 ✅ 已发出")
-        except Exception as exc:  # noqa: BLE001
-            results.append(f"2 带尺寸 ❌ {type(exc).__name__}: {exc}")
-
-        await asyncio.sleep(1.5)
-
-        # ---- 3) 多图带尺寸：目标形态 ----
-        many = urls if len(urls) > 1 else [urls[0], urls[0]]
-        msizes = sizes if len(urls) > 1 else [sizes[0], sizes[0]]
-        md3 = (
-            f"# 【3/4】多图 + 尺寸（{len(many)} 张）\n\n"
-            + "\n".join(
-                self._md_image(u, s, alt=f"图{i}", max_width=self._md_image_width(event))
-                for i, (u, s) in enumerate(zip(many, msizes), 1)
-            )
-            + "\n\n全部图片都在**同一条消息**里。"
-        )
-        try:
-            chain = event.chain_result([Comp.Plain(md3)])
-            if hasattr(chain, "use_markdown"):
-                chain.use_markdown(True)
-            yield chain
-            results.append(f"3 多图+尺寸 ✅ 已发出（{len(many)} 张）")
-        except Exception as exc:  # noqa: BLE001
-            results.append(f"3 多图+尺寸 ❌ {type(exc).__name__}: {exc}")
-
-        await asyncio.sleep(1.5)
-
-        # ---- 4) 对照：MD + 图片段（预期退化成富媒体）----
-        img = await self._test_image()
-        if img is None:
-            results.append("3 对照 ⏭ 造图失败")
-        else:
-            try:
-                chain = event.chain_result([
-                    Comp.Plain(
-                        "# 【4/4】对照：MD + 图片段\n\n"
-                        "这条带了 `Comp.Image`，预期**没有 MD 框**（退化成普通图片消息）。"
-                    ),
-                    Comp.Image.fromFileSystem(str(img)),
-                ])
-                if hasattr(chain, "use_markdown"):
-                    chain.use_markdown(True)
-                yield chain
-                results.append("4 对照（MD+图片段）✅ 已发出")
-            except Exception as exc:  # noqa: BLE001
-                results.append(f"3 对照 ❌ {type(exc).__name__}")
-
-        await asyncio.sleep(1.2)
-
-        used = "内置测试图" if not args else f"你给的 {len(urls)} 个 URL"
-        yield event.plain_result(
-            "🧪 MD 多图自检（{}）：\n".format(caps.label)
-            + "\n".join(results)
-            + f"\n\n图片来源：{used}"
-            + "\n\n对比重点：**手机上 2 和 3 能看到图 = 成了**；"
-            "1 只剩 `[测试图]`、4 没有 MD 框，都是预期内的反面教材。"
-        )
-
     # ==================================================================
     # 图片命令：#R菜单 / #cookie状态 / #服务状态
     # ==================================================================
@@ -3081,63 +2981,6 @@ class Main(Star):
             event,
             {"msg_type": 2, "markdown": {"content": markdown}, "keyboard": kb},
         )
-
-    async def _upload_qq_image(self, event: AstrMessageEvent, png: bytes) -> str:
-        """（官机专属）把一张图上传成 QQ 的 ``file_info``。
-
-        为什么要它：官方规定按钮只能挂 markdown 消息，而菜单图是**本地渲染的
-        PNG**、没有公网 URL 可以塞进 markdown。上传拿到 ``file_info`` 之后，
-        才有机会把「图 + 按钮」并进同一条消息。
-
-        走的是官方富媒体上传接口，和适配器 ``upload_group_and_c2c_image``
-        同一套：``POST /v2/{groups,users}/.../files``，``file_data`` 传 base64、
-        ``srv_send_msg=false``（只上传，不直接发）。
-
-        失败返回空串 —— 上传失败不该影响主流程。
-        """
-        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
-        bot = getattr(event, "bot", None)
-        if raw is None or bot is None:
-            return ""
-        try:
-            from botpy.http import Route
-        except ImportError:
-            return ""
-
-        group_openid = getattr(raw, "group_openid", None)
-        openid = getattr(getattr(raw, "author", None), "user_openid", None)
-        body = {
-            "file_data": base64.b64encode(png).decode("ascii"),
-            "file_type": 1,         # 1 = 图片
-            "srv_send_msg": False,  # 只上传，拿 file_info
-        }
-        if group_openid:
-            body["group_openid"] = group_openid
-            route = Route(
-                "POST", "/v2/groups/{group_openid}/files", group_openid=group_openid
-            )
-        elif openid:
-            body["openid"] = openid
-            route = Route("POST", "/v2/users/{openid}/files", openid=openid)
-        else:
-            return ""
-
-        try:
-            result = await bot.api._http.request(route, json=body)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(f"[R插件][上传] 图片上传失败: {type(exc).__name__}: {exc}")
-            return ""
-        if not isinstance(result, dict):
-            return ""
-        file_info = str(result.get("file_info") or "")
-        if file_info:
-            logger.info(
-                f"[R插件][上传] 图片上传成功 file_info={file_info[:20]}… "
-                f"ttl={result.get('ttl')} 大小={len(png) // 1024}KB"
-            )
-        else:
-            logger.warning(f"[R插件][上传] 接口没返回 file_info: {str(result)[:200]}")
-        return file_info
 
     # ==================================================================
     # 官机语音：自己转 silk、自己上传 —— **超时和重试都由插件决定**
@@ -3284,86 +3127,6 @@ class Main(Star):
             },
         )
 
-    async def _send_qq_image_only(
-        self, event: AstrMessageEvent, png: bytes
-    ) -> bool:
-        """（官机专属）**只发图、不带按钮** —— 对照实验用。
-
-        存在的意义是把「图 + 按钮同一条失败」的原因切开：
-
-        * 这条**也**失败 → 是**上传 / 发送链路**的问题（图片压根没发出去）
-        * 这条正常、带按钮那条失败 → 是 **media 与 keyboard 不能共存**
-        """
-        file_info = await self._upload_qq_image(event, png)
-        if not file_info:
-            return False
-        return await self._send_qq_payload(
-            event,
-            {"msg_type": 7, "media": {"file_info": file_info}, "content": ""},
-        )
-
-    async def _send_qq_image_with_buttons(
-        self, event: AstrMessageEvent, png: bytes, rows: list
-    ) -> bool:
-        """（官机专属）**形态 A**：把「图片 + 按钮」发成一条消息。
-
-        官方文档只写了「按钮挂在 markdown 消息上」，而菜单图是本地 PNG、
-        没有公网 URL。这条路径让图走 **media**（``msg_type=7``）、按钮挂在
-        同一条 —— media 和 keyboard 各自都是官方支持的字段，只是「组合」
-        没写进文档，**所以必须实测**。
-
-        注意 ``content``：适配器发富媒体时会顺手设 ``payload["content"]``，
-        所以这里也补齐 —— 服务端可能要求这个字段存在，缺了会判成无效消息
-        （实测现象就是**客户端提示「图片加载失败」**）。
-
-        :return: 是否成功。**失败时调用方要退回「图一条 + 按钮一条」**，
-            不能让用户什么都收不到。
-        """
-        file_info = await self._upload_qq_image(event, png)
-        if not file_info:
-            return False
-        kb = qq_keyboard(*rows)
-        if kb is None:
-            return False
-        return await self._send_qq_payload(
-            event,
-            {
-                "msg_type": 7,
-                "media": {"file_info": file_info},
-                "keyboard": kb,
-                "content": "",
-            },
-        )
-
-    async def _send_qq_embed_image_with_buttons(
-        self, event: AstrMessageEvent, png: bytes, markdown: str, rows: list
-    ) -> bool:
-        """（官机专属）**形态 B**：markdown 内嵌图 + 按钮，也是同一条。
-
-        把上传拿到的 ``file_info`` 直接当 markdown 图片的 URL 用。文档说
-        markdown 图片要「可在公网访问的资源 url」，所以这条**更可能失败** ——
-        留着是为了让 ``#R按钮`` 一次把两条路都试掉，省得来回改代码。
-        """
-        file_info = await self._upload_qq_image(event, png)
-        if not file_info:
-            return False
-        try:
-            from io import BytesIO
-
-            from PIL import Image as PILImage
-
-            with PILImage.open(BytesIO(png)) as im:
-                size = im.size
-        except Exception:  # noqa: BLE001
-            size = None
-        md = (
-            f"{markdown}\n\n"
-            + self._md_image(
-                file_info, size, alt="菜单", max_width=self._md_image_width(event)
-            )
-        )
-        return await self._send_md_with_buttons(event, md, rows)
-
     def _menu_button_rows(self) -> list:
         """菜单按钮的行列设计。
 
@@ -3418,22 +3181,36 @@ class Main(Star):
         return "\n".join(lines)
 
     async def cmd_r_menu(self, event: AstrMessageEvent):
-        """``#R菜单`` —— 功能菜单。
+        """``#R菜单`` —— **一张图 + 下面一排功能按钮**。
 
-        * **官机**：直接发**纯 MD 菜单 + 按钮**（不发图片）。菜单图是本地 PNG、
-          没有公网 URL，塞不进 markdown，而按钮只能挂 markdown；「media + 按钮」
-          实测也不成立。所以官机走 MD —— 顺带省掉一次随机背景下载（约 2.5 秒）。
-        * **其它协议端 / MD 发送失败**：原来的图片菜单（``render_menu`` 现画），
-          画不出来再退回文字菜单。
+        **官机**：随机图 → 图床唯一直链 → 一条 markdown（内嵌图 + 按钮）。
+        为什么要绕一趟图床（而不是直接把随机图 API 的地址塞进 MD）：
+
+        * markdown 内嵌图**必须带尺寸**，而随机图 API 每次给的是**另一张**图
+          —— 尺寸对不上就会变形（实测 ``/random/`` 的比例极差有 1.08）；
+        * 同一个 URL 会被客户端**缓存**，菜单图就永远是同一张了。
+
+        所以先落地（读真实尺寸）再上传拿**唯一**地址，两个问题一起解决。
+
+        降级链（哪一步断了都往后退，不会什么都不发）：
+        ① 随机图 + 按钮 → ② 纯文字 MD 菜单 + 按钮 → ③ 本地渲染的功能图。
         """
         caps = self._caps(event)
         name_task = asyncio.create_task(fetch_bot_name(event))
         bot_name = await name_task
+        want_buttons = caps.keyboard and self._qq_buttons_enabled(event)
+        rows = self._menu_button_rows() if want_buttons else []
 
-        if caps.keyboard and self._qq_buttons_enabled(event):
+        if want_buttons:
+            # ① 随机图 + 按钮（要的就是这个）
+            md = await self._menu_image_md(event)
+            if md and await self._send_md_with_buttons(event, md, rows):
+                return
+            # ② 纯文字 MD 菜单 + 按钮
             if await self._send_md_with_buttons(
-                event, self._menu_markdown(bot_name), self._menu_button_rows()
+                event, self._menu_markdown(bot_name), rows
             ):
+                logger.info("[R插件][菜单] 随机图那条路不通，已发纯文字 MD 菜单")
                 return
             logger.info("[R插件][菜单] MD 菜单发送失败，退回图片菜单")
 
@@ -3447,91 +3224,81 @@ class Main(Star):
         else:
             yield event.chain_result([Comp.Image.fromBytes(png)])
 
-    # ------------------------------------------------------------------
-    # 官机专属：按钮自检 / 免艾特指引 / 链接解析说明
-    # ------------------------------------------------------------------
+    async def _menu_image_md(self, event: AstrMessageEvent) -> str:
+        """（官机）菜单的 markdown：**一张随机图，不配文字**（用户指定）。
 
-    async def cmd_buttons_test(self, event: AstrMessageEvent):
-        """``#R按钮``（管理员）—— 自检 QQ 官方机器人的「自定义按钮」。
+        每一步都有原因（详见 ``core/image_bed`` 的模块说明）：
 
-        **为什么要自检**：官方文档把按钮分成两种，开放程度不一样 ——
+        1. 取图 —— 用 ``plugin.menuImageApi``（默认 elaina 的**竖屏**档，
+           实测比例极差 0.10，比 ``/random/`` 的 1.08 稳得多）；
+        2. **本地读真实尺寸** —— markdown 内嵌图不带尺寸时手机 QQ 只渲染 ``[alt]``；
+        3. **传图床拿唯一 URL** —— 同一个 URL 会被缓存，菜单图就永远一张了。
 
-        * 按钮**模版**：标「【申请使用】」
-        * **自定义按钮**：标「【内邀开通】」
-
-        所以自定义按钮不一定能用。一次发 4 条，一眼看出本机器人有没有这个能力，
-        以及**「图和按钮能不能塞进同一条」**：
-
-        1. 纯 markdown + 两个指令按钮（``enter`` 真 / 假各一）—— 前提条件
-        2. **形态 A**：图走 media + 按钮挂同一条（``msg_type=7``）
-        3. **形态 B**：markdown 内嵌 ``file_info`` 当图片 + 按钮，也是同一条
-        4. 图一条 + 按钮一条（保底，菜单降级时用这个）
+        任一步失败返回空串，调用方按降级链处理。
         """
-        caps = self._caps(event)
-        if not caps.keyboard:
-            yield event.plain_result(
-                f"⚠️ 当前是 {caps.label}，按钮是 QQ 官方机器人专属能力，"
-                "这条自检在别的协议端没有意义。"
-            )
-            return
+        api = self._menu_image_api()
+        if not api:
+            return ""
+        try:
+            from io import BytesIO
 
-        results: list[str] = []
-        img = await self._test_image()
-        png = img.read_bytes() if img is not None else b""
-        one_btn = [[qq_button("R菜单", "#R菜单", enter=True)]]
+            from PIL import Image as PILImage
+        except ImportError:
+            logger.debug("[R插件][菜单] 没有 Pillow，读不了随机图尺寸")
+            return ""
 
-        # ---- 1) 纯 markdown + 自定义按钮（前提）----
-        ok = await self._send_md_with_buttons(
-            event,
-            "# 【1/4】自定义按钮\n\n"
-            "**「直接发送」**点了会自动发出 `#R菜单`；"
-            "**「填入输入框」**点了只把 `点歌 ` 填进去，等你补歌名。",
-            [[
-                qq_button("直接发送", "#R菜单", enter=True),
-                qq_button("填入输入框", "点歌 ", enter=False, style=0),
-            ]],
+        from .core.http import fetch as http_fetch
+
+        try:
+            body, _ = await http_fetch(api, retries=1, timeout=25.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[R插件][菜单] 随机图取不到: {type(exc).__name__}: {exc}")
+            return ""
+        if not body:
+            return ""
+
+        try:
+            with PILImage.open(BytesIO(body)) as im:
+                size = im.size
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[R插件][菜单] 随机图读不出尺寸: {exc}")
+            return ""
+
+        url = await upload_image(body, key=self._image_bed_key())
+        if not url:
+            return ""
+
+        logger.info(
+            f"[R插件][菜单] 随机图就位 {size[0]}x{size[1]} "
+            f"({len(body) // 1024}KB) -> {url}"
         )
-        results.append("1 自定义按钮 " + ("✅" if ok else "❌"))
-
-        await asyncio.sleep(1.5)
-
-        # ---- 2) 只发图、不带按钮（对照：验证上传+发送链路本身）----
-        if not png:
-            results.append("2 只发图 ⏭ 造图失败")
-        else:
-            ok = await self._send_qq_image_only(event, png)
-            results.append("2 只发图（无按钮）" + ("✅" if ok else "❌"))
-
-        await asyncio.sleep(1.5)
-
-        # ---- 3) 形态 A：media + 按钮，同一条 ----
-        if not png:
-            results.append("3 形态A ⏭ 造图失败")
-        else:
-            ok = await self._send_qq_image_with_buttons(event, png, one_btn)
-            results.append("3 图+按钮同条（media）" + ("✅" if ok else "❌"))
-
-        await asyncio.sleep(1.5)
-
-        # ---- 4) 形态 B：file_info 当 markdown 图片 URL，同一条 ----
-        if not png:
-            results.append("4 形态B ⏭ 造图失败")
-        else:
-            ok = await self._send_qq_embed_image_with_buttons(
-                event, png, "# 【4/4】图+按钮同条（markdown 内嵌）", one_btn
-            )
-            results.append("4 图+按钮同条（内嵌）" + ("✅" if ok else "❌"))
-
-        await asyncio.sleep(1.2)
-        yield event.plain_result(
-            "🧪 按钮自检：\n"
-            + "\n".join(results)
-            + "\n\n**第 2 条是分水岭**：\n"
-            "· 2 也失败 → 图根本没发出去（上传/发送链路问题）\n"
-            "· 2 正常、3 失败 → media 和按钮**不能共存**\n"
-            "· 2、3 都正常 → 图 + 按钮一条就成了\n"
-            "· 4 失败是预期的（file_info 不是公网 URL）"
+        return self._md_image(
+            url, size, alt="菜单", max_width=self._md_image_width(event)
         )
+
+    def _menu_image_api(self) -> str:
+        """菜单随机图 API（``plugin.menuImageApi``）。
+
+        默认用 ``api.elaina.cat`` 的**竖屏**档 —— 实测三档的比例极差：
+
+        ================  ==================  ========
+        端点              比例范围             极差
+        ================  ==================  ========
+        ``/random/``      1.522 ~ 2.604       **1.082**（横竖混着给）
+        ``/random/mobile`` 0.646 ~ 0.750      0.104 ← 用这个
+        ``/random/pc``    1.723 ~ 2.604       0.880
+        ================  ==================  ========
+
+        反正尺寸是本地读出来再写进 markdown 的，这里只挑「稳」的那档。
+        留空 / 非 http 视为关闭（直接走降级链，不发图）。
+        """
+        raw = self.conf_get("plugin.menuImageApi", _MENU_IMAGE_API_DEFAULT)
+        text = str(raw if raw is not None else _MENU_IMAGE_API_DEFAULT).strip()
+        return text if text.startswith("http") else ""
+
+    def _image_bed_key(self) -> str:
+        """图床 API key（``plugin.imageBedKey``）；留空则用公开测试 key。"""
+        return str(self.conf_get("plugin.imageBedKey", "") or "").strip()
 
     async def cmd_no_at(self, event: AstrMessageEvent):
         """``#R免艾特`` —— 教用户开启「群内全量消息」（官机专属）。
@@ -4543,8 +4310,30 @@ class Main(Star):
             return "这首歌可能需要会员（或已下架），换个版本试试"
         return "音频地址取不到"
 
+    @staticmethod
+    def _music_link(song) -> str:
+        """降级提示里给出的链接：**优先音频直链**，没有才退回歌曲详情页。
+
+        用户要求（2026-09-23）：降级时给「文件直链」而不是详情页 ——
+        直链在客户端能**直接点开播放**，详情页还要再跳一次。
+        ``play_url`` 就是「语音发送」用的同一条地址，而且走到这些降级分支时
+        它通常**已经验证过可播**（``music_verify_audio`` 过了才会去下载）。
+
+        ⚠️ ``play_url`` 带签名（``x-expires``）**有时效** —— 过期后点开会失效。
+        所以文案里不要写「过一会儿再点一次就好」（那是给详情页的话），
+        要写「失效了重新点一次歌」。
+
+        ``_music_render_link``（link 模式）和「歌曲详情」按钮**不使用**这个函数：
+        那两个的语义本来就是「给页面」。
+        """
+        play = str(getattr(song, "play_url", "") or "").strip()
+        return play or str(getattr(song, "page_url", "") or "")
+
     def _music_fail_hint(self, song) -> str:
-        return f"🎵 {self._music_fail_reason(song.platform)}\n\n先给链接：\n{song.page_url}"
+        return (
+            f"🎵 {self._music_fail_reason(song.platform)}\n\n"
+            f"先给链接：\n{self._music_link(song)}"
+        )
 
     @staticmethod
     def _music_card(song) -> Comp.Music | None:
@@ -4764,7 +4553,7 @@ class Main(Star):
             # 兜底：所有目标都没成功，至少把链接给出去，别让用户空等
             yield event.plain_result(
                 f"🎵 {self._music_fail_reason(used)}\n\n先给这几首的链接：\n"
-                + "\n".join(f"· {s.label}\n  {s.page_url}" for s in songs[:3])
+                + "\n".join(f"· {s.label}\n  {self._music_link(s)}" for s in songs[:3])
             )
 
     async def _send_music_list_md(
@@ -4855,18 +4644,21 @@ class Main(Star):
         return url
 
     async def _send_music_detail_md(self, event, song, label: str) -> bool:
-        """（官机）点播结果：**一条 MD** —— 专辑图 + 小字歌曲信息 + 「歌曲详情」跳转按钮。
+        """（官机）点播结果：**一条 MD** —— 专辑图 + 小字歌曲信息 + 两个跳转按钮。
 
         **专辑图是公网 CDN 的 URL**（网易云 / QQ音乐封面），能直接 markdown 内嵌 ——
         这也是官机上唯一能让「图片 + 按钮」出现在同一条的路子（本地渲染的图没有
         公网 URL，而按钮只能挂 markdown）。
 
-        两处细节：
+        三处细节：
 
         * 「小字」：markdown 没有字号控制，用**引用块**（``>``）表达「次要信息」，
           视觉上就是图下面那行浅色小字；
-        * 跳转按钮用 ``action.type=0``，目标是**歌曲详情页**（``page_url``），
-          **不是 mp3 直链** —— 直链在手机上点开多半放不了。
+        * **「保存音频」按钮指向音频直链**（``play_url``）—— 用户要求「点开能保存」
+          （2026-09-23）。这条直链**刚取出来、刚验证过可播**，所以点开就是音频文件，
+          浏览器/客户端能直接下载保存。⚠️ 它带签名（``x-expires``）**有时效**；
+        * **「歌曲详情」按钮指向详情页**（``page_url``）—— 永久入口，直链失效了还能
+          从那儿找到这首歌。**两个都给**：一个能保存、一个不会过期。
 
         成功后调用方紧接着**单独**发语音（用户要的就是「MD 图文一条 + 语音一条」）。
         """
@@ -4894,10 +4686,15 @@ class Main(Star):
             lines.append(f"> 来自 {label}")
         md = "\n".join(lines)
 
+        buttons: list[list] = []
         if song.page_url:
-            return await self._send_md_with_buttons(
-                event, md, [[qq_link_button("歌曲详情", song.page_url, style=1)]]
-            )
+            buttons.append([qq_link_button("歌曲详情", song.page_url, style=1)])
+        play = str(getattr(song, "play_url", "") or "").strip()
+        if play:
+            # 直链 —— 点开就是音频文件，能存下来
+            buttons.append([qq_link_button("保存音频", play, style=1)])
+        if buttons:
+            return await self._send_md_with_buttons(event, md, buttons)
         return await self._send_qq_payload(
             event, {"msg_type": 2, "markdown": {"content": md}}
         )
@@ -4964,7 +4761,8 @@ class Main(Star):
             if md_ok:
                 if audio_path is None:
                     yield event.plain_result(
-                        f"🎵「{song.label}」音频下载失败，改用链接：\n{song.page_url}"
+                        f"🎵「{song.label}」音频下载失败，改用链接：\n"
+                        f"{self._music_link(song)}"
                     )
                     return
                 async for item in self._music_render_voice(
@@ -4991,7 +4789,7 @@ class Main(Star):
                 yield event.chain_result([comp])
                 return
             yield event.plain_result(
-                f"🎵 卡片构造失败，先给链接：\n{song.page_url}"
+                f"🎵 卡片构造失败，先给链接：\n{self._music_link(song)}"
             )
             return
 
@@ -5097,7 +4895,7 @@ class Main(Star):
             yield event.plain_result(
                 f"🎵「{song.label}」约 {song.duration // 60} 分 {song.duration % 60} 秒，"
                 f"语音条发不下（WAV 体积约 {est / 1024 / 1024:.0f}MB）。\n"
-                f"改用链接：\n{song.page_url}\n{tip}"
+                f"改用链接：\n{self._music_link(song)}\n{tip}"
             )
             return
 
@@ -5111,7 +4909,8 @@ class Main(Star):
             except (HttpError, MediaTooLarge) as exc:
                 logger.warning(f"[R插件] 点歌音频下载失败: {exc}")
                 yield event.plain_result(
-                    f"🎵「{song.label}」音频下载失败，改用链接：\n{song.page_url}"
+                    f"🎵「{song.label}」音频下载失败，改用链接：\n"
+                    f"{self._music_link(song)}"
                 )
                 return
 
@@ -5141,7 +4940,8 @@ class Main(Star):
                 return
             yield event.plain_result(
                 f"🎵「{song.label}」语音上传超时（QQ 接口不稳），先给链接：\n"
-                f"{song.page_url}\n（过一会儿再点一次通常就好了）"
+                f"{self._music_link(song)}\n"
+                "（链接带时效，失效了重新点一次歌就行）"
             )
             event.stop_event()
             return
@@ -5152,7 +4952,8 @@ class Main(Star):
         except Exception as exc:  # noqa: BLE001 - 转码失败时别静默
             logger.warning(f"[R插件] 点歌语音转码失败: {type(exc).__name__}: {exc}")
             yield event.plain_result(
-                f"🎵「{song.label}」语音转码失败（音频可能过长），改用链接：\n{song.page_url}"
+                f"🎵「{song.label}」语音转码失败（音频可能过长），改用链接：\n"
+                f"{self._music_link(song)}"
             )
         event.stop_event()
 

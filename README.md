@@ -9,7 +9,7 @@
 >
 > 原项目 README 的声明同样适用：素材来源于网络，仅供交流学习使用，**严禁用于任何商业用途和非法行为**。
 
-**当前版本：v1.6.10** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
+**当前版本：v1.6.11** ｜ 适配 AstrBot `>=4.16, <5`（在 v4.28.1 上验证）
 
 <p align="center">
   <img src="https://q1.qlogo.cn/g?b=qq&nk=2593504303&s=640" width="104" height="104" alt="NaiLuo" />
@@ -198,6 +198,35 @@ QQ 官方、Slack、钉钉。
 >
 > 原 Guoba 面板带来的 `#rns` / `#rks` / `#rkq` **已移除** —— 它们依赖的自建 API 服务
 > 在本移植版里没有实现。`#rnq` 在 v1.3.0 一并移除过，**v1.5.0 用官方接口重新实现并恢复**。
+
+### 官机菜单（一张图 + 一排按钮）
+
+QQ 官方机器人发 `#R菜单`，收到的是一条 **markdown**：上面一张随机图，
+下面一排可点按钮（R菜单 / 视频解析 / 点歌 / R配置 / 状态 / 免艾特）。
+
+图**不是**本地画的 —— 本地 PNG 没有公网 URL，塞不进 markdown；而按钮只能挂
+markdown，`Comp.Image`（media 段）又和 markdown 互斥。所以走三步：
+
+```
+取随机图（plugin.menuImageApi，默认竖屏档）
+   ↓  本地读出真实尺寸
+上传图床拿一个**唯一链接**（plugin.imageBedKey 可换自己的 key）
+   ↓
+![菜单 #300px #424px](https://iili.io/xxx.jpg)  +  按钮
+```
+
+**为什么要绕图床这趟**：
+
+* markdown 内嵌图**必须带尺寸**，而随机图 API 每次给的是**另一张**图 —— 直接
+  塞进 MD，尺寸对不上就会变形（实测 `/random/` 的比例极差有 **1.08**，
+  `/random/mobile` 只有 0.10，所以默认用竖屏档）；
+* 同一个 URL 会被客户端**缓存**，菜单图就永远是同一张了。
+
+先落地（读真实尺寸）再上传拿唯一地址，两个问题一起解决。
+
+**图床挂了会降级**：随机图 → 纯文字菜单 → 本地渲染的功能图，不会什么都不发。
+
+> 想换菜单图风格：把 `menuImageApi` 改成别的随机图 API（留空则不发图）。
 
 ### 三个图片命令
 
@@ -536,7 +565,6 @@ profiles
 
 ```
 #R配置 协议端      ← 按你说话的这个机器人回答，列出它这份的全部取值
-#R平台            ← 简版：能力 + 配置来源
 ```
 
 `#R配置 形式` 和 `#R配置 点歌 发送` 这类命令**只改当前协议端那份**，
@@ -781,6 +809,9 @@ python tests/test_platform_profiles.py          # 分协议端配置（含 schem
 python tests/test_qq_buttons.py                 # 官机按钮 / markdown 内联指令
 python tests/test_qq_voice.py                   # 官机语音：silk 编码 + 自控上传（真跑 pysilk）
 python tests/test_album_md.py                   # 官机图集：MD 内嵌多图 + 尺寸兜底
+python tests/test_md_layout.py                  # 官机 markdown 排版（代码框 / 空行 / 标题）
+python tests/test_image_bed.py                  # 菜单图床（随机图 → 唯一链）
+python tests/test_music_link.py                 # 点歌降级链接（优先音频直链，不是详情页）
 python tests/test_music_sign_proxy.py           # 音乐卡片签名代理
 python tests/test_music_url_guard.py            # 音频直链可用性校验
 python tests/test_panels.py                     # 三个图片命令

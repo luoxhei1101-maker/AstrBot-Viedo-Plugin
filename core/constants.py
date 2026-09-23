@@ -552,44 +552,19 @@ COMMAND_RULES: tuple[dict, ...] = (
     #
     # ⚠️ 「测试」这条必须排在「平台」前面：规则表是顺序匹配的，
     # 虽然 `$` 锚定能避免误配，但放前面语义更清楚。
-    {
-        "key": "platformTest",
-        "name": "平台能力自检",
-        "pattern": r"^#R(?:平台测试|平台自检)$",
-        "handler": "platform_test",
-        "admin": True,
-    },
-    {
-        "key": "platformCaps",
-        "name": "平台能力",
-        "pattern": r"^#R(?:平台|platform)$",
-        "handler": "platform_caps",
-        "admin": False,
-    },
-    # 「多图 MD」自检：QQ 官方机器人的 markdown **支持内嵌图片**（官方文档：
+            # 「多图 MD」自检：QQ 官方机器人的 markdown **支持内嵌图片**（官方文档：
     # 「请使用可在公网访问的资源 url，开放平台会下载转存该资源」），所以
     # 图文能用**一条**消息发出来。但这条路径必须走「纯文本里拼 ![](url)」，
     # 一旦同时带上 Comp.Image，适配器就会摘掉 markdown（退化富媒体）。
     # 这条命令用来确认「语法通不通」和「你的图 URL 平台拉不拉得到」。
-    {
-        "key": "mdImage",
-        "name": "MD多图自检",
-        "pattern": r"^#R(?:MD图|md图)(?:\s+\S+)*$",
-        "handler": "md_image",
-        "admin": True,
-    },
-    # 官机专属三条。共同点：只用官方机器人那一套能力才有意义 ——
+        # 带 `#话题` 的文案怎么放进 markdown 才不会被当成标题 ——
+    # 作品文案（尤其抖音）几乎都带 `#`，而 markdown 的 `#` 是标题语法，
+    # 排版会整片乱掉。这条把几种「包法」各发一条，一眼看出哪种有效。
+        # 官机专属三条。共同点：只用官方机器人那一套能力才有意义 ——
     # · 按钮自检：自定义按钮在官方文档里标「【内邀开通】」，不一定能用
     # · 免艾特指引：教用户开「群内全量消息」（手机 QQ 里的开关，机器人改不了）
     # · 解析说明：菜单按钮「视频解析」的落点（解析是「发链接即触发」，没有命令可填）
-    {
-        "key": "buttonsTest",
-        "name": "按钮自检",
-        "pattern": r"^#R(?:按钮|button)$",
-        "handler": "buttons_test",
-        "admin": True,
-    },
-    {
+        {
         "key": "noAt",
         "name": "免艾特指引",
         "pattern": r"^#R(?:免艾特|免@|全量)$",

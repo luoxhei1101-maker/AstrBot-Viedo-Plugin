@@ -246,25 +246,17 @@ def part_d_source() -> None:
     check_true("官机 card 自动降级为 voice",
                'if mode == "card" and not caps.music_card:' in main_src)
 
-    # ---- 「图 + 按钮同一条」的两条候选路径 ----
-    check_true("有 _upload_qq_image（上传拿 file_info）",
-               "async def _upload_qq_image" in main_src)
-    check_true("上传走官方富媒体 files 路由",
-               "/v2/groups/{group_openid}/files" in main_src
-               and "/v2/users/{openid}/files" in main_src)
-    check_true("上传前 base64 编码", "base64.b64encode(png)" in main_src)
-    check_true("上传用 srv_send_msg=False（只传不发）",
-               '"srv_send_msg": False' in main_src)
-    check_true("形态A：msg_type=7 + media + keyboard 挂同一条",
-               '"msg_type": 7,' in main_src
-               and '"media": {"file_info": file_info},' in main_src
-               and '"keyboard": kb,' in main_src)
-    check_true("形态A 补齐 content（适配器发富媒体时也会设它）",
-               '"content": "",' in main_src)
-    check_true("有对照组 _send_qq_image_only（只发图、不带按钮）",
-               "async def _send_qq_image_only" in main_src)
-    check_true("形态B：把 file_info 当 markdown 图片 URL",
-               "async def _send_qq_embed_image_with_buttons" in main_src)
+    # ---- 菜单：随机图 + 按钮（图先经图床拿唯一链）----
+    check_true("有 _menu_image_md（随机图 → 读尺寸 → 图床 → MD）",
+               "async def _menu_image_md" in main_src)
+    check_true("随机图 API 走配置，默认竖屏档（比例更稳）",
+               "def _menu_image_api" in main_src
+               and "api.elaina.cat/random/mobile" in main_src)
+    check_true("图床 key 可配置", "def _image_bed_key" in main_src)
+    check_true("图床是独立模块（core/image_bed.py）",
+               (_ROOT / "core" / "image_bed.py").is_file())
+    check_true("降级：随机图不通时改发纯文字 MD 菜单",
+               "_menu_markdown(bot_name), rows" in main_src)
     check_true("有 mdImageWidth 取宽（缩放配置）", "def _md_image_width" in main_src)
     check_true(
         "_md_image 的宽度来自配置",
@@ -293,8 +285,8 @@ def part_d_source() -> None:
                'self, bot_name: str = "", event: AstrMessageEvent | None = None'
                in main_src)
 
-    # ---- 新命令注册 ----
-    for key in ("buttons_test", "no_at", "resolve_help"):
+    # ---- 新命令注册（自检类命令已下架，只留真正面向用户的）----
+    for key in ("no_at", "resolve_help"):
         check_true(f"命令规则 {key} 已注册", f'"handler": "{key}"' in const_src)
         check_true(f"{key} 进了 _LOCAL_COMMAND_METHODS",
                    f'"{key}": "cmd_' in main_src)

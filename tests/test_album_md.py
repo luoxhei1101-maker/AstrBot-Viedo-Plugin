@@ -126,7 +126,11 @@ def part_c_main() -> None:
     print("\n[C] main.py 组装逻辑")
     src = (_ROOT / "main.py").read_text(encoding="utf-8")
 
-    check_true("有 _album_md_text", "def _album_md_text" in src)
+    check_true("有 _gallery_md_text（通用拼装入口）", "async def _gallery_md_text" in src)
+    check_true(
+        "抖音图集走同一个入口",
+        "await self._gallery_md_text(event, result, list(result.images))" in src,
+    )
     check_true(
         "官机分支要求「纯静态图集」",
         'self._caps(event).markdown and all(k == "still" for k in kinds)' in src,
@@ -148,6 +152,29 @@ def part_c_main() -> None:
     check_true(
         "从 extra['image_sizes'] 读尺寸",
         'result.extra.get("image_sizes")' in src,
+    )
+
+    # ---- 换行：图片之间必须**空行分隔**（v1.6.11 修的真 bug）----
+    #
+    # 官方文档「换多行」明确：单换行**不产生换行效果**，要用空行。三行
+    # `![…]` 紧贴时会被当成同一段文本 —— 手机 QQ 上只渲染第一张
+    # （实测：三张图的图集只出来一张）。
+    body = src.split("async def _gallery_md_text")[1].split("async def _send_album")[0]
+    check_true(
+        "图集 MD：每个图片块后补空行",
+        'lines.append(block)' in body and 'lines.append("")' in body,
+        "单换行不换行 → 只显示第一张",
+    )
+    check_true(
+        "图集 MD：不再用单换行直接拼接图片块",
+        "lines += blocks" not in body,
+    )
+
+    # 自检命令里的多图对照也必须体现这个差别（否则自检本身就是错的）
+    check_true(
+        "#RMD图：4/4 用空行分隔（正确写法）",
+        '\\n\\n".join' in src,
+        "自检要能对比出「单换行 vs 空行」的差别",
     )
 
 

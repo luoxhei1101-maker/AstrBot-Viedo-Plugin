@@ -189,6 +189,18 @@
         "default": true,
         "hint": "QQ 官方机器人专属。发 #R菜单 时在图片下面补一条带按钮的消息（R菜单 / 视频解析 / 点歌 / 配置 / 状态 / 免艾特）。自定义按钮需要平台开放该能力，发不出去时插件会自动跳过，不影响菜单本身。"
       },
+      "menuImageApi": {
+        "description": "菜单随机图 API（官机）",
+        "type": "string",
+        "default": "https://api.elaina.cat/random/mobile",
+        "hint": "QQ 官方机器人发 `#R菜单` 时用的随机图。插件会**先取图、读真实尺寸、再上传图床拿一个唯一链接**，最后拼进 markdown —— 所以每次图都不同、也不会变形。默认用竖屏档（比例更稳）。留空 = 不发图，退回纯文字菜单。"
+      },
+      "imageBedKey": {
+        "description": "图床 API Key（可选）",
+        "type": "string",
+        "default": "",
+        "hint": "留空则用 freeimage.host 的公开测试 key。免费注册一个账号后可以把自己的 key 填这里，更稳定（公开 key 被限流时会自动降级）。"
+      },
       "bili_quality_when_logged_in": {
         "description": "B站登录后请求的画质",
         "type": "string",
