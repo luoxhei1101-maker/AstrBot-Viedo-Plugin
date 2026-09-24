@@ -149,6 +149,11 @@ def part_b_album_md() -> None:
     result = _Result(
         title=title, images=images, extra={"image_sizes": [(1612, 1538), (900, 1600)]}
     )
+    # 桩掉「转存到国内 OSS」那一步：测试只关心排版，不想真的发网络请求
+    async def _fake_host(urls):
+        return list(urls)
+
+    plugin._host_images = _fake_host
     md = asyncio.run(plugin._gallery_md_text(ev, result, images))
 
     check_true("标题是固定文字（平台名 + 类型）", md.startswith("# 抖音 · 图集"), md[:40])
@@ -161,9 +166,13 @@ def part_b_album_md() -> None:
     check_true("作者用引用块", "> 卡卡（反迷你）" in md)
     check_true("两张图都在", md.count("![图") == 2)
     check_true(
-        "图片之间空行分隔",
-        "\n\n![图2" in md,
-        "单换行时手机只渲染第一张",
+        "两张图排在**同一行**（一行 2~3 张，用户实测最合适）",
+        " ![" in md,
+        "一行内要用空格分隔才横排",
+    )
+    check_true(
+        "行与行之间用空行（官方：单换行不换行）",
+        md.count("\n\n") >= 2,
     )
 
     # 缺尺寸 -> 整体放弃

@@ -161,9 +161,13 @@ def part_c_main() -> None:
     # （实测：三张图的图集只出来一张）。
     body = src.split("async def _gallery_md_text")[1].split("async def _send_album")[0]
     check_true(
-        "图集 MD：每个图片块后补空行",
-        'lines.append(block)' in body and 'lines.append("")' in body,
-        "单换行不换行 → 只显示第一张",
+        "图集 MD：图片按**一行 2~3 张**排（用户实测这个最合适）",
+        "per_row" in body and '" ".join(blocks[' in body,
+        "一行内要用空格分隔才横排",
+    )
+    check_true(
+        "图集 MD：**行与行之间**用空行分隔（官方：单换行不换行）",
+        '\\n\\n".join(' in body,
     )
     check_true(
         "图集 MD：不再用单换行直接拼接图片块",

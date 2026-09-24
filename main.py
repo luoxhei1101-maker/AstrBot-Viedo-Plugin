@@ -2184,6 +2184,39 @@ class Main(Star):
                 paths.append(None)
         return paths
 
+    async def _host_images(self, urls: list[str]) -> list[str] | None:
+        """把一组图片 URL **全部转存到国内 OSS**，返回等长直链；有一张失败返回 ``None``。
+
+        **为什么官机必须走这一步**（2026-09-24）：官机 markdown 的图是
+        **腾讯服务器下载转存**的（官方文档原话），而解析出来的原始直链常常
+        取不到 —— 抖音 ``p3-sign.douyinpic.com`` 要 ``Referer``（本机实测恒定
+        403）、各家 CDN 也未必对腾讯的下载器友好。
+
+        统一过一遍 ``transfer_url``（czoss，落在广州电信）之后，交给腾讯的是一个
+        **国内 + 内容固定 + https** 的地址，才有把握渲染出来。这也正是菜单图
+        实测出来的路子（详见 ``core.image_bed``）。
+
+        **并发**：9 张串行要 40 秒，``asyncio.gather`` 之后 5 秒左右。
+
+        :return: 与 ``urls`` 等长的直链列表；任意一张失败就返回 ``None`` ——
+            调用方退回逐条发送，不发一条半残（几张 ``[alt]``）的 MD。
+        """
+        key = self._czoss_key()
+        results = await asyncio.gather(
+            *[transfer_url(u, key=key) for u in urls], return_exceptions=True
+        )
+        out: list[str] = []
+        for idx, item in enumerate(results):
+            if not isinstance(item, str) or not item:
+                logger.debug(
+                    f"[R插件][图集] 第 {idx + 1}/{len(urls)} 张转存失败，放弃拼 MD"
+                )
+                return None
+            out.append(item)
+        logger.debug(f"[R插件][图集] {len(out)} 张已转存国内 OSS")
+        return out
+
+
     async def _gallery_md_text(
         self,
         event: AstrMessageEvent,
@@ -2216,6 +2249,15 @@ class Main(Star):
         if not urls or len(urls) > limit:
             return None
 
+        # ---- ① **先全部转存到国内 OSS** ----
+        # 官机 markdown 的图是**腾讯服务器**去下载的，原始直链（抖音签名 CDN 等）
+        # 经常取不到 → 客户端只会给你「图片加载失败」。转存后是国内 + 内容固定的
+        # https 地址，才有把握渲染。任意一张失败就整体放弃，退回逐条发送。
+        hosted = await self._host_images(urls)
+        if not hosted:
+            return None
+        urls = hosted
+
         known: list = list(
             sizes if sizes is not None else (result.extra.get("image_sizes") or [])
         )
@@ -2230,7 +2272,21 @@ class Main(Star):
             for i, size in zip(need, probed):
                 known[i] = size
 
-        max_width = self._md_image_width(event)
+        # ---- ② 排版：一行放 2~3 张（用户实测这个最合适，不刷屏）----
+        # 单图仍用单图宽度；多图换更小的尺寸，一行三张再等比缩一档。
+        n_img = len(urls)
+        if n_img <= 3:
+            per_row = n_img          # 1/2/3 张都排一行
+        elif n_img == 4:
+            per_row = 2              # 2+2 比 3+1 顺眼
+        else:
+            per_row = 3              # 其余按三张一行铺
+        if n_img > 1:
+            base = self._md_multi_image_width(event)
+        else:
+            base = self._md_image_width(event)
+        max_width = base if per_row <= 2 else max(80, base * 2 // 3)
+
         blocks: list[str] = []
         for i, url in enumerate(urls, 1):
             size = known[i - 1] if i - 1 < len(known) else None
@@ -2260,11 +2316,17 @@ class Main(Star):
                 safe_title = result.title.replace("```", "'''")
                 lines += [f"```标题\n{safe_title}\n```", ""]
 
-        # ⚠️ **每张图之间必须空行分隔**。官方「换多行」：单换行不产生换行效果，
-        # 三行 `![…]` 紧贴时会被当成同一段文本 —— 手机只渲染第一张。
-        for block in blocks:
-            lines.append(block)
-            lines.append("")
+        # ⚠️ 排版规则（都实测过）：
+        #
+        # * **一行内用空格分隔** —— 一行两三张能横排（用户对比过：每行一张最刷屏，
+        #   一行两张/三张最合适）；
+        # * **行与行之间必须空行** —— 官方「换多行」说单换行不产生换行效果，
+        #   紧贴的多行 `![…]` 会被当成同一段文本，手机只渲染第一张。
+        lines.append(
+            "\n\n".join(
+                " ".join(blocks[i:i + per_row]) for i in range(0, len(blocks), per_row)
+            )
+        )
         return "\n".join(lines).rstrip()
 
     async def _send_album(self, event: AstrMessageEvent, result: ResolveResult):
@@ -2837,12 +2899,32 @@ class Main(Star):
         配置 ``plugin.mdImageWidth``。夹在 100~800 之间 —— 太小看不清、太大
         在手机 MD 框里会撑满一屏。图片按**真实宽高等比**缩放，而 URL 没变，
         所以**点开 / 保存拿到的仍是原图**。
+
+        **多图**（图集 / 多图作品）用的是 ``_md_multi_image_width``。
         """
         try:
             w = int(self.conf_plat(event, "md_image_width", 300) or 300)
         except (TypeError, ValueError):
             w = 300
         return max(100, min(800, w))
+
+
+    def _md_multi_image_width(self, event: AstrMessageEvent | None = None) -> int:
+        """**多图** MD 里单张图的显示宽度（配置 ``plugin.mdMultiImageWidth``）。
+
+        为什么和单图分开：一条 MD 里塞 N 张图时，还用单图那个宽度（默认 300px）
+        几张叠起来就把屏幕撑爆了 —— 反而比逐条发更刷屏。默认 **170px**。
+        一行放三张时还会再按比例缩（见 ``_gallery_md_text``）。
+
+        尺寸小**不影响点开/保存**：markdown 里写的只是外显宽高，图片按真实比例
+        缩放，URL 仍是那张原图。
+        """
+        try:
+            w = int(self.conf_plat(event, "md_multi_image_width", 170) or 170)
+        except (TypeError, ValueError):
+            w = 170
+        return max(80, min(400, w))
+
 
     def _qq_buttons_enabled(self, event: AstrMessageEvent | None = None) -> bool:
         """官机菜单按钮的总开关（配置 ``plugin.qqButtons``）。
