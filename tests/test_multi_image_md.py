@@ -11,8 +11,8 @@
    ``p3-sign.douyinpic.com`` 要 ``Referer``（本机实测恒定 403）、各家 CDN 也未必
    对腾讯的下载器友好。统一过一遍 ``transfer_url``（czoss，广州电信）之后，
    交给腾讯的是「国内 + 内容固定 + https」的地址。
-2. **排版一行 2~3 张**、且多图用更小的外显尺寸。用户实测对比后确认：
-   每行一张最刷屏；一行两张 / 三张最合适，三张再等比缩一档。
+2. **排版三图一行**，每张按**单图宽度的百分比**缩（`plugin.mdGalleryScale`，默认 70%）。
+   用户实测对比后确认：每行一张最刷屏；三图一行最合适。
 
 跑法::
 
@@ -91,25 +91,27 @@ def part_b_layout() -> None:
     print("\n[B] 排版：一行 2~3 张")
     body = _body()
 
-    check_true("有 _md_multi_image_width（多图专用宽度）",
-               "def _md_multi_image_width" in MAIN)
+    check_true("有 _md_gallery_scale（图集缩放百分比）",
+               "def _md_gallery_scale" in MAIN)
     check_true(
         "**单图宽度方法没被顶掉**（改这个文件时踩过：替换区间把整个方法吃掉了）",
-        "def _md_image_width(" in MAIN and "def _md_multi_image_width" in MAIN,
+        "def _md_image_width(" in MAIN and "def _md_gallery_scale" in MAIN,
     )
-    check_true("默认 170px", '"md_multi_image_width", 170' in MAIN)
-    check_true("夹在 80~400", "max(80, min(400, w))" in MAIN)
+    check_true("默认 70%", '"md_gallery_scale", 70' in MAIN)
+    check_true("夹在 20~100", "max(20, min(100, s))" in MAIN)
+    check_true("旧的绝对宽度键已移除", "_md_multi_image_width" not in MAIN)
 
-    check_true("一行 3 张的分支", "per_row = 3" in body)
-    check_true("一行 2 张的分支", "per_row = 2" in body)
     check_true(
-        "一行三张再等比缩一档",
-        "base * 2 // 3" in body,
-        "三张并排太宽会挤",
+        "**三图一行**",
+        "per_row = min(3, n_img)" in body,
     )
     check_true(
-        "单图仍用单图宽度",
-        "self._md_image_width(event)" in body,
+        "每张宽度 = 单图宽度 × 缩放百分比",
+        "self._md_image_width(event) * self._md_gallery_scale(event) // 100" in body,
+    )
+    check_true(
+        "单图仍用单图宽度（不缩）",
+        "max_width = self._md_image_width(event)" in body,
     )
     check_true(
         "**一行内用空格分隔**（才能横排）",
@@ -134,13 +136,14 @@ def part_c_schema() -> None:
     schema = json.loads((_ROOT / "_conf_schema.json").read_text(encoding="utf-8-sig"))
     items = schema["plugin"]["items"]
 
-    check_true("有 mdMultiImageWidth", "mdMultiImageWidth" in items)
-    check("默认 170", items.get("mdMultiImageWidth", {}).get("default"), 170)
+    check_true("有 mdGalleryScale", "mdGalleryScale" in items)
+    check("默认 70（%）", items.get("mdGalleryScale", {}).get("default"), 70)
     check("mdImageWidth 仍是 300（单图）",
           items.get("mdImageWidth", {}).get("default"), 300)
+    check_true("旧的 mdMultiImageWidth 已移除", "mdMultiImageWidth" not in items)
     check_true(
-        "main.py 按协议端读 md_multi_image_width（schema 里没有的键会被裁掉）",
-        '"md_multi_image_width"' in MAIN,
+        "main.py 按协议端读 md_gallery_scale（schema 里没有的键会被裁掉）",
+        '"md_gallery_scale"' in MAIN,
     )
 
 

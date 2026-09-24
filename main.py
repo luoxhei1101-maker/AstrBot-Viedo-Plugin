@@ -2272,20 +2272,16 @@ class Main(Star):
             for i, size in zip(need, probed):
                 known[i] = size
 
-        # ---- ② 排版：一行放 2~3 张（用户实测这个最合适，不刷屏）----
-        # 单图仍用单图宽度；多图换更小的尺寸，一行三张再等比缩一档。
+        # ---- ② 排版：**三图一行**；每张按单图宽度的百分比缩（默认 70%）----
         n_img = len(urls)
-        if n_img <= 3:
-            per_row = n_img          # 1/2/3 张都排一行
-        elif n_img == 4:
-            per_row = 2              # 2+2 比 3+1 顺眼
-        else:
-            per_row = 3              # 其余按三张一行铺
+        per_row = min(3, n_img)          # 三图一行；不足三张就按实际张数排
         if n_img > 1:
-            base = self._md_multi_image_width(event)
+            # 多图：单图宽度 × 缩放百分比（默认 300 × 70% = 210px）
+            max_width = max(
+                60, self._md_image_width(event) * self._md_gallery_scale(event) // 100
+            )
         else:
-            base = self._md_image_width(event)
-        max_width = base if per_row <= 2 else max(80, base * 2 // 3)
+            max_width = self._md_image_width(event)
 
         blocks: list[str] = []
         for i, url in enumerate(urls, 1):
@@ -2318,7 +2314,7 @@ class Main(Star):
 
         # ⚠️ 排版规则（都实测过）：
         #
-        # * **一行内用空格分隔** —— 一行两三张能横排（用户对比过：每行一张最刷屏，
+        # * **一行三张**（``per_row``），图之间用空格分隔 —— 一行两三张能横排（用户对比过：每行一张最刷屏，
         #   一行两张/三张最合适）；
         # * **行与行之间必须空行** —— 官方「换多行」说单换行不产生换行效果，
         #   紧贴的多行 `![…]` 会被当成同一段文本，手机只渲染第一张。
@@ -2900,7 +2896,7 @@ class Main(Star):
         在手机 MD 框里会撑满一屏。图片按**真实宽高等比**缩放，而 URL 没变，
         所以**点开 / 保存拿到的仍是原图**。
 
-        **多图**（图集 / 多图作品）用的是 ``_md_multi_image_width``。
+        **多图**（图集 / 多图作品）用的是 ``_md_gallery_scale``（单图宽度的百分比，默认 70%）。
         """
         try:
             w = int(self.conf_plat(event, "md_image_width", 300) or 300)
@@ -2909,21 +2905,23 @@ class Main(Star):
         return max(100, min(800, w))
 
 
-    def _md_multi_image_width(self, event: AstrMessageEvent | None = None) -> int:
-        """**多图** MD 里单张图的显示宽度（配置 ``plugin.mdMultiImageWidth``）。
+    def _md_gallery_scale(self, event: AstrMessageEvent | None = None) -> int:
+        """**图集 / 多图** MD 里每张图的缩放百分比（配置 ``plugin.mdGalleryScale``，默认 **70**）。
 
-        为什么和单图分开：一条 MD 里塞 N 张图时，还用单图那个宽度（默认 300px）
-        几张叠起来就把屏幕撑爆了 —— 反而比逐条发更刷屏。默认 **170px**。
-        一行放三张时还会再按比例缩（见 ``_gallery_md_text``）。
+        基准是**单图宽度** ``mdImageWidth``（默认 300px）—— 所以默认每张约
+        **210px**，一行三张铺开。
+
+        为什么用百分比而不是绝对 px：用户调的就是「比单图小多少」这个相对量；
+        以后改 ``mdImageWidth`` 时图集跟着等比变，不用改两处。
 
         尺寸小**不影响点开/保存**：markdown 里写的只是外显宽高，图片按真实比例
         缩放，URL 仍是那张原图。
         """
         try:
-            w = int(self.conf_plat(event, "md_multi_image_width", 170) or 170)
+            s = int(self.conf_plat(event, "md_gallery_scale", 70) or 70)
         except (TypeError, ValueError):
-            w = 170
-        return max(80, min(400, w))
+            s = 70
+        return max(20, min(100, s))
 
 
     def _qq_buttons_enabled(self, event: AstrMessageEvent | None = None) -> bool:
