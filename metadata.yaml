@@ -8,7 +8,7 @@ desc: >-
   失败降级、AI 链接总结与翻译能力。另支持「#点歌 歌名」搜歌（网易云 / QQ音乐）、网易云扫码登录，
   以及 #R菜单 / #cookie状态 / #服务状态 三个图片命令；管理员可用 #R配置 在聊天里开关平台解析、
   私信设置 Cookie、把解析内容切成「聊天记录」合并转发。
-version: 1.6.16
+version: 1.6.17
 author: Echo (port)
 repo: https://github.com/luoxhei1101-maker/AstrBot-Viedo-Plugin
 astrbot_version: ">=4.16,<5"

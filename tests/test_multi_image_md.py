@@ -11,6 +11,8 @@
    ``p3-sign.douyinpic.com`` 要 ``Referer``（本机实测恒定 403）、各家 CDN 也未必
    对腾讯的下载器友好。统一过一遍 ``transfer_url``（czoss，广州电信）之后，
    交给腾讯的是「国内 + 内容固定 + https」的地址。
+1b. **转存不了的逐张降级成原始直链** —— 抖音签名 CDN 的图本机和 czoss 都 403，
+   只有腾讯能取，所以不能整体放弃；退回逐条发送时会**补一条简介**。
 2. **排版三图一行**，每张按**单图宽度的百分比**缩（`plugin.mdGalleryScale`，默认 70%）。
    用户实测对比后确认：每行一张最刷屏；三图一行最合适。
 
@@ -58,6 +60,8 @@ def _body() -> str:
 def part_a_host() -> None:
     print("\n[A] 图片先转存国内 OSS")
     body = _body()
+    host = MAIN.split("async def _host_images")[1].split("async def _gallery_md_text")[0]
+    host_one = MAIN.split("async def _host_one")[1].split("async def _gallery_md_text")[0]
 
     check_true("有 _host_images", "async def _host_images" in MAIN)
     check_true(
@@ -69,17 +73,35 @@ def part_a_host() -> None:
         body.index("await self._host_images(urls)") < body.index("self._md_image("),
     )
     check_true(
-        "转存不全就整体放弃（退回逐条发送，不发半残的 MD）",
-        "if not hosted:" in body and "return None" in body,
+        "**逐张降级**：转存不了的用**原始直链**（抖音那类谁都下不到，只能交给腾讯）",
+        "out.append(urls[idx])" in host,
+        "整体放弃会让图集 MD 彻底发不出去",
     )
-    host = MAIN.split("async def _host_images")[1].split("async def _gallery_md_text")[0]
-    check_true("走 transfer_url（czoss 国内节点）", "transfer_url(u, key=key)" in host)
+    check_true(
+        "有 _host_one：直连转存失败 -> 本机下载 -> 图床 -> 再转存",
+        "async def _host_one" in MAIN
+        and "download_many_candidates(" in MAIN
+        and "upload_image(data" in MAIN,
+    )
+    check_true(
+        "**图集 MD 失败退回逐条发送时补简介**（否则用户只看到图、没标题）",
+        "def _gallery_fallback_intro" in MAIN
+        and MAIN.count("self._gallery_fallback_intro(event, result)") == 2,
+        "2026-09-24 实测踩到：抖音单图图集退回后整条没有标题",
+    )
+    check_true("_host_one 里调 transfer_url（czoss 国内节点）",
+               "await transfer_url(url, key=key)" in host_one)
+    check_true("直连失败后走图床中转（transfer_url(bed",
+               "await transfer_url(bed, key=key)" in host_one)
     check_true(
         "**并发**转存（9 张串行要 40 秒）",
         "asyncio.gather(" in host,
         "串行会明显卡住用户",
     )
-    check_true("任意一张失败返回 None", "return None" in host)
+    check_true(
+        "**不再整体放弃**（旧行为：任一张失败就 return None -> 连 MD 都发不出）",
+        "放弃拼 MD" not in host,
+    )
     check_true("用配置里的 key", "self._czoss_key()" in host)
 
 

@@ -1974,6 +1974,36 @@ class Main(Star):
             return True
         return len(result.images) > 1
 
+    def _gallery_fallback_intro(
+        self, event: AstrMessageEvent, result: ResolveResult
+    ):
+        """图集 MD 拼不出来、**要退回逐条发送时补发的简介**；不需要时返回 ``None``。
+
+        为什么必须补：``_render_direct`` 在 ``_will_send_gallery_md`` 为真时会
+        **跳过简介**（指望图集那条 MD 自己带标题）。一旦 MD 拼失败退回逐条发送，
+        那条标题就没了 —— 用户看到的是「只发了图，没有标题」。
+
+        2026-09-24 实测踩到：抖音**单图**图集 + ``czoss`` 下不到那张图
+        （``p3-pc-sign.douyinpic.com`` 要 Referer），一路降级到逐条发送，
+        而简介早被跳过了。
+
+        只有 ``_will_send_gallery_md`` 为真时才补 —— 否则会和已经发出去的简介重复。
+        """
+        if not self._will_send_gallery_md(event, result):
+            return None
+        if self._caps(event).markdown:
+            md = self._build_intro_md(result)
+            if md:
+                chain = event.chain_result([Comp.Plain(md)])
+                if hasattr(chain, "use_markdown"):
+                    chain.use_markdown(True)
+                return chain
+        prefix = (
+            str(self.conf_get("global.identifyPrefix", "") or "").strip() or "🔗 识别："
+        )
+        intro = self._build_intro(result, prefix)
+        return event.plain_result(intro) if intro else None
+
     def _content_type(self, result: ResolveResult) -> str:
         """根据媒体字段推断作品类型。"""
         # B站 DASH 延迟合并：有 dash_merge 就是视频（videos 为空、images 是封面）
@@ -2198,23 +2228,92 @@ class Main(Star):
 
         **并发**：9 张串行要 40 秒，``asyncio.gather`` 之后 5 秒左右。
 
-        :return: 与 ``urls`` 等长的直链列表；任意一张失败就返回 ``None`` ——
-            调用方退回逐条发送，不发一条半残（几张 ``[alt]``）的 MD。
+        :return: 与 ``urls`` **等长**的直链列表。转存不了的**逐张降级成原始直链**
+            （见下方注释：抖音那类图谁都下不到，只能留给腾讯）。
+            只有 ``urls`` 为空时才返回 ``None``。
         """
         key = self._czoss_key()
         results = await asyncio.gather(
-            *[transfer_url(u, key=key) for u in urls], return_exceptions=True
+            *[self._host_one(u, key) for u in urls], return_exceptions=True
         )
         out: list[str] = []
+        kept = 0
         for idx, item in enumerate(results):
-            if not isinstance(item, str) or not item:
-                logger.debug(
-                    f"[R插件][图集] 第 {idx + 1}/{len(urls)} 张转存失败，放弃拼 MD"
-                )
-                return None
-            out.append(item)
-        logger.debug(f"[R插件][图集] {len(out)} 张已转存国内 OSS")
+            if isinstance(item, str) and item:
+                out.append(item)
+                kept += 1
+            else:
+                # ⚠️ **逐张降级，不整体放弃** —— 转存不了的用**原始直链**。
+                #
+                # 抖音签名 CDN 的图，**本机 403、czoss 也 403**
+                # （v1.6.7 实测：换 p3/p6/p9 节点、加 Referer、带 1449 字符 Cookie
+                # 全是 403）—— 只有**腾讯自己的下载器**能取到。
+                # 所以这里保留原始 URL，才有「交给腾讯去下载」这条路。
+                out.append(urls[idx])
+        if kept < len(urls):
+            logger.info(
+                f"[R插件][图集] {kept}/{len(urls)} 张已转存国内 OSS；"
+                f"其余 {len(urls) - kept} 张保留原始直链（交给腾讯去取）"
+            )
         return out
+
+    async def _host_one(self, url: str, key: str) -> str:
+        """一张图 → **国内可访问**的直链；失败返回空串。
+
+        两步走，因为**来源的可达性不一样**：
+
+        ① **直连转存** —— 把原 URL 交给 czoss 自己去下载。B 站封面这类无防盗链的
+           图走这条，一次请求就够，最快。
+        ② **本机下载再中转** —— ①失败说明 czoss 拿不到那张图。最常见的是抖音：
+           ``p3-pc-sign.douyinpic.com`` 要 ``Referer``，**czoss 在国内也照样 403**
+           （2026-09-24 实测：一张单图图集就是这么退回逐条发送的）。
+           这时只能我们**先把字节抓下来**（``download_many_candidates`` 会自动补
+           Referer，还带 Content-Type 校验，挡得住抖音的「200 + HTML 错误页」软失败），
+           再落到图床拿 URL（czoss **只收 URL、不支持上传字节**），最后交给它转存。
+
+        ``iili.io`` 中转之所以可行：czoss 能正常下载它（实测 2/2 成功），
+        而最终给腾讯的仍然是 **czoss 的国内直链** —— 腾讯取不到 iili.io 没关系。
+        """
+        # ① 直连
+        out = await transfer_url(url, key=key)
+        if out:
+            return out
+
+        # ② 本机下载 -> 图床 -> 转存
+        from .core.downloader import download_many_candidates
+
+        try:
+            paths = await download_many_candidates(
+                [[url]], prefix="rconsole_host", concurrency=1
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[R插件][图集] 下载失败 {url[:60]}: {type(exc).__name__}")
+            return ""
+        path = paths[0] if paths else None
+        if path is None:
+            logger.debug(f"[R插件][图集] 下载没成（可能 403/软失败）: {url[:60]}")
+            return ""
+
+        p = Path(path)
+        try:
+            data = await asyncio.to_thread(p.read_bytes)
+        except OSError as exc:
+            logger.debug(f"[R插件][图集] 读文件失败: {exc}")
+            return ""
+        finally:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        bed = await upload_image(data, key=self._image_bed_key())
+        if not bed:
+            logger.debug("[R插件][图集] 图床中转失败")
+            return ""
+        final = await transfer_url(bed, key=key)
+        if final:
+            logger.debug(f"[R插件][图集] 经图床中转成功（{len(data) // 1024}KB）")
+        return final
 
 
     async def _gallery_md_text(
@@ -2249,10 +2348,11 @@ class Main(Star):
         if not urls or len(urls) > limit:
             return None
 
-        # ---- ① **先全部转存到国内 OSS** ----
-        # 官机 markdown 的图是**腾讯服务器**去下载的，原始直链（抖音签名 CDN 等）
-        # 经常取不到 → 客户端只会给你「图片加载失败」。转存后是国内 + 内容固定的
-        # https 地址，才有把握渲染。任意一张失败就整体放弃，退回逐条发送。
+        # ---- ① **尽量把图转存到国内 OSS** ----
+        # 官机 markdown 的图是**腾讯服务器**去下载的。转存成国内 + 内容固定的 https
+        # 地址最稳；但抖音那类签名 CDN 本机和 czoss 都取不到，
+        # 只能**逐张降级成原始直链**（留一条「交给腾讯去下载」的路），
+        # 不能整体放弃 —— 否则连 MD 都发不出去。
         hosted = await self._host_images(urls)
         if not hosted:
             return None
@@ -2380,9 +2480,14 @@ class Main(Star):
                 yield chain
                 return
             logger.info(
-                "[R插件][抖音] 图集缺尺寸，退回逐条发送"
+                "[R插件][抖音] 图集 MD 没拼成，退回逐条发送"
                 "（markdown 内嵌图不带尺寸时手机端只显示 [alt]）"
             )
+            # 简介本来被跳过了（指望 MD 自带标题）—— 这里补回来，
+            # 否则用户看到的就是「只发图、没标题」。
+            fallback = self._gallery_fallback_intro(event, result)
+            if fallback is not None:
+                yield fallback
 
         # ---- 分两路下载（静态图并发 + 带候选回退，动图串行）----
         still_paths = await self._download_album_stills(event, result, still_images)
@@ -2607,8 +2712,11 @@ class Main(Star):
                     yield chain
                 return
             logger.info(
-                f"[R插件] 官机图片未能拼成 MD（共 {total} 张，可能取不到尺寸），退回逐条发送"
+                f"[R插件] 官机图片未能拼成 MD（共 {total} 张），退回逐条发送"
             )
+            fallback = self._gallery_fallback_intro(event, result)
+            if fallback is not None:
+                yield fallback
 
         # ---- 不超过阈值：全部下载到本地，一条消息链按顺序发完 ----
         if total <= limit:
