@@ -1392,7 +1392,7 @@ class Main(Star):
                     tag=f"bili_{result.extra.get('bvid', 'x')}",
                 )
                 event.track_temporary_local_file(str(merged))
-                comp = await self._video_component(merged)
+                comp = await self._video_component(merged, event)
                 if comp is None:
                     raise MergeError(f"合并产物不可读: {merged}")
                 yield event.chain_result([comp])
@@ -1416,7 +1416,7 @@ class Main(Star):
             # 登记给 AstrBot，事件结束后自动回收
             event.track_temporary_local_file(path)
             try:
-                comp = await self._video_component(path)
+                comp = await self._video_component(path, event)
                 if comp is None:
                     raise RuntimeError(f"视频文件不可读: {path}")
                 yield event.chain_result([comp])
@@ -1449,7 +1449,7 @@ class Main(Star):
             if local_path:
                 event.track_temporary_local_file(local_path)
                 try:
-                    comp = await self._video_component(local_path)
+                    comp = await self._video_component(local_path, event)
                     if comp is None:
                         raise RuntimeError(f"视频文件不可读: {local_path}")
                     yield event.chain_result([comp])
@@ -1549,7 +1549,7 @@ class Main(Star):
                     tag=f"bili_{result.extra.get('bvid', 'x')}",
                 )
                 event.track_temporary_local_file(str(merged))
-                comp = await self._video_component(merged)
+                comp = await self._video_component(merged, event)
                 if comp is None:
                     raise MergeError(f"合并产物不可读: {merged}")
             except MergeError as exc:
@@ -1568,7 +1568,7 @@ class Main(Star):
         # ---- 本地视频（其它平台的合并产物）----
         for path in result.local_videos[:1]:
             event.track_temporary_local_file(path)
-            comp = await self._video_component(path)
+            comp = await self._video_component(path, event)
             if comp is None:
                 failures.append(f"本地视频（{Path(path).name} 不可读）")
                 continue
@@ -1593,7 +1593,7 @@ class Main(Star):
                         failed_album += 1
                         continue
                     event.track_temporary_local_file(str(path))
-                    comp = await self._video_component(path)
+                    comp = await self._video_component(path, event)
                     if comp is None:
                         failed_album += 1
                         continue
@@ -1629,7 +1629,7 @@ class Main(Star):
                     failures.append(str(oversize_msg).removeprefix("⚠️ ").strip())
                 elif local_path:
                     event.track_temporary_local_file(local_path)
-                    comp = await self._video_component(local_path)
+                    comp = await self._video_component(local_path, event)
                     if comp is None:
                         failures.append("下载后的视频文件不可读")
                     else:
@@ -1787,7 +1787,7 @@ class Main(Star):
                     if mp4:
                         event.track_temporary_local_file(str(mp4))
                         try:
-                            comp_video = await self._video_component(mp4)
+                            comp_video = await self._video_component(mp4, event)
                         except Exception as exc:  # noqa: BLE001
                             logger.debug(f"[R插件][评论] 动图转组件失败: {exc}")
                 if comp_video is not None:
@@ -2003,35 +2003,51 @@ class Main(Star):
             return "音频"
         return ""
 
-    async def _video_component(self, path: str | Path):
-        """把一个本地视频文件变成可跨容器发送的 ``Comp.Video``。
+    async def _video_component(
+        self, path: str | Path, event: AstrMessageEvent | None = None
+    ):
+        """把一个本地视频文件变成可发送的 ``Comp.Video``。
 
-        **为什么不能直接用 ``Comp.Video.fromFileSystem``？**
+        **两种协议端的要求是相反的**，所以这里按平台分支：
 
-        AstrBot 的 aiocqhttp 适配器（``aiocqhttp_message_event.py``）对不同
-        组件处理方式不一样::
+        +----------------+---------------------------+--------------------------+
+        | 协议端         | 组件形态                  | 原因                     |
+        +================+===========================+==========================+
+        | **官机**       | ``fromFileSystem(path)``  | 适配器要**真实本地路径** |
+        | (qq_official)  |                           | 它自己读文件传腾讯       |
+        +----------------+---------------------------+--------------------------+
+        | NapCat 等      | ``fromBase64(...)``       | 协议端在**另一个容器**， |
+        | (aiocqhttp)    |                           | 读不到这边的路径         |
+        +----------------+---------------------------+--------------------------+
 
-            Image / Record  ->  转 base64 再发（跨容器安全）
-            Video           ->  原样传 file:///path（依赖协议端能读到该路径）
+        **官机为什么不能给 base64**（2026-09-24 线上事故）：AstrBot 的
+        ``_parse_to_qqofficial`` 对 Video 只做::
 
-        也就是说 **``fromFileSystem`` 生成的 ``file:///tmp/xxx.mp4`` 会被原样
-        交给协议端**。当 AstrBot 和协议端（NapCat / Lagrange 等）跑在**两个
-        容器**里、又没有共享挂载时，协议端 `realpath` 这个路径必然
-        ``ENOENT``，整个消息链发送失败 —— 用户看到的现象是「视频没发出来」，
-        日志里是 ``Failed to send the message chain: ENOENT realpath ...``。
+            if is_file_uri(i.file):
+                video_file_source = file_uri_to_path(i.file)   # file:///tmp/x.mp4 -> /tmp/x.mp4
+            else:
+                video_file_source = i.file                      # base64://... 原样
 
-        实测本项目的部署环境就是这种：``astrbot`` 容器只挂了
-        ``/AstrBot/data``，``snowluma``(NapCat) 容器挂的是自己的三个 volume，
-        两边**没有任何共享目录**。图片一直能发正是因为走了 base64。
+        然后 ``upload_group_and_c2c_media`` 开头就 ``Path(file_source).is_file()`` ——
+        拿 ``base64://AAAA…`` 当文件名去 stat，直接::
 
-        所以视频也走 ``fromBase64``：把文件读成 base64 内嵌进消息，协议端直接
-        解码，不依赖文件路径。代价是消息体膨胀约 33%（base64 编码开销），
-        但这是**唯一能跨容器送达的方式**。
+            OSError: [Errno 36] File name too long: 'base64:/AAAAIGZ0eXB…'
 
-        **为什么是 async**：读文件 + base64 编码都是**同步阻塞**的。一个
-        70MB 的视频要先整个读进内存再编码，峰值内存约 100MB、耗时数百毫秒。
+        （``Path()`` 会把 ``//`` 折成 ``/``，所以日志里只剩一个斜杠。）
+        这个异常抛到 pipeline 的 send 阶段，**整条消息发不出去** ——
+        用户看到的就是「机器人没反应」。
+
+        而 ``fromFileSystem`` 恰好被适配器认：``is_file_uri`` 为真 → 转回真实路径
+        → ``os.path.exists`` 为真 → 读文件转 base64 → 传给腾讯。**所以官机反而
+        只能用 fromFileSystem**（NapCat 那边禁用它的理由在这里不成立：官机是
+        AstrBot 自己读文件走 HTTP 上传，不依赖协议端读盘）。
+
+        **为什么是 async**：base64 那条路要读文件 + 编码，都是**同步阻塞**的。
+        一个 70MB 的视频要先整个读进内存再编码，峰值内存约 100MB、耗时数百毫秒。
         直接在事件循环里做，这期间 AstrBot 所有协程都被卡住（包括其它会话的
-        消息处理），所以丢到线程池执行。
+        消息处理），所以丢到线程池执行。官机那条路只是拼个字符串，不用线程。
+
+        :param event: 用来判断协议端；给 ``None`` 时按最保守的 base64 走。
 
         Returns:
             可发送的 ``Comp.Video``；文件不存在或读取失败时返回 ``None``。
@@ -2040,6 +2056,10 @@ class Main(Star):
         if not p.is_file():
             logger.warning(f"[R插件] 视频文件不存在，无法发送: {p}")
             return None
+
+        # ---- 官机：适配器要真实本地路径（给 base64 会让它 Path().is_file() 炸）----
+        if self._is_qq_official(event):
+            return Comp.Video.fromFileSystem(str(p))
 
         try:
             data = await asyncio.to_thread(_read_video_base64, p)
@@ -2050,6 +2070,15 @@ class Main(Star):
         if not data:
             return None
         return Comp.Video.fromBase64(data)
+
+    def _is_qq_official(self, event: AstrMessageEvent | None) -> bool:
+        """当前事件是不是 QQ 官方机器人（``qq_official``）。"""
+        if event is None:
+            return False
+        try:
+            return self._caps(event).key == "qqofficial"
+        except Exception:  # noqa: BLE001
+            return False
 
     async def _download_album_stills(
         self, event: AstrMessageEvent, result: ResolveResult, still_images: list[str]
@@ -2316,7 +2345,7 @@ class Main(Star):
                     if vi < len(anim_paths):
                         path = anim_paths[vi]
                         if path is not None:
-                            comp = await self._video_component(path)
+                            comp = await self._video_component(path, event)
                             if comp is not None:
                                 chain.append(comp)
                             else:
@@ -2358,7 +2387,7 @@ class Main(Star):
                     path = anim_paths[vi]
                     vi += 1
                     if path is not None:
-                        comp = await self._video_component(path)
+                        comp = await self._video_component(path, event)
                         if comp is not None:
                             chain.append(comp)
                             sent += 1
@@ -2395,7 +2424,7 @@ class Main(Star):
                 if path is None:
                     skipped += 1
                     continue
-                comp = await self._video_component(path)
+                comp = await self._video_component(path, event)
                 if comp is None:
                     skipped += 1
                 else:

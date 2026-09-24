@@ -67,8 +67,13 @@ def check(name: str, got, want) -> None:
         _FAILED.append(name)
 
 
-def check_true(name: str, got) -> None:
-    check(name, bool(got), True)
+def check_true(name: str, got, detail: str = "") -> None:
+    ok = bool(got)
+    print(f"[{'PASS' if ok else 'FAIL'}] {name}")
+    if not ok:
+        if detail:
+            print(f"       {detail}")
+        _FAILED.append(name)
 
 
 # ======================================================================
@@ -146,16 +151,23 @@ def static_checks() -> None:
 
 
 # ======================================================================
-# 1b. 静态检查：视频必须走 base64，不能 fromFileSystem（跨容器问题）
+# 1b. 静态检查：视频组件**按平台分支**（官机 fromFileSystem / 其它 base64）
 # ======================================================================
 def cross_container_checks() -> None:
-    """AstrBot 的 aiocqhttp 适配器对 Video **不转 base64**，原样传 file:// 路径。
+    """两个平台的要求**正好相反**，所以必须分支：
 
-    当 AstrBot 和协议端（NapCat 等）跑在两个容器、无共享挂载时，协议端
-    ``realpath`` 那个路径必然 ENOENT，整条消息链发送失败 —— 现象就是「视频
-    发不出来」。实测本项目的 astrbot / snowluma 容器无任何共享挂载。
+    * **NapCat 等（aiocqhttp）**：AstrBot 对 Video **不转 base64**，原样传
+      ``file://`` 路径。AstrBot 和协议端（NapCat）跑在**两个容器**、无共享挂载时，
+      协议端 ``realpath`` 必然 ENOENT，整条消息链失败 —— 现象是「视频发不出来」。
+      实测本项目的 astrbot / snowluma 容器无任何共享挂载。**所以必须 base64。**
+    * **官机（qq_official）**：正好反过来 —— 适配器只认**真实本地路径**。
+      2026-09-24 线上事故：给 base64 时 ``_parse_to_qqofficial`` 走
 
-    所以**发视频必须用 base64**（和 Image/Record 的处理方式对齐）。
+          else: video_file_source = i.file        # base64://... 原样
+
+      然后 ``upload_group_and_c2c_media`` 开头 ``Path(file_source).is_file()``
+      拿它当文件名 stat，抛 ``OSError: [Errno 36] File name too long``，
+      整条消息发不出去（用户看到的是「机器人没反应」）。**所以必须 fromFileSystem。**
     """
     main_py = _ROOT / "main.py"
 
@@ -175,15 +187,39 @@ def cross_container_checks() -> None:
                     chain.append(cur.id)
                 dotted = ".".join(reversed(chain))
                 if dotted == "Comp.Video.fromFileSystem":
-                    code_calls.append(f"line {node.lineno}")
-    check("真实代码里不存在 Comp.Video.fromFileSystem 调用", code_calls, [])
-
-    # 必须有 _video_component 且内部用 fromBase64
+                    code_calls.append(node.lineno)
+    # ✅ 正确规则：fromFileSystem **只允许出现在 _video_component 内部**（官机分支），
+    #    别处一律通过 _video_component，不许裸调。
     vc = _method_source(main_py, "_video_component")
     check_true("_video_component 方法存在", vc)
+
+    _vc_lo = next(
+        n.lineno
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+        and n.name == "_video_component"
+    )
+    _vc_hi = _vc_lo + len(vc.splitlines()) + 2
+    outside = [f"line {ln}" for ln in code_calls if not (_vc_lo <= ln <= _vc_hi)]
+    check("Comp.Video.fromFileSystem 只允许出现在 _video_component 里", outside, [])
+
     check_true(
-        "_video_component 用 fromBase64（跨容器安全）",
+        "_video_component 里有 fromFileSystem（**官机分支要真实路径**）",
+        "Comp.Video.fromFileSystem" in vc,
+        "官机适配器只认本地路径；给 base64 会 OSError: File name too long",
+    )
+    check_true(
+        "_video_component 用 fromBase64（其它协议端跨容器安全）",
         "fromBase64" in vc,
+    )
+    check_true(
+        "分支靠 _is_qq_official 判定平台",
+        "_is_qq_official" in vc
+        and "def _is_qq_official" in main_py.read_text(encoding="utf-8"),
+    )
+    check_true(
+        "_video_component 收 event 参数（判断平台用）",
+        "event: AstrMessageEvent | None = None" in vc,
     )
     check_true(
         "_video_component 会先检查文件是否存在（避免 ENOENT）",
@@ -223,7 +259,24 @@ def cross_container_checks() -> None:
         if "await self._video_component" not in line:
             bad.append(f"line {lineno}: {line.strip()[:70]}")
     check("所有 self._video_component 调用点都带 await", bad, [])
-    check_true("_video_component 调用点数量 > 0", len(call_lines) > 0)
+
+    # 同理：**每个调用点都必须把 event 传进去**，否则 _is_qq_official 拿不到平台
+    # 信息 → 官机上仍然给 base64 → 又炸。用 AST 校验实参个数 >= 2。
+    call_args: dict[int, int] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        if (
+            isinstance(f, ast.Attribute)
+            and f.attr == "_video_component"
+            and isinstance(f.value, ast.Name)
+            and f.value.id == "self"
+        ):
+            call_args[node.lineno] = len(node.args)
+    no_event = [f"line {ln}" for ln, n in call_args.items() if n < 2]
+    check("所有 _video_component 调用点都把 event 传进去了", no_event, [])
+    check_true("_video_component 调用点数量 > 0", len(call_args) > 0)
     check_true(
         "_video_component 是 async（base64 不阻塞事件循环）",
         "async def _video_component" in _method_source(main_py, "_video_component"),

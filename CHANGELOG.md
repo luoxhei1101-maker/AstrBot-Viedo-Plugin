@@ -1,5 +1,59 @@
 # 更新日志
 
+## v1.6.14（2026-09-24）
+
+**修复官机发视频直接崩**（用户反馈「官方机器人死掉了」）。
+
+### 现象
+
+官机发抖音链接 → 插件**解析成功** → 但消息**发不出去、机器人毫无反应**：
+
+```
+[respond.stage:322] Failed to send the message chain:
+  MessageChain(chain=[Video(file='base64://<375088 chars>', ...)])
+OSError: [Errno 36] File name too long: 'base64:/AAAAIGZ0eXB…'
+```
+
+（`Path()` 会把 `//` 折成 `/`，所以日志里只剩一个斜杠。）
+
+### 根因：官机和 NapCat 的要求**正好相反**
+
+AstrBot 的 `_parse_to_qqofficial` 对 Video 只做：
+
+```python
+if is_file_uri(i.file):
+    video_file_source = file_uri_to_path(i.file)   # file:///tmp/x.mp4 -> /tmp/x.mp4
+else:
+    video_file_source = i.file                      # base64://... 原样
+```
+
+然后 `upload_group_and_c2c_media` **开头**就 `Path(file_source).is_file()` ——
+拿 `base64://AAAA…` 当文件名去 stat，直接 `OSError: [Errno 36] File name too long`。
+异常抛到 pipeline 的 send 阶段，**整条消息发不出去**。
+
+而 `fromFileSystem` 恰好被适配器认：`is_file_uri` 为真 → 转回真实路径 →
+`os.path.exists` 为真 → 读文件转 base64 → 传给腾讯。
+
+> **所以官机反而只能用 `fromFileSystem`** —— NapCat 那边禁用它的理由
+> （协议端跨容器读不到）在官机**不成立**：官机是 AstrBot 自己读文件走 HTTP 上传。
+
+### 改法
+
+`_video_component(path, event)` **按平台分支**：
+
+| 协议端 | 组件形态 | 原因 |
+|---|---|---|
+| 官机 `qq_official` | `Comp.Video.fromFileSystem(path)` | 适配器只认真实本地路径 |
+| NapCat 等 | `Comp.Video.fromBase64(data)` | 协议端在另一个容器，读不到路径 |
+
+新增 `_is_qq_official(event)` 判定；**11 个调用点全部补上 `event` 实参**。
+
+### 测试
+
+`tests/test_album_send_path.py` 把原来那条「禁止 `fromFileSystem`」细化为
+「**只允许出现在 `_video_component` 里**」，并新增两条 AST 断言：
+每个调用点必须 `await`、必须把 `event` 传进去。
+
 ## v1.6.13（2026-09-23）
 
 **转存接口加自动重试** —— 修 v1.6.12 里偶发的「菜单图不出来」。
