@@ -140,13 +140,23 @@ def part_b_bed() -> None:
 
 def part_c_menu() -> None:
     print("\n[C] 菜单接线")
+    # 用「几个名字都在同一条 image_bed import 行里」判断 —— 以后往这条 import
+    # 加名字就不用回来改测试（2026-09-26 加 should_skip_transfer 时就是这么挂的）
+    _bed_import = next(
+        (l for l in MAIN.split("\n") if l.startswith("from .core.image_bed import")),
+        "",
+    )
     check_true(
-        "main.py 引入了 transfer_url 和 upload_image",
-        "from .core.image_bed import transfer_url, upload_image" in MAIN,
+        "main.py 引入了 transfer_url / upload_image / should_skip_transfer",
+        all(
+            n in _bed_import
+            for n in ("transfer_url", "upload_image", "should_skip_transfer")
+        ),
+        _bed_import[:120],
     )
     check_true(
         "**那条 import 必须顶格**（缩进错了整份文件加载不了）",
-        "\nfrom .core.image_bed import transfer_url, upload_image\n" in MAIN,
+        bool(_bed_import) and _bed_import == _bed_import.lstrip(),
         "2026-09-23 踩过：脚本给顶格的 import 多加了 4 空格 -> IndentationError",
     )
     check_true("有 _menu_image_md", "async def _menu_image_md" in MAIN)

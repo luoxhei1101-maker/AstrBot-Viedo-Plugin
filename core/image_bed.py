@@ -31,6 +31,7 @@ sm.ms 匿名接口          ❌          空响应（需 token）
 from __future__ import annotations
 
 import asyncio
+from urllib.parse import urlparse
 
 import aiohttp
 from astrbot.api import logger
@@ -117,6 +118,40 @@ async def upload_image(
 #: 但放进 QQ 官机的 markdown 后客户端报「图片加载失败」—— 官机的图是
 #: **腾讯服务器去下载转存**的，海外/CDN 那边取不到就白搭。国内节点才稳。
 CZOSS_API = "https://api.czcn.xyz/api/czoss"
+
+# ---------------------------------------------------------------------------
+# 「转存必然失败」的 host —— 直接跳过，别再白试（2026-09-26）
+# ---------------------------------------------------------------------------
+#
+# 抖音的签名图 CDN（``p3-pc-sign.douyinpic.com``）**本机 403、czoss 也 403**
+# （v1.6.7 实测：换 p3/p6/p9 节点、加 Referer、带 1449 字符 Cookie 全是 403），
+# 只有**腾讯自己的下载器**能取到 —— 而官机 markdown 恰恰就是让腾讯去下载。
+#
+# 对这类 host 调 ``transfer_url`` 是**纯浪费**：
+#   3 次尝试 + 2 × 0.8 秒间隔 ≈ 2.4 秒，之后 ``_host_one`` 还会再走一整套
+#   「本机下载 → 图床 → 转存」（又是几秒），**最终结果仍然是保留原始直链**。
+#   实测官机图集因此要等 4~8 秒才发得出来（2026-09-26 的线上日志）。
+#
+# 命中这些 host 的图**直接跳过转存**，把原始直链交给腾讯 —— 图集回到 1 秒内。
+#
+# ⚠️ 往这个名单里加成员要谨慎：走这条路的图**完全依赖腾讯能取到**，
+# 加错了的表现是「图集里某张图不显示」。拿不准就让它走转存（慢，但稳）。
+SKIP_TRANSFER_HOSTS: tuple[str, ...] = (
+    "douyinpic.com",  # 抖音签名图 CDN：p3-pc-sign / p6-pc-sign / p9-pc-sign …
+)
+
+
+def should_skip_transfer(url: str) -> bool:
+    """这个 URL 是否属于「转存必然失败、但腾讯能取」那一类。
+
+    见 ``SKIP_TRANSFER_HOSTS`` 的说明。调用方据此**跳过**无谓的转存重试，
+    直接把原始直链交给腾讯去下载。
+    """
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        return False
+    # 匹配自身及其子域（p3-pc-sign.douyinpic.com 命中，notdouyinpic.com 不命中）
+    return any(host == h or host.endswith("." + h) for h in SKIP_TRANSFER_HOSTS)
 
 
 async def _transfer_once(src: str, *, key: str, timeout: float) -> str:

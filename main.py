@@ -88,7 +88,7 @@ from .core.downloader import (
 )
 from .core.external import describe_environment, find_tool, run
 from .core.http import HttpError, close_session as close_http_session
-from .core.image_bed import transfer_url, upload_image
+from .core.image_bed import should_skip_transfer, transfer_url, upload_image
 from .core.media import (
     MergeError,
     animated_to_mp4,
@@ -2251,9 +2251,15 @@ class Main(Star):
                 # 所以这里保留原始 URL，才有「交给腾讯去下载」这条路。
                 out.append(urls[idx])
         if kept < len(urls):
+            # 两种「没转存」的原因分开说清楚：签名 CDN 是**主动跳过**（省 2.4 秒），
+            # 其余是真的试过没成 —— 排查时不用猜。
+            skipped = sum(1 for u in urls if should_skip_transfer(u))
+            extra = (
+                f"（其中 {skipped} 张是签名 CDN，直接跳过转存）" if skipped else ""
+            )
             logger.info(
                 f"[R插件][图集] {kept}/{len(urls)} 张已转存国内 OSS；"
-                f"其余 {len(urls) - kept} 张保留原始直链（交给腾讯去取）"
+                f"其余 {len(urls) - kept} 张保留原始直链（交给腾讯去取）{extra}"
             )
         return out
 
@@ -2275,6 +2281,16 @@ class Main(Star):
         而最终给腾讯的仍然是 **czoss 的国内直链** —— 腾讯取不到 iili.io 没关系。
         """
         # ① 直连
+        #
+        # 有些 host 是**注定转存不到**的 —— 抖音签名图 CDN（``p3-pc-sign.douyinpic.com``）
+        # 本机 403、czoss 也 403，**只有腾讯自己的下载器能取到**。对它们重试 3 次
+        # 纯属白等 2.4 秒，之后还要再走一整套「本机下载 → 图床 → 转存」（又是几秒），
+        # 最终结果仍然是「保留原始直链」。所以直接跳过，把原链交给腾讯。
+        # （名单与理由见 ``core.image_bed.SKIP_TRANSFER_HOSTS``）
+        if should_skip_transfer(url):
+            logger.debug(f"[R插件][图集] 签名 CDN 跳过转存（交给腾讯）: {url[:70]}")
+            return ""
+
         out = await transfer_url(url, key=key)
         if out:
             return out
