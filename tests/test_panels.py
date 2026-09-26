@@ -97,7 +97,12 @@ def rule_checks() -> None:
         ("rMenu", "R菜单", True),
         ("rMenu", "#r菜单", True),
         ("rMenu", "#R帮助", True),
-        ("rMenu", "#菜单", True),
+        ("rMenu", "#R功能", True),
+        # ⚠️ 裸词与 `#菜单` 都必须**不**命中（2026-09-26 用户要求）：
+        # `^#?` 让前缀可选，列进裸词后「@机器人 + 菜单」就会抢别的插件的事件。
+        ("rMenu", "#菜单", False),
+        ("rMenu", "菜单", False),
+        ("rMenu", "菜单功能", False),
         ("rMenu", "#点歌", False),
     ]
     for key, text, want in cases:
