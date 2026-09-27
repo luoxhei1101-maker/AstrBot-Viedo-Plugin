@@ -1,5 +1,81 @@
 # 更新日志
 
+## v1.6.22（2026-09-27）
+
+**官机本地图提速改成「零配置」：白嫖 AstrBot 自己的面板端口，默认开启。**
+
+### 起因（用户提问）
+
+> 我有个严肃的问题，本地图片出直链是跟插件走的还是什么，还是说得单独配置？
+> 如果要单独配置的话也没存在的意义了
+
+v1.6.21 的方案要用户**自己搭一个 HTTP 服务**（本机部署用的是 nginx）再填地址 ——
+对插件市场上下载的普通用户，这个门槛等于没有这个功能。
+
+### 发现：AstrBot 的面板端口本来就是通的
+
+读 `astrbot/dashboard/server.py` 发现两件事：
+
+```python
+# ① 认证中间件只拦 /api
+async def auth_middleware(self, current_request):
+    path = current_request.url.path
+    if not path.startswith("/api"):
+        return None          # 非 /api 一律放行
+
+# ② WebUI 前端目录被挂成静态目录
+static_folder = <dashboard dist>
+```
+
+面板端口（默认 6185）**本来就映射到公网**（不然用户进不去面板），
+所以往它的静态目录里写图 → `http://<地址>:6185/rconsole-pub/xxx.png` **匿名可访问**。
+
+实测（广州 → 服务器）：
+
+```
+静态图            HTTP 200  846911 B  image/png   ✅
+不存在的文件       HTTP 404              （静态目录优先，不会被 SPA 吃掉）
+/api/...          HTTP 401              （认证确实只拦 /api）
+```
+
+### 改动
+
+* `core/local_pub.py` 重写：
+  * `resolve_target()` —— 自动探测**静态根 + 端口 + 公网 IP**，并**自检**
+    （写探针 → HTTP 拉回来比对 → 删掉），全通过才启用；结果缓存 30 分钟，
+    失败后 2 分钟内不重试（避免每次发图都白试）
+  * 静态根**多候选**（`resolve_dashboard_dist()` 的返回可能是 dist 也可能是它的父目录，
+    不同版本还不一样 —— 全试一遍，用自检挑）
+  * 公网 IP **多接口兜底**（ipify / ifconfig.me / ipinfo / ip.sb）
+  * 新增 `strip_asset_path()` —— 用户粘了完整图片链接时削成主机前缀，避免拼出双份路径
+  * `cleanup()` 收紧：**只删插件自己生成的文件**（24 位哈希名 / 探针残留），
+    **绝不误伤 WebUI 前端资源**
+* 三种模式，优先级从高到低：
+  1. `localPubBaseUrl`（完整前缀）—— 完全接管，自己搭了服务时用
+  2. **`localPubPublicUrl`（「AstrBot 访问地址」）** —— 只覆盖 `scheme://host:port`，
+     路径仍由插件拼。**自动探测不对时填这个**（端口映射改了 / 走反代域名 / 多 IP）
+  3. 自动探测（默认）
+* 新增 `localPubEnabled`（**默认 true**）；`localPubDir` 默认改为空（自动探测）
+
+### 实测（部署后，用插件真实代码跑）
+
+```
+① 自动探测（没填任何地址）
+   静态根: /AstrBot/astrbot/dashboard/dist          ← 0.62 秒
+   发布目标: http://154.201.73.129:6185/rconsole-pub
+② 渲染 + 发布 733KB → http://.../12518647c20b5410e2b84adf.png
+③ 容器内回读 HTTP 200  750754 字节  内容一致
+④ 广州侧     HTTP 200  750754 字节  1.23s
+⑤ 腾讯 url 上传 HTTP 200  3.60s  → 发图成功 ✅
+```
+
+### 测试
+
+`tests/test_local_pub.py` 扩到 **103 项**：三种模式优先级 / 削路径 / 真写盘回读 /
+超限拒绝 / **cleanup 不误伤 WebUI 资源**（index.html / app.xxx.js / assets/）/
+5 处接线 / base64 兜底保留 / schema 五项齐全。
+
+
 ## v1.6.21（2026-09-27）
 
 **官机本地图提速：改成「把图挂到自己服务器上，让腾讯自己去下载」（十几秒 → 3.5 秒）。**

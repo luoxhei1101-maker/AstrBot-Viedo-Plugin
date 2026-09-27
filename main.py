@@ -3366,22 +3366,35 @@ class Main(Star):
         ``to_base64()`` 再上传），所以想让腾讯自己去取，只能自己打接口 ——
         跟按钮、语音是同一条路。
 
-        配置项 ``localPubBaseUrl`` **留空即关闭**（默认关闭），此时立刻返回
-        ``False``，行为与以前完全一致。
+        地址从哪来（细节见 ``core/local_pub.py``）：
+
+        1. **自动探测**（默认）—— 白嫖 AstrBot 自己的 WebUI 端口。它的认证
+           中间件只拦 ``/api``，而 WebUI 前端目录是静态目录，所以往里面写图
+           就能匿名访问到，**用户零配置**；
+        2. ``localPubPublicUrl``（**AstrBot 访问地址**）—— 自动探测的地址不通
+           （反代、宿主映射成了别的端口）时填它，只覆盖主机与端口；
+        3. ``localPubBaseUrl``（完整前缀）—— 自己搭了 HTTP 服务时用。
+
+        把 ``localPubEnabled`` 关掉即完全停用（默认开）。
         """
         if not self._is_qq_official(event):
             return False
-
-        base = str(self.conf_get("plugin.localPubBaseUrl", "") or "")
-        if not local_pub.normalize_base(base):
+        if not self.conf_get("plugin.localPubEnabled", True):
             return False
 
         t0 = time.monotonic()
-        url = await local_pub.publish(
-            png,
-            suffix=suffix,
-            base_url=base,
+        target = await local_pub.resolve_target(
+            base_url=str(self.conf_get("plugin.localPubBaseUrl", "") or ""),
+            public_url=str(self.conf_get("plugin.localPubPublicUrl", "") or ""),
             directory=str(self.conf_get("plugin.localPubDir", "") or ""),
+        )
+        if target is None:
+            return False
+
+        url = await local_pub.publish_to(
+            png,
+            target,
+            suffix=suffix,
             ttl=int(self.conf_get("plugin.localPubTtl", local_pub.DEFAULT_TTL) or 0),
         )
         if not url:

@@ -269,74 +269,80 @@ markdown，`Comp.Image`（media 段）又和 markdown 互斥。所以走三步�
 
 兜底图床（正常用不到）留了个 `imageBedKey`：到 freeimage.host 注册免费账号即可。
 
-### 官机本地图提速：公网直链（选填，强烈建议）
+### 官机本地图提速：内置静态直链（**默认开启，零配置**）
 
 官机发**本地生成的图**（`#cookie状态` / `#服务状态` 图、菜单兜底图、点歌列表图、
 登录二维码）时，AstrBot 适配器**只有 base64 一条路** —— 它会把整个文件传上去。
-对「境外机器 → 腾讯境内 API」这条链路，这是最大的耗时来源。实测：
+对「境外机器 → 腾讯境内 API」这条链路，这是最大的耗时来源。实测同一台机器：
 
 | 方式 | 文件大小 | 耗时 |
 |---|---|---|
 | base64 上传 | 97 KB | **7.4 ~ 14.9 秒** |
 | **url 上传（腾讯自取）** | **784 KB** | **3.5 秒** |
 
-**体积大 8 倍，反而快一倍多。** 做法很简单：把图写进一个目录，用**你自己的
-HTTP 服务**暴露成 URL，让腾讯自己去下载。
+**体积大 8 倍，反而快一倍多。** 做法是：把图写进一个静态目录，给出公网 URL，
+让腾讯自己去下载。
 
-**三步开起来**
+**默认就是开着的 —— 你不用配任何东西。**
 
-1. **把发布目录暴露出来。** 容器内路径是 `/AstrBot/data/rconsole_pub`
-   （`/AstrBot/data` 通常已挂到宿主机）。两种最省事的做法：
+#### 原理：白嫖 AstrBot 自己的面板端口
 
-   nginx 加一个独立 server 块（不影响已有站点）：
+面板端口（默认 6185）**本来就映射到公网**（不然你也进不去面板），而它的认证
+中间件**只拦 `/api`**：
 
-   ```nginx
-   server {
-       listen 18900;
-       server_name _;
-       root /www/server/astrbot/data/rconsole_pub;
-       autoindex off;
-       if ($request_method !~ ^(GET|HEAD)$) { return 405; }
-       location / {
-           try_files $uri =404;
-           add_header Cache-Control "no-store";
-           types { image/png png; image/jpeg jpg jpeg; }
-           default_type application/octet-stream;
-       }
-   }
-   ```
+```python
+# astrbot/dashboard/server.py
+async def auth_middleware(self, request):
+    if not request.url.path.startswith("/api"):
+        return None          # 非 /api 一律放行
+```
 
-   或者临时用一条命令（重启会掉）：
+同时 WebUI 的前端目录是个**静态目录**。于是：
 
-   ```bash
-   python3 -m http.server 18900 --directory /www/server/astrbot/data/rconsole_pub
-   ```
+```
+插件往 <静态根>/rconsole-pub/ 写图
+  → http://<你的地址>:6185/rconsole-pub/<文件名>   匿名可访问 ✅
+  → 把这个 URL 交给腾讯，它自己去下载
+```
 
-2. **确认公网能访问**（端口要在防火墙放行）：
+插件会自动探测：静态根（带**自检**：写探针 → HTTP 拉回来比对 → 删掉）+ 端口
+（读 `cmd_config.json` 的 `dashboard.port`）+ 公网 IP（多接口兜底）。
+**全部通过才启用**，探测结果缓存 30 分钟。
 
-   ```bash
-   curl -I http://你的IP:18900/xxx.png
-   ```
+#### ⚠️ 如果外网访问不到，填「AstrBot 访问地址」
 
-3. **填配置**（WebUI → 插件配置 → R插件）：
+自动探测在几种部署下会猜错，这时填 `localPubPublicUrl` 就行：
 
-   | 配置 | 填什么 |
-   |---|---|
-   | `localPubBaseUrl` | `http://你的IP:18900`（**结尾不要带斜杠**） |
-   | `localPubDir` | `/AstrBot/data/rconsole_pub`（默认就是这个） |
-   | `localPubTtl` | `600`（秒，旧文件自动清理；`0` = 不清理） |
+| 情况 | 填什么 |
+|---|---|
+| 端口映射成了别的（`-p 8080:6185`） | `http://你的IP:8080` |
+| 前面挂了 nginx / 走域名访问 | `https://bot.example.com` |
+| 有多个公网 IP，探测到的那个不对 | `http://正确的那个IP:6185` |
 
-**⚠️ 两条须知**
+**只填到端口就行** —— 插件会自动补 `/rconsole-pub/`（直接粘完整图片链接也会被
+自动削成主机前缀，不会拼出双份路径）。
 
-* 这个地址必须**公网可达**、而且**腾讯能访问**（内网地址、只放行了自己 IP 的
-  地址都不行）。没把握就先用 `curl` 从别的机器试一下。
-* `localPubBaseUrl` **留空 = 关闭**（默认）。这是唯一开关，不填行为跟以前完全一样。
+#### 配置一览
 
-**安全**：插件只往里写图，文件名是内容哈希；nginx 那段配置只放行 `GET/HEAD`
-并关掉了目录列表。文件按 `localPubTtl` 自动清理，不会无限增长。
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `localPubEnabled` | **开** | 总开关。关掉就照旧走 base64 |
+| `localPubPublicUrl` | 空 | **AstrBot 访问地址**。留空 = 自动探测 |
+| `localPubTtl` | `600` | 旧文件保留秒数，`0` = 不清理 |
+| `localPubBaseUrl` | 空 | 高级：自定义完整前缀（自己搭了静态服务时用） |
+| `localPubDir` | 空 | 高级：落盘目录（一般不用填） |
 
-**降级链**：不是官机 / 没配前缀 / 写盘失败 / 上传失败 —— **任何一环出问题都会
-自动退回原来的 base64 路径**，绝不会出现「配了反而发不出图」。
+#### 安全与降级
+
+* 文件只放在 `rconsole-pub/` **子目录**，不碰 WebUI 的前端资源；
+  清理时**只删插件自己生成的**文件（24 位哈希名），绝不会误伤面板资源；
+* 文件名是**内容哈希**（24 位 hex），猜不到；按 `localPubTtl` 自动过期；
+* 写进去的是你自己的图（面板图 / 二维码），**面板图本来就不回显 Cookie 内容**；
+* 写进的是容器内目录，**容器重建后自动消失**（每次发图都会重写，无影响）；
+* **任何一步失败都自动退回 base64** —— 不是官机 / 探测不到 / 写盘失败 / 上传失败，
+  一律走原路。**绝不会出现「开了反而发不出图」。**
+
+> 想要 `https`？`dashboard.ssl.enable` 打开时插件会自动用 `https://` 前缀。
 
 
 ### 三个图片命令
@@ -657,7 +663,8 @@ profiles
 | `music_send_mode` | `link` | **`voice`** | 官机没音乐卡片，语音是唯一能「听到歌」的形态 |
 | `download_concurrency` | 8 | 4 | 官方接口对并发更敏感 |
 | `md_image_width` | — | 300 | 官机专属：markdown 内嵌图宽度 |
-| `local_pub_base_url` | — | 空 | 官机专属：本地图公网直链前缀，填了才走「腾讯自取」 |
+| `local_pub_enabled` | — | **开** | 官机专属：本地图走内置静态直链（腾讯自取），零配置 |
+| `local_pub_public_url` | — | 空 | 官机专属：AstrBot 访问地址，自动探测不对时才填 |
 | `qq_buttons` | — | 开 | 官机专属：菜单/列表下挂按钮 |
 | `enable_sign_proxy` | 开 | — | OneBot 专属：音乐卡片签名代理 |
 
@@ -923,7 +930,7 @@ python tests/test_qq_voice.py                   # 官机语音：silk 编码 + �
 python tests/test_album_md.py                   # 官机图集：MD 内嵌多图 + 尺寸兜底
 python tests/test_md_layout.py                  # 官机 markdown 排版（代码框 / 空行 / 标题）
 python tests/test_image_bed.py                  # 菜单配图（国内转存 + 图床兜底）
-python tests/test_local_pub.py                  # 本地图公网直链（腾讯自取，含 5 处接线检查）
+python tests/test_local_pub.py                  # 本地图内置直链（自动探测 / 三种模式 / 清理不误伤）
 python tests/test_music_link.py                 # 点歌降级链接（优先音频直链，不是详情页）
 python tests/test_music_sign_proxy.py           # 音乐卡片签名代理
 python tests/test_music_url_guard.py            # 音频直链可用性校验
