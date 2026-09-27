@@ -4725,6 +4725,37 @@ class Main(Star):
         play = str(getattr(song, "play_url", "") or "").strip()
         return play or str(getattr(song, "page_url", "") or "")
 
+    async def _music_link_with_buttons(
+        self, event: AstrMessageEvent, song, headline: str
+    ) -> bool:
+        """（官机）把降级用的「链接」发成**带按钮的 markdown**。
+
+        为什么要这么做：纯文本直链在 QQ 里又长又难点（手机上还会被折叠成
+        「展开」），而官机有按钮能力 —— 点一下直接打开。
+
+        :return: 是否已由本方法发出。**False 时调用方退回原来的纯文本链接** ——
+            非官机 / 按钮没开 / 按钮拼不出来（比如直链和页面地址都为空）都会 False。
+        """
+        if not self._is_qq_official(event):
+            return False
+        if not self._qq_buttons_enabled(event):
+            return False
+
+        rows: list[list] = []
+        play = str(getattr(song, "play_url", "") or "").strip()
+        if play:
+            rows.append([qq_link_button("▶ 播放完整音频", play, style=1)])
+        page = str(getattr(song, "page_url", "") or "").strip()
+        if page:
+            rows.append([qq_link_button("歌曲详情", page, style=0)])
+        if not rows:
+            return False
+
+        md = f"# 🎵 {song.name}\n{headline}"
+        if song.artist:
+            md += f"\n\n> {song.artist}"
+        return await self._send_md_with_buttons(event, md, rows)
+
     def _music_fail_hint(self, song) -> str:
         return (
             f"🎵 {self._music_fail_reason(song.platform)}\n\n"
@@ -5158,6 +5189,9 @@ class Main(Star):
 
             if md_ok:
                 if audio_path is None:
+                    if await self._music_link_with_buttons(event, song, "音频下载失败"):
+                        event.stop_event()
+                        return
                     yield event.plain_result(
                         f"🎵「{song.label}」音频下载失败，改用链接：\n"
                         f"{self._music_link(song)}"
@@ -5186,6 +5220,9 @@ class Main(Star):
             if comp is not None:
                 yield event.chain_result([comp])
                 return
+            if await self._music_link_with_buttons(event, song, "卡片构造失败"):
+                event.stop_event()
+                return
             yield event.plain_result(
                 f"🎵 卡片构造失败，先给链接：\n{self._music_link(song)}"
             )
@@ -5206,6 +5243,12 @@ class Main(Star):
 
     async def _music_render_link(self, event, songs, used: str, label: str, keyword: str):
         """``link`` 模式：列出「歌名 - 歌手 + 播放页链接」。"""
+        # 单首点播时官机可以给按钮（列表模式 10 首就没法塞按钮了）
+        if len(songs) == 1 and await self._music_link_with_buttons(
+            event, songs[0], f"{label} · 点歌「{keyword}」"
+        ):
+            return
+
         lines = [f"🎵 {label} · 点歌「{keyword}」", ""]
         for i, song in enumerate(songs, 1):
             lines.append(f"{i}. {song.label}")
@@ -5290,9 +5333,15 @@ class Main(Star):
                 if caps.key == "qqofficial"
                 else "（想要整首可听，把「发送方式」改成 **音乐卡片** 或 **音频文件**）"
             )
+            headline = (
+                f"约 {song.duration // 60} 分 {song.duration % 60} 秒，"
+                f"语音条发不下（WAV 体积约 {est / 1024 / 1024:.0f}MB）"
+            )
+            if await self._music_link_with_buttons(event, song, headline):
+                event.stop_event()
+                return
             yield event.plain_result(
-                f"🎵「{song.label}」约 {song.duration // 60} 分 {song.duration % 60} 秒，"
-                f"语音条发不下（WAV 体积约 {est / 1024 / 1024:.0f}MB）。\n"
+                f"🎵「{song.label}」{headline}。\n"
                 f"改用链接：\n{self._music_link(song)}\n{tip}"
             )
             return
@@ -5306,6 +5355,9 @@ class Main(Star):
                 )
             except (HttpError, MediaTooLarge) as exc:
                 logger.warning(f"[R插件] 点歌音频下载失败: {exc}")
+                if await self._music_link_with_buttons(event, song, "音频下载失败"):
+                    event.stop_event()
+                    return
                 yield event.plain_result(
                     f"🎵「{song.label}」音频下载失败，改用链接：\n"
                     f"{self._music_link(song)}"
@@ -5336,6 +5388,11 @@ class Main(Star):
             if await self._send_qq_voice(event, path):
                 event.stop_event()
                 return
+            if await self._music_link_with_buttons(
+                event, song, "语音上传超时（QQ 接口不稳）"
+            ):
+                event.stop_event()
+                return
             yield event.plain_result(
                 f"🎵「{song.label}」语音上传超时（QQ 接口不稳），先给链接：\n"
                 f"{self._music_link(song)}\n"
@@ -5349,6 +5406,11 @@ class Main(Star):
             yield event.chain_result([comp])
         except Exception as exc:  # noqa: BLE001 - 转码失败时别静默
             logger.warning(f"[R插件] 点歌语音转码失败: {type(exc).__name__}: {exc}")
+            if await self._music_link_with_buttons(
+                event, song, "语音转码失败（音频可能过长）"
+            ):
+                event.stop_event()
+                return
             yield event.plain_result(
                 f"🎵「{song.label}」语音转码失败（音频可能过长），改用链接：\n"
                 f"{self._music_link(song)}"
