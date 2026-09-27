@@ -213,6 +213,24 @@
         "default": "",
         "hint": "**要用官机菜单图（#R菜单 的那张随机图），请先去 Czapi 创建自己的 key** —— 打开 https://api.czcn.xyz 的 API 详情页（apidata?id=51）拿到 key，填到这里（WebUI → 插件配置 → R插件；或直接编辑 `data/config/astrbot_plugin_rconsole_config.json` 里的 `plugin.czossKey`）。\n\n为什么需要它：官机的图是**腾讯服务器下载转存**的，所以插件会先把随机图经 api.czcn.xyz **转存到国内 OSS** 再嵌进 markdown（放海外 CDN 上会报「图片加载失败」）。\n\n没填 key 时插件仍会尝试不带 key 转存（可能被限流），失败就降级成纯文字菜单。"
       },
+      "localPubBaseUrl": {
+        "description": "官机本地图公网直链前缀（选填，能大幅提速）",
+        "type": "string",
+        "default": "",
+        "hint": "**留空 = 关闭（默认）**。填上之后，官机发**本地生成的图**（`#R菜单` 的兜底图、`#cookie状态`、`#服务状态`、点歌列表图、登录二维码）时，插件会把图写进一个目录，让**腾讯服务器自己去下载**，而不是把图 base64 传上去 —— 实测同一台机器 784KB 的图从十几秒降到 **3.5 秒**。\n\n**怎么搭**：把本插件的发布目录用任意 HTTP 服务暴露出来（容器内路径见下一个选项）。最省事的是 nginx 加一个 server 块，或 `python3 -m http.server 18900 --directory <目录>`。这里就填那个前缀，例如 `http://你的IP:18900`（**结尾不要带斜杠**）。\n\n⚠️ 必须是**公网可达**、且**腾讯能访问**的地址。没填 / 写盘失败 / 不是官机时，一律自动退回原来的 base64 路径 —— 不会出现「发不出图」。"
+      },
+      "localPubDir": {
+        "description": "本地图发布目录",
+        "type": "string",
+        "default": "/AstrBot/data/rconsole_pub",
+        "hint": "插件把要发布的图写到这个目录，上面那个 HTTP 服务的 root 要指到它。\n\n默认取官方 Docker 镜像数据目录下的 `rconsole_pub` —— `/AstrBot/data` 通常已经挂载到宿主机，nginx 可以直接指过去，容器写进去宿主机立刻可见。"
+      },
+      "localPubTtl": {
+        "description": "本地图保留时长（秒）",
+        "type": "int",
+        "default": 600,
+        "hint": "超过这个时间没再被用到的发布文件会被自动清理，避免目录无限增长。文件名按**内容哈希**生成 —— 同一张图不会重复落盘，被反复引用的热图会一直留着。**设 0 = 不自动清理**。"
+      },
       "bili_quality_when_logged_in": {
         "description": "B站登录后请求的画质",
         "type": "string",

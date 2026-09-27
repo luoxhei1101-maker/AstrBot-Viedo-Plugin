@@ -269,6 +269,76 @@ markdown，`Comp.Image`（media 段）又和 markdown 互斥。所以走三步�
 
 兜底图床（正常用不到）留了个 `imageBedKey`：到 freeimage.host 注册免费账号即可。
 
+### 官机本地图提速：公网直链（选填，强烈建议）
+
+官机发**本地生成的图**（`#cookie状态` / `#服务状态` 图、菜单兜底图、点歌列表图、
+登录二维码）时，AstrBot 适配器**只有 base64 一条路** —— 它会把整个文件传上去。
+对「境外机器 → 腾讯境内 API」这条链路，这是最大的耗时来源。实测：
+
+| 方式 | 文件大小 | 耗时 |
+|---|---|---|
+| base64 上传 | 97 KB | **7.4 ~ 14.9 秒** |
+| **url 上传（腾讯自取）** | **784 KB** | **3.5 秒** |
+
+**体积大 8 倍，反而快一倍多。** 做法很简单：把图写进一个目录，用**你自己的
+HTTP 服务**暴露成 URL，让腾讯自己去下载。
+
+**三步开起来**
+
+1. **把发布目录暴露出来。** 容器内路径是 `/AstrBot/data/rconsole_pub`
+   （`/AstrBot/data` 通常已挂到宿主机）。两种最省事的做法：
+
+   nginx 加一个独立 server 块（不影响已有站点）：
+
+   ```nginx
+   server {
+       listen 18900;
+       server_name _;
+       root /www/server/astrbot/data/rconsole_pub;
+       autoindex off;
+       if ($request_method !~ ^(GET|HEAD)$) { return 405; }
+       location / {
+           try_files $uri =404;
+           add_header Cache-Control "no-store";
+           types { image/png png; image/jpeg jpg jpeg; }
+           default_type application/octet-stream;
+       }
+   }
+   ```
+
+   或者临时用一条命令（重启会掉）：
+
+   ```bash
+   python3 -m http.server 18900 --directory /www/server/astrbot/data/rconsole_pub
+   ```
+
+2. **确认公网能访问**（端口要在防火墙放行）：
+
+   ```bash
+   curl -I http://你的IP:18900/xxx.png
+   ```
+
+3. **填配置**（WebUI → 插件配置 → R插件）：
+
+   | 配置 | 填什么 |
+   |---|---|
+   | `localPubBaseUrl` | `http://你的IP:18900`（**结尾不要带斜杠**） |
+   | `localPubDir` | `/AstrBot/data/rconsole_pub`（默认就是这个） |
+   | `localPubTtl` | `600`（秒，旧文件自动清理；`0` = 不清理） |
+
+**⚠️ 两条须知**
+
+* 这个地址必须**公网可达**、而且**腾讯能访问**（内网地址、只放行了自己 IP 的
+  地址都不行）。没把握就先用 `curl` 从别的机器试一下。
+* `localPubBaseUrl` **留空 = 关闭**（默认）。这是唯一开关，不填行为跟以前完全一样。
+
+**安全**：插件只往里写图，文件名是内容哈希；nginx 那段配置只放行 `GET/HEAD`
+并关掉了目录列表。文件按 `localPubTtl` 自动清理，不会无限增长。
+
+**降级链**：不是官机 / 没配前缀 / 写盘失败 / 上传失败 —— **任何一环出问题都会
+自动退回原来的 base64 路径**，绝不会出现「配了反而发不出图」。
+
+
 ### 三个图片命令
 
 背景默认从随机图 API 随机取，主体是**毛玻璃面板**，深色半透明叠在模糊背景上保证文字清晰。
@@ -587,6 +657,7 @@ profiles
 | `music_send_mode` | `link` | **`voice`** | 官机没音乐卡片，语音是唯一能「听到歌」的形态 |
 | `download_concurrency` | 8 | 4 | 官方接口对并发更敏感 |
 | `md_image_width` | — | 300 | 官机专属：markdown 内嵌图宽度 |
+| `local_pub_base_url` | — | 空 | 官机专属：本地图公网直链前缀，填了才走「腾讯自取」 |
 | `qq_buttons` | — | 开 | 官机专属：菜单/列表下挂按钮 |
 | `enable_sign_proxy` | 开 | — | OneBot 专属：音乐卡片签名代理 |
 
@@ -852,6 +923,7 @@ python tests/test_qq_voice.py                   # 官机语音：silk 编码 + �
 python tests/test_album_md.py                   # 官机图集：MD 内嵌多图 + 尺寸兜底
 python tests/test_md_layout.py                  # 官机 markdown 排版（代码框 / 空行 / 标题）
 python tests/test_image_bed.py                  # 菜单配图（国内转存 + 图床兜底）
+python tests/test_local_pub.py                  # 本地图公网直链（腾讯自取，含 5 处接线检查）
 python tests/test_music_link.py                 # 点歌降级链接（优先音频直链，不是详情页）
 python tests/test_music_sign_proxy.py           # 音乐卡片签名代理
 python tests/test_music_url_guard.py            # 音频直链可用性校验

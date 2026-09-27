@@ -113,6 +113,7 @@ from .core.cookie_spec import (
     get_spec,
     parse_cookie_keys,
 )
+from .core import local_pub
 from .core import netease_login
 from .core.cookie_status import check_all as check_all_cookies
 from .core.panels import (
@@ -420,6 +421,10 @@ _QQ_UPLOAD_TIMEOUT = 25.0
 # 区分两种失败：**秒失败**多半是瞬时错误（重试有效）；**耗满超时**则是被
 # 腾讯侧排队了（重试只会更慢，还可能加剧排队）。所以只对前者重试。
 _QQ_UPLOAD_FAST_FAIL = 6.0
+
+# 官机富媒体上传的 file_type：1=图片 2=视频 3=音频 4=文件。
+# （语音的 3 在 core/qq_voice.py，见 QQ_VOICE_FILE_TYPE。）
+_QQ_IMAGE_FILE_TYPE = 1
 
 # 需要 event / Context 才能干活、不走 resolver 注册表的命令。
 # 值是对应的方法名（用 getattr 取，避免类还没定义完就互相引用）。
@@ -2953,8 +2958,9 @@ class Main(Star):
             "扫完在手机上点一下「确认登录」，Cookie 会自动写进配置。"
         )
         try:
-            # 用 fromBytes（base64），不落临时文件 —— 跨容器发送最稳
-            yield event.chain_result([Comp.Image.fromBytes(png)])
+            if not await self._send_local_image(event, png):
+                # 用 fromBytes（base64），不落临时文件 —— 跨容器发送最稳
+                yield event.chain_result([Comp.Image.fromBytes(png)])
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[R插件][网易云扫码] 二维码发送失败: {exc}")
             yield event.plain_result("二维码发送失败，请重试。")
@@ -3228,6 +3234,58 @@ class Main(Star):
     #
     # 自己走这条路，失败能在 30 秒内暴露并降级成链接。
 
+    def _qq_upload_target(self, event: AstrMessageEvent):
+        """（官机专属）解析富媒体上传目标。
+
+        群聊走 ``/v2/groups/{group_openid}/files``、私聊走
+        ``/v2/users/{openid}/files``；两边除了路由，**body 里也要带对应字段**。
+        拿不到目标（不是官机 / 没有 botpy / 既无群也无 openid）返回 ``None``。
+        """
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        bot = getattr(event, "bot", None)
+        if raw is None or bot is None:
+            return None
+        try:
+            from botpy.http import Route
+        except ImportError:
+            return None
+        http = getattr(getattr(bot, "api", None), "_http", None)
+        if http is None:
+            return None
+
+        group_openid = getattr(raw, "group_openid", None)
+        openid = getattr(getattr(raw, "author", None), "user_openid", None)
+        if group_openid:
+            route = Route(
+                "POST", "/v2/groups/{group_openid}/files", group_openid=group_openid
+            )
+            return http, route, {"group_openid": group_openid}
+        if openid:
+            route = Route("POST", "/v2/users/{openid}/files", openid=openid)
+            return http, route, {"openid": openid}
+        return None
+
+    async def _qq_upload_request(
+        self, event: AstrMessageEvent, body: dict, timeout: float
+    ):
+        """（官机专属）真正打上传接口；**超时由插件自己定**。
+
+        botpy 的 ``timeout`` 没有 per-request 参数，只能临时改实例属性、
+        用完恢复。官机上传是低频操作（一次点歌一次），撞车概率可忽略。
+        """
+        target = self._qq_upload_target(event)
+        if target is None:
+            return None
+        http, route, fields = target
+
+        saved = getattr(http, "timeout", None)
+        try:
+            http.timeout = timeout
+            return await http.request(route, json={**body, **fields})
+        finally:
+            if saved is not None:
+                http.timeout = saved
+
     async def _upload_qq_media(
         self,
         event: AstrMessageEvent,
@@ -3236,61 +3294,115 @@ class Main(Star):
         *,
         timeout: float = _QQ_UPLOAD_TIMEOUT,
     ) -> str:
-        """（官机专属）上传富媒体，拿 ``file_info``；**超时由插件自己定**。
+        """（官机专属）上传富媒体（**base64**），拿 ``file_info``；超时由插件自己定。
 
         :param timeout: 上传超时（秒）。默认见 ``_QQ_UPLOAD_TIMEOUT`` ——
             实测「冷却后首次上传」约 8 秒，25 秒留了三倍余量；而 botpy 的默认
             15 秒配上 tenacity 重试 3 次会让用户干等 90+ 秒。
         :return: ``file_info``；失败返回空串。**绝不抛异常**。
-        """
-        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
-        bot = getattr(event, "bot", None)
-        if raw is None or bot is None:
-            return ""
-        try:
-            from botpy.http import Route
-        except ImportError:
-            return ""
 
-        group_openid = getattr(raw, "group_openid", None)
-        openid = getattr(getattr(raw, "author", None), "user_openid", None)
+        本地图现在优先走 :meth:`_upload_qq_media_by_url`（快得多），
+        这条 base64 路是**降级兜底**。
+        """
         body = {
             "file_data": base64.b64encode(data).decode("ascii"),
             "file_type": file_type,
             "srv_send_msg": False,  # 只上传；发送由 _send_qq_payload 负责
         }
-        if group_openid:
-            body["group_openid"] = group_openid
-            route = Route(
-                "POST", "/v2/groups/{group_openid}/files", group_openid=group_openid
-            )
-        elif openid:
-            body["openid"] = openid
-            route = Route("POST", "/v2/users/{openid}/files", openid=openid)
-        else:
-            return ""
-
-        http = getattr(getattr(bot, "api", None), "_http", None)
-        if http is None:
-            return ""
-
-        # botpy 的 timeout 没有 per-request 参数，只能临时改实例属性、用完恢复。
-        # 官机上传是低频操作（一次点歌一次），撞车概率可忽略。
-        saved = getattr(http, "timeout", None)
         try:
-            http.timeout = timeout
-            result = await http.request(route, json=body)
+            result = await self._qq_upload_request(event, body, timeout)
         except Exception as exc:  # noqa: BLE001
             logger.info(f"[R插件][语音] 上传异常: {type(exc).__name__}: {exc}")
             return ""
-        finally:
-            if saved is not None:
-                http.timeout = saved
-
         if isinstance(result, dict):
             return str(result.get("file_info") or "")
         logger.info(f"[R插件][语音] 上传没返回 dict: {str(result)[:120]}")
         return ""
+
+    async def _upload_qq_media_by_url(
+        self,
+        event: AstrMessageEvent,
+        url: str,
+        file_type: int,
+        *,
+        timeout: float = _QQ_UPLOAD_TIMEOUT,
+    ) -> str:
+        """（官机专属）上传富媒体（**url**）—— 腾讯自己去下载，我们一个字节都不传。
+
+        官方接口支持 ``{"file_type": 1, "url": "..."}``。这是本地图提速的关键，
+        实测（2026-09-27，同一张图、同一台服务器）：
+
+            base64： 97KB  →  7.39s / 14.88s
+            url   ：784KB  →  3.47s   ← 体积大 8 倍，反而快了一倍多
+
+        体积越大差距越明显 —— 瓶颈在「境外机器 → 腾讯境内」的上传链路。
+
+        :return: ``file_info``；失败返回空串。**绝不抛异常**（调用方要能降级）。
+        """
+        body = {
+            "url": url,
+            "file_type": file_type,
+            "srv_send_msg": False,
+        }
+        try:
+            result = await self._qq_upload_request(event, body, timeout)
+        except Exception as exc:  # noqa: BLE001
+            logger.info(f"[R插件][本地直链] url 上传异常: {type(exc).__name__}: {exc}")
+            return ""
+        if isinstance(result, dict):
+            return str(result.get("file_info") or "")
+        logger.info(f"[R插件][本地直链] url 上传没返回 dict: {str(result)[:120]}")
+        return ""
+
+    async def _send_local_image(
+        self, event: AstrMessageEvent, png: bytes, *, suffix: str = ".png"
+    ) -> bool:
+        """（官机）本地图走「公网直链 → 腾讯自己下载」。成功返回 ``True``。
+
+        **成功时消息已由本方法发出**，调用方直接 ``return``；任何一环不满足或
+        失败都返回 ``False``，调用方照旧 ``yield Comp.Image.fromBytes(png)``。
+
+        为什么要绕过适配器：它对图片**只有 base64 一条路**（连 URL 也会先
+        ``to_base64()`` 再上传），所以想让腾讯自己去取，只能自己打接口 ——
+        跟按钮、语音是同一条路。
+
+        配置项 ``localPubBaseUrl`` **留空即关闭**（默认关闭），此时立刻返回
+        ``False``，行为与以前完全一致。
+        """
+        if not self._is_qq_official(event):
+            return False
+
+        base = str(self.conf_get("plugin.localPubBaseUrl", "") or "")
+        if not local_pub.normalize_base(base):
+            return False
+
+        t0 = time.monotonic()
+        url = await local_pub.publish(
+            png,
+            suffix=suffix,
+            base_url=base,
+            directory=str(self.conf_get("plugin.localPubDir", "") or ""),
+            ttl=int(self.conf_get("plugin.localPubTtl", local_pub.DEFAULT_TTL) or 0),
+        )
+        if not url:
+            return False
+
+        file_info = await self._upload_qq_media_by_url(event, url, _QQ_IMAGE_FILE_TYPE)
+        if not file_info:
+            logger.info(f"[R插件][本地直链] url 上传失败，退回 base64（{url[:64]}）")
+            return False
+
+        ok = await self._send_qq_payload(
+            event,
+            {"msg_type": 7, "media": {"file_info": file_info}, "content": None},
+        )
+        if ok:
+            logger.info(
+                f"[R插件][本地直链] {len(png) // 1024}KB 图已发出"
+                f"（上传+发送 {time.monotonic() - t0:.2f}s，腾讯自取）"
+            )
+        return ok
+
 
     async def _send_qq_voice(self, event: AstrMessageEvent, wav_path) -> bool:
         """（官机专属）本地转 silk → 上传 → 发语音条。
@@ -3454,7 +3566,7 @@ class Main(Star):
         png = await render_menu(self._plugin_version(), bot_name, bg_api)
         if png is None:
             yield event.plain_result(self._menu_text(bot_name, event))
-        else:
+        elif not await self._send_local_image(event, png):
             yield event.chain_result([Comp.Image.fromBytes(png)])
 
     async def _menu_image_md(self, event: AstrMessageEvent) -> str:
@@ -3673,7 +3785,9 @@ class Main(Star):
 
         png = await render_cookie_status(rows, stamp, bg_api)
         if png:
-            yield event.chain_result([Comp.Image.fromBytes(png)])
+            # 官机优先走公网直链（腾讯自取）；其他平台/未配置自动退回 base64
+            if not await self._send_local_image(event, png):
+                yield event.chain_result([Comp.Image.fromBytes(png)])
             return
         yield event.plain_result(self._cookie_text(rows, stamp))
 
@@ -3728,7 +3842,9 @@ class Main(Star):
         }
         png = await render_service_status(info, bg_api)
         if png:
-            yield event.chain_result([Comp.Image.fromBytes(png)])
+            # 官机优先走公网直链（腾讯自取）；其他平台/未配置自动退回 base64
+            if not await self._send_local_image(event, png):
+                yield event.chain_result([Comp.Image.fromBytes(png)])
             return
         yield event.plain_result(self._service_text(info))
 
@@ -4876,6 +4992,8 @@ class Main(Star):
         png = await render_song_list(shown, keyword, label, used, hint)
         if png:
             try:
+                if await self._send_local_image(event, png):
+                    return
                 yield event.chain_result([Comp.Image.fromBytes(png)])
                 return
             except Exception as exc:  # noqa: BLE001
