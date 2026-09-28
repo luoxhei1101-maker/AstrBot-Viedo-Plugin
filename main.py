@@ -3368,18 +3368,23 @@ class Main(Star):
 
         地址从哪来（细节见 ``core/local_pub.py``）：
 
-        1. **自动探测**（默认）—— 白嫖 AstrBot 自己的 WebUI 端口。它的认证
-           中间件只拦 ``/api``，而 WebUI 前端目录是静态目录，所以往里面写图
-           就能匿名访问到，**用户零配置**；
+        1. **自动探测** —— 白嫖 AstrBot 自己的 WebUI 端口。它的认证中间件只拦
+           ``/api``，而 WebUI 前端目录是静态目录，所以往里面写图就能匿名访问到，
+           不需要额外搭服务；
         2. ``localPubPublicUrl``（**AstrBot 访问地址**）—— 自动探测的地址不通
            （反代、宿主映射成了别的端口）时填它，只覆盖主机与端口；
         3. ``localPubBaseUrl``（完整前缀）—— 自己搭了 HTTP 服务时用。
 
-        把 ``localPubEnabled`` 关掉即完全停用（默认开）。
+        ⚠️ **只适合「腾讯能从公网访问到这台机器」的部署**（云服务器 + 端口对外）。
+        家用电脑 / 路由器 NAT 后面 / 纯内网这些情况，探测出来的地址外人根本连不上 ——
+        探测阶段却看不出来（本机自检走 127.0.0.1，公网 IP 探测拿到的是出口 IP），
+        每次发图都会白等一次腾讯的上传超时。所以 ``localPubEnabled`` **默认关闭**；
+        万一误开了，``core/local_pub`` 的失败熔断也会在连续 2 次取不到图后
+        自动停用它，改走普通上传。
         """
         if not self._is_qq_official(event):
             return False
-        if not self.conf_get("plugin.localPubEnabled", True):
+        if not self.conf_get("plugin.localPubEnabled", False):
             return False
 
         t0 = time.monotonic()
@@ -3402,8 +3407,13 @@ class Main(Star):
 
         file_info = await self._upload_qq_media_by_url(event, url, _QQ_IMAGE_FILE_TYPE)
         if not file_info:
+            # 腾讯取不到我们给的地址 —— 多半是这台机器没有公网 IP / 端口没对外开放。
+            # 记一笔：连续几次就熔断，免得用户每次发图都白等一次上传超时。
+            local_pub.note_transfer_failure()
             logger.info(f"[R插件][本地直链] url 上传失败，退回 base64（{url[:64]}）")
             return False
+        # 腾讯真的把图取走了 —— 说明环境是通的，清掉失败计数
+        local_pub.note_transfer_success()
 
         ok = await self._send_qq_payload(
             event,

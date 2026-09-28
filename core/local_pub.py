@@ -41,6 +41,23 @@ AstrBot 的 dashboard（默认 6185）**本来就映射到公网**（不然用�
 
 **好处**：用户零配置 —— 不用搭 nginx、不用开端口、不用填地址。
 
+⚠️ 前提：这台机器得让腾讯访问得到
+---------------------------------
+这条链路是「**腾讯服务器来下载我们的图**」，所以 AstrBot 所在的机器必须
+**有公网 IP，而且端口真的能从公网连进来**（云服务器一般满足；家用电脑、
+路由器 NAT 后面、纯内网部署都不满足）。
+
+**环境不对时，探测阶段是看不出来的**：静态目录自检走 ``127.0.0.1``（当然通），
+公网 IP 探测拿到的是**出口 IP**（也有值）—— 两个都"成功"，拼出来的地址外人
+却摸不到。代价是**每次发图都白等一次腾讯的上传超时**（25 秒）。
+
+所以设了两道防线：
+
+1. ``localPubEnabled`` **默认关闭** —— 环境合适才由用户主动打开；
+2. 就算误开了也不会一直踩坑 —— :func:`note_transfer_failure` 统计「腾讯取不到图」
+   的连续次数，够了就**自动停用** :data:`TRIP_SECONDS` 秒（30 分钟），
+   期间照旧走 base64 上传，并写一条日志说明原因。
+
 三种模式（优先级从高到低）
 --------------------------
 1. **自定义前缀**（``localPubBaseUrl`` 填了）：完全接管，不再拼 ``/rconsole-pub/``。
@@ -48,8 +65,9 @@ AstrBot 的 dashboard（默认 6185）**本来就映射到公网**（不然用�
 2. **手动 AstrBot 地址**（``localPubPublicUrl`` 填了）：只覆盖 ``scheme://host:port``
    这一段，路径仍由插件拼。**自动探测的地址不通时就填这个**，例如
    ``https://bot.example.com``（nginx 反代到 6185）或宿主映射成别的端口的情况。
-3. **自动探测**（都留空，默认）：探静态根 + 端口 + 公网 IP，并**自检**一次
-   （写探针文件 → HTTP 拉回来比对 → 删掉），全通过才启用。
+3. **自动探测**（都留空）：探静态根 + 端口 + 公网 IP。注意这一步只验证
+   「本机 ``127.0.0.1`` 能不能读到静态目录」，**验证不了公网可达性** ——
+   对外是否真通，靠 :func:`note_transfer_failure` 的熔断兜底。
 
 ⚠️ **任何一步失败都返回 ``None``**，调用方自动退回 base64 —— 绝不会出现
 「配了反而发不出图」。
@@ -320,20 +338,25 @@ async def resolve_target(
     :param public_url: **AstrBot 访问地址**（``scheme://host[:port]``）。
         只覆盖主机与端口，路径仍由插件拼。自动探测不通时填这个。
     :param directory: 落盘目录；留空走自动探测。
-    :param force: 忽略缓存重新探测。
+    :param force: 忽略缓存、也忽略熔断，强制重新探测。
     """
     global _CACHE, _CACHE_AT, _CACHE_KEY
 
     base_ov = normalize_base(base_url)
     pub_ov = strip_asset_path(public_url)
     dir_ov = (directory or "").strip()
+    now = time.monotonic()
+    key = f"{base_ov}|{pub_ov}|{dir_ov}"
+
+    # ---- ⓪ 熔断期：直接放弃，别让用户每次发图都白等一次上传超时 ----
+    if not force and is_tripped(key):
+        return None
 
     # ---- ① 自定义前缀：用户全权接管（容器内也验证不了外部地址，不做自检）----
     if base_ov:
+        _CACHE_KEY = key
         return PublishTarget(Path(dir_ov or LEGACY_DIR) / SUBDIR, base_ov)
 
-    now = time.monotonic()
-    key = f"{pub_ov}|{dir_ov}"
     if not force and _CACHE_AT and key == _CACHE_KEY:
         ttl = _CACHE_OK_TTL if _CACHE is not None else _CACHE_FAIL_TTL
         if now - _CACHE_AT < ttl:
@@ -374,12 +397,83 @@ async def _probe_target(public_url: str, dir_override: str) -> PublishTarget | N
     return PublishTarget(root / SUBDIR, base)
 
 
+# ----------------------------------------------------------------------
+# 失败熔断：环境其实没有公网可达时，别让用户每次都白等腾讯的超时
+# ----------------------------------------------------------------------
+#: 连续失败几次就熔断。
+#:
+#: 用 2 而不是 1：单次失败可能只是抖动（腾讯侧偶发抽风），一次就熔断会误伤；
+#: 而环境不对时是**每次必失败**，2 次足够认出来。
+FAIL_STREAK_THRESHOLD = 2
+
+#: 熔断时长（秒）。到点自动再试 —— 网络是波动的，不做永久禁用，
+#: 免得用户换了部署环境还得重启插件。
+TRIP_SECONDS = 1800.0
+
+_TRIP_KEY = ""      # 熔断时对应的配置指纹；配置一改就自动失效
+_TRIP_UNTIL = 0.0
+_FAIL_STREAK = 0
+_TRIP_WARNED = False
+
+
+def is_tripped(key: str = "") -> bool:
+    """是否处于熔断期。
+
+    ``key`` 是配置指纹。用户改了地址相关配置后指纹会变，熔断随之自动解除 ——
+    他多半正是在修这个问题，得给他立刻重试的机会。
+
+    ``_TRIP_KEY`` 为空（还没成功探测过就失败了）时视为**对所有 key 熔断**。
+    """
+    if time.monotonic() >= _TRIP_UNTIL:
+        return False
+    return not _TRIP_KEY or not key or key == _TRIP_KEY
+
+
+def note_transfer_failure() -> None:
+    """记一次「腾讯取不到我们给的图」。
+
+    **只该在 url 上传失败时调用** —— 那才是环境问题。写盘失败、探测失败都是
+    本机自己的毛病，不该算进来（算了会误熔断）。连续失败到
+    :data:`FAIL_STREAK_THRESHOLD` 就熔断。
+    """
+    global _FAIL_STREAK, _TRIP_UNTIL, _TRIP_KEY, _TRIP_WARNED
+    _FAIL_STREAK += 1
+    if _FAIL_STREAK < FAIL_STREAK_THRESHOLD:
+        return
+    _TRIP_KEY = _CACHE_KEY
+    _TRIP_UNTIL = time.monotonic() + TRIP_SECONDS
+    if not _TRIP_WARNED:
+        _TRIP_WARNED = True
+        logger.info(
+            f"[R插件][本地直链] 腾讯连续 {_FAIL_STREAK} 次取不到图，"
+            f"已自动停用直链 {int(TRIP_SECONDS // 60)} 分钟，改走普通上传。"
+            "常见原因：这台机器没有公网 IP，或面板端口没对公网开放"
+            "（家用电脑 / NAT / 内网部署都是这样）。"
+            "用不上的话，把插件配置里的「官机本地图提速」关掉就不会再有这段等待。"
+        )
+
+
+def note_transfer_success() -> None:
+    """记一次成功：清空失败计数、解除熔断。"""
+    global _FAIL_STREAK, _TRIP_UNTIL, _TRIP_KEY, _TRIP_WARNED
+    _FAIL_STREAK = 0
+    _TRIP_UNTIL = 0.0
+    _TRIP_KEY = ""
+    _TRIP_WARNED = False
+
+
+def failure_streak() -> int:
+    """当前连续失败次数（排查 / 测试用）。"""
+    return _FAIL_STREAK
+
+
 def reset_cache() -> None:
-    """清掉探测缓存（配置改了 / 测试用）。"""
+    """清掉探测缓存和熔断状态（配置改了 / 测试用）。"""
     global _CACHE, _CACHE_AT, _CACHE_KEY
     _CACHE = None
     _CACHE_AT = 0.0
     _CACHE_KEY = ""
+    note_transfer_success()
 
 
 # ----------------------------------------------------------------------

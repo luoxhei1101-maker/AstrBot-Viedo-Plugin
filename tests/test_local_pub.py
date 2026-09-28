@@ -22,6 +22,11 @@ WebUI 前端目录是静态目录 → 往里面写图就能匿名访问（用户
 - **cleanup 绝不能删 WebUI 的前端资源**（静态目录里还住着前端）
 - 5 个本地图调用点都要接上
 - ``_upload_qq_media`` 的 base64 路**必须保留**（降级兜底）
+- **``localPubEnabled`` 默认关闭**（2026-09-28）：这条路的硬前提是「腾讯能从公网
+  访问到这台机器」，家用机 / NAT / 内网不满足 —— 而不满足时探测阶段看不出来，
+  只会让每次发图白等一次上传超时。家用的部署形态必须留在 hint 里。
+- **失败熔断**：连续 2 次「腾讯取不到图」就自动停用 30 分钟，改走普通上传；
+  用户改了地址（配置指纹变化）立刻解除。
 """
 
 from __future__ import annotations
@@ -250,7 +255,11 @@ def part_d_wiring() -> None:
 
     sli = MAIN.split("async def _send_local_image(")[1].split("async def _send_qq_voice(")[0]
     check_true("先判是不是官机", "_is_qq_official(event)" in sli)
-    check_true("有总开关 localPubEnabled", 'conf_get("plugin.localPubEnabled", True)' in sli)
+    check_true("有总开关 localPubEnabled（**默认 False**）",
+               'conf_get("plugin.localPubEnabled", False)' in sli)
+    check_true("取图失败记一笔熔断（别每次白等 25 秒）",
+               "local_pub.note_transfer_failure()" in sli)
+    check_true("取图成功清计数", "local_pub.note_transfer_success()" in sli)
     check_true("走 resolve_target", "await local_pub.resolve_target(" in sli)
     check_true("读 AstrBot 访问地址", 'conf_get("plugin.localPubPublicUrl"' in sli)
     check_true("读自定义前缀", 'conf_get("plugin.localPubBaseUrl"' in sli)
@@ -286,7 +295,7 @@ def part_d_wiring() -> None:
 def part_e_schema() -> None:
     print("\n--- ⑤ schema ---")
     items = json.loads(SCHEMA)["plugin"]["items"]
-    for k, t, dv in (("localPubEnabled", "bool", True),
+    for k, t, dv in (("localPubEnabled", "bool", False),
                      ("localPubPublicUrl", "string", ""),
                      ("localPubBaseUrl", "string", ""),
                      ("localPubDir", "string", ""),
@@ -300,14 +309,87 @@ def part_e_schema() -> None:
                "AstrBot 访问地址" in items["localPubPublicUrl"]["description"])
     check_true("localPubPublicUrl 的 hint 提醒留空=自动探测",
                "留空 = 自动探测" in items["localPubPublicUrl"]["hint"])
-    check_true("localPubEnabled 默认开（零配置）",
-               items["localPubEnabled"]["default"] is True)
+    # ⚠️ 默认必须**关**（2026-09-28 改）：这功能的硬前提是「腾讯能从公网访问到
+    # AstrBot 所在机器」，云服务器满足，家用机 / NAT / 内网不满足 —— 而不满足时
+    # 探测阶段看不出来，只会让每次发图白等一次上传超时（最长 25 秒）。
+    check_true("**localPubEnabled 默认关闭**（家用机不该默认开）",
+               items["localPubEnabled"]["default"] is False)
+    check_true("描述里点明「仅云服务器建议开启」",
+               "云服务器" in items["localPubEnabled"]["description"])
+    check_true("hint 写了「必须保持关闭」的场景",
+               "必须保持关闭" in items["localPubEnabled"]["hint"])
+    check_true("hint 点名家用的部署形态（家用电脑 / NAT）",
+               "家用电脑" in items["localPubEnabled"]["hint"]
+               and "NAT" in items["localPubEnabled"]["hint"])
+    check_true("hint 说明「关掉只是慢一点，功能不受影响」",
+               "功能完全不受影响" in items["localPubEnabled"]["hint"])
+    check_true("hint 说明误开也有熔断兜底",
+               "自动停用" in items["localPubEnabled"]["hint"])
 
     check_true("源码 docstring 记了实测对比", "7.39s" in PUB_SRC and "3.47s" in PUB_SRC)
     check_true("源码 docstring 点明适配器只有 base64",
                "file_data" in PUB_SRC and "没有 url 字段" in PUB_SRC)
     check_true("源码 docstring 写清了「白嫖 WebUI 端口」的原理",
                "auth_middleware" in PUB_SRC and 'startswith("/api")' in PUB_SRC)
+
+    # 适用前提（2026-09-28 补）—— 这就是「默认关闭」的理由，必须留在文档里
+    check_true("docstring 点明前提：机器得让腾讯访问得到",
+               "家用电脑" in PUB_SRC and "公网 IP" in PUB_SRC)
+    check_true("docstring 说明环境不对时探测阶段看不出来",
+               "探测阶段是看不出来的" in PUB_SRC)
+    check_true("docstring 记了两道防线（默认关 + 熔断）",
+               "默认关闭" in PUB_SRC and "note_transfer_failure" in PUB_SRC)
+
+
+# ======================================================================
+# ⑥ 失败熔断
+# ======================================================================
+def part_f_trip() -> None:
+    print("\n--- ⑥ 失败熔断（环境不可达时别每次白等） ---")
+    local_pub.reset_cache()
+    check("连续 2 次就熔断", local_pub.FAIL_STREAK_THRESHOLD, 2)
+    check("熔断 30 分钟", local_pub.TRIP_SECONDS, 1800.0)
+    check("初始没熔断", local_pub.is_tripped(""), False)
+    check("初始计数 0", local_pub.failure_streak(), 0)
+
+    with tempfile.TemporaryDirectory() as td:
+        # 先正常解析一次（模拟「探测成功、拿到配置指纹」）
+        t0 = asyncio.run(local_pub.resolve_target(
+            base_url="http://1.2.3.4:18900", directory=str(td)))
+        check_true("先成功解析一次（记下配置指纹）", t0 is not None)
+        key = local_pub._CACHE_KEY
+        check_true("配置指纹已记录", bool(key))
+
+        local_pub.note_transfer_failure()
+        check("失败 1 次还不熔断（可能只是抖动）", local_pub.is_tripped(key), False)
+        check("计数 1", local_pub.failure_streak(), 1)
+
+        local_pub.note_transfer_failure()
+        check("**失败 2 次 → 熔断**", local_pub.is_tripped(key), True)
+        check("计数 2", local_pub.failure_streak(), 2)
+
+        # 熔断期里再解析：直接 None —— 不探测、不白等
+        t1 = asyncio.run(local_pub.resolve_target(
+            base_url="http://1.2.3.4:18900", directory=str(td)))
+        check("**熔断期 resolve_target 直接返回 None**", t1, None)
+
+        # 用户改了地址（指纹变）→ 立刻解除，给他重试机会
+        t2 = asyncio.run(local_pub.resolve_target(
+            base_url="http://9.9.9.9:1", directory=str(td)))
+        check_true("改配置（指纹变）→ 解除熔断、重新可用", t2 is not None)
+
+    # 成功一次就清零
+    local_pub.note_transfer_success()
+    check("成功后计数清零", local_pub.failure_streak(), 0)
+    check("成功后解除熔断", local_pub.is_tripped("k"), False)
+
+    # reset_cache 也清熔断
+    local_pub._CACHE_KEY = "k"
+    local_pub.note_transfer_failure()
+    local_pub.note_transfer_failure()
+    check("（重置前确实是熔断态）", local_pub.is_tripped("k"), True)
+    local_pub.reset_cache()
+    check("reset_cache 也清熔断", local_pub.is_tripped("k"), False)
 
 
 if __name__ == "__main__":
@@ -316,6 +398,7 @@ if __name__ == "__main__":
     part_c_publish()
     part_d_wiring()
     part_e_schema()
+    part_f_trip()
     print()
     print(f"===== {PASS} 通过 / {FAIL} 失败 =====")
     sys.exit(1 if FAIL else 0)
