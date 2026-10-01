@@ -15,6 +15,8 @@
 - 番剧 ``duration`` 是**毫秒** -> 秒的换算
 - 三道闸门：未登录 / 超时长 / 未开「番剧直接解析」-> 全都只发信息不下载
 - 放行时：时长上限走 ``biliBangumiDuration``（不是 8 分钟的 ``biliDuration``）
+- **超时长只回一句提示**（不带链接、不带标题，v1.6.25 按用户要求简化）；
+  「未登录 / 没开开关」属于**引导**，才带作品信息与链接
 - 画质走「番剧独立画质」``biliBangumiResolution``
 - 播放地址走普通接口 —— 源码里**不允许**出现 ``pgc/player/web/playurl``
 """
@@ -171,13 +173,27 @@ def test_gate() -> None:
     r = _bangumi_gate(make_pgc(), Ctx(), "")
     check(r is not None and r.rejected, "未登录 -> 拒绝")
     check(bool(r and "登录" in (r.error or "")), "未登录的提示里点明要登录")
-    check(bool(r and r.title and r.extra.get("web_url")), "拒绝时带上作品信息与链接")
+    check(
+        bool(r and r.title and r.extra.get("web_url")),
+        "**未登录这类「引导」才带作品信息与链接**（超时长不带，见 ②）",
+    )
 
     # ② 超时长（默认上限 1800s）-> 拦
     ctx = Ctx(**{"bili.biliBangumiDuration": 1800, "bili.biliBangumiDirect": True})
     r = _bangumi_gate(make_pgc(duration=2000), ctx, "SESSDATA=x")
     check(r is not None and r.rejected, "单集 2000s > 上限 1800s -> 拒绝")
-    check(bool(r and "biliBangumiDuration" in (r.error or "")), "超时长提示里给出可改的配置项名")
+    check(
+        bool(r and "当前作品时长超过管理员设置时长" in (r.error or "")),
+        "超时长文案统一成「超过管理员设置时长」（v1.6.25 简化）",
+    )
+    check(
+        bool(r and "biliBangumiDuration" not in (r.error or "")),
+        "超时长不再提配置项名",
+    )
+    check(
+        bool(r and not r.extra.get("web_url") and not r.title),
+        "**超时长不带链接也不带标题**",
+    )
 
     # 超时长与开关同时成立时，**超时长优先**（原版也是先判超限就 return）
     r = _bangumi_gate(
@@ -186,7 +202,7 @@ def test_gate() -> None:
         "SESSDATA=x",
     )
     check(
-        bool(r and "超过上限" in (r.error or "")),
+        bool(r and "超过管理员设置时长" in (r.error or "")),
         "超时长优先于「未开开关」",
     )
 

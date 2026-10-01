@@ -244,13 +244,17 @@ def _bangumi_gate(pgc: dict[str, Any], ctx: ResolverContext, cookie: str) -> Res
 
     max_duration = _as_int(ctx.conf("bili.biliBangumiDuration", 1800))
     if max_duration > 0 and pgc["duration"] > max_duration:
+        # 超时长只回一句（跟普通视频对齐）—— 不带标题、不带番剧页链接。
+        # 另外两条闸门（未登录 / 没开开关）是**引导**，所以照旧带链接。
         return ResolveResult.reject(
             "哔哩哔哩",
-            f"番剧单集 {_fmt_duration(pgc['duration'])} 超过上限 "
-            f"{_fmt_duration(max_duration)}，未下载"
-            f"（可在插件配置里调整 biliBangumiDuration）",
-            **meta,
-            extra={**extra, "duration": pgc["duration"], "max_duration": max_duration},
+            f"当前作品时长超过管理员设置时长（{_fmt_duration(pgc['duration'])}"
+            f" / 上限 {_fmt_duration(max_duration)}）",
+            extra={
+                "ep_id": pgc["ep_id"],
+                "duration": pgc["duration"],
+                "max_duration": max_duration,
+            },
         )
 
     if not bool(ctx.conf("bili.biliBangumiDirect", False)):
@@ -426,33 +430,21 @@ async def resolve_bilibili(link: str, ctx: ResolverContext) -> ResolveResult:
         return ResolveResult.fail("哔哩哔哩", "没能取到 cid")
 
     # 时长限制（原版配置项 biliDuration，默认 480 秒）。
-    # 用 reject() 而不是 fail()：作品信息已经拿到了，只是按配置不下载。
-    # 并且把标题 / UP主 / 作品页链接一并带出去 —— 只回一句「超时长」的话，
-    # 用户知道为什么不发了，却不知道该去哪看（原版就是只发文字、连链接都没有）。
+    # 用 reject() 而不是 fail()：被拦的原因用户该知道（不然他只看到「发了链接
+    # 机器人没反应」）。但**只回一句提示** —— 不带标题 / UP主 / 作品页链接：
+    # 群里那条原消息本身就带着链接，再复述一遍是纯噪音
+    #（v1.6.25 按用户要求简化，此前会附上作品页链接与作品信息）。
     #
     # 番剧走的是**另一条上限** biliBangumiDuration（默认 1800 秒，一集 24 分钟），
     # 已经在 _bangumi_gate 里判过，这里跳过，免得拿 8 分钟去卡番剧。
     max_duration = 0 if pgc else _as_int(ctx.conf("bili.biliDuration", 480))
     if max_duration > 0 and duration > max_duration:
-        watch_url = f"https://www.bilibili.com/video/{bvid}"
-        # 多 P 视频对齐本插件「默认取第一 P」的行为，链接也指到第一 P
-        if len(pages) > 1:
-            watch_url += "?p=1"
         return ResolveResult.reject(
             "哔哩哔哩",
-            f"视频时长 {_fmt_duration(duration)} 超过上限 "
-            f"{_fmt_duration(max_duration)}，未下载"
-            f"（可在插件配置里调整 biliDuration）",
-            title=title,
-            author=author,
-            desc=desc,
-            extra={
-                # 注意发的是**作品页链接**（稳定、点开就能看），
-                # 不是带签名的 CDN 媒体直链（那个几小时就过期，还没法直接播）。
-                "web_url": watch_url,
-                "duration": duration,
-                "max_duration": max_duration,
-            },
+            f"当前作品时长超过管理员设置时长（{_fmt_duration(duration)}"
+            f" / 上限 {_fmt_duration(max_duration)}）",
+            # 只留结构化数据（供将来做统计/排查），不给任何要展示的文本
+            extra={"duration": duration, "max_duration": max_duration},
         )
 
     base_info = {

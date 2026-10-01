@@ -159,20 +159,19 @@ def part_a_bili_reject() -> None:
         "9分35秒" in (res.error or "") and "575s" not in (res.error or ""),
     )
     check_true("时长超限: 文案里带着上限值", "8分0秒" in (res.error or ""))
-    check_true("时长超限: 文案指明可调整", "biliDuration" in (res.error or ""))
-    # ---- 下面几条是 v1.6.4 的核心：不能只回一句「超时长」就完事 ----
-    check("时长超限: 带上了标题", res.title, "测试视频")
-    check("时长超限: 带上了 UP 主", res.author, "测试UP")
-    check(
-        "时长超限: extra 里给出了作品页链接（关键）",
-        (res.extra or {}).get("web_url"),
-        "https://www.bilibili.com/video/BV1xx411c7mD",
-    )
-    check_true(
-        "时长超限: 链接是作品页而不是带签名的 CDN 媒体直链",
-        "bilibili.com/video/" in str((res.extra or {}).get("web_url"))
-        and "upgcxcode" not in str((res.extra or {}).get("web_url")),
-    )
+
+    # ---- v1.6.25 起按用户要求简化：**只回一句时长提示** ----
+    check_true("时长超限: 文案点明「超过管理员设置时长」",
+               "当前作品时长超过管理员设置时长" in (res.error or ""))
+    check_true("时长超限: 不再提配置项名（群友改不了，是噪音）",
+               "biliDuration" not in (res.error or ""))
+    check_true("时长超限: **不带作品页链接**（原消息里就有）",
+               not (res.extra or {}).get("web_url"))
+    check_true("时长超限: 不带标题", not res.title)
+    check_true("时长超限: 不带 UP 主", not res.author)
+    check_true("时长超限: 结构化时长照旧留着（duration / max_duration）",
+               (res.extra or {}).get("duration") == 575
+               and (res.extra or {}).get("max_duration") == 480)
 
 
 def part_a_source_guard() -> None:
@@ -193,19 +192,23 @@ def part_a_source_guard() -> None:
         "日志区分「按规则未发送」与「解析失败」",
         "按规则未发送" in src and "解析失败" in src,
     )
-    # 时长限制那处必须用 reject 而不是 fail，且要把链接带出来
+    # 时长限制那处必须用 reject（而不是 fail），但**不带链接**（v1.6.25 简化）
     bsrc = (_ROOT / "platforms" / "bilibili.py").read_text(encoding="utf-8")
     check_true(
         "B 站时长超限用的是 ResolveResult.reject(",
         "ResolveResult.reject(" in bsrc,
     )
     check_true(
-        "B 站 reject 时带上了 web_url（作品页链接）",
-        '"web_url": watch_url' in bsrc,
+        "**时长超限不再附作品页链接**（watch_url 已删干净）",
+        "watch_url" not in bsrc,
     )
     check_true(
-        "B 站 reject 时带上了 title / author",
-        "title=title," in bsrc and "author=author," in bsrc,
+        "超时长文案统一（普通视频 + 番剧，同一句）",
+        bsrc.count("当前作品时长超过管理员设置时长") == 2,
+    )
+    check_true(
+        "「未登录 / 没开开关」仍带链接（那是引导，不是噪音）",
+        '"web_url": pgc["web_url"]' in bsrc,
     )
 
 
